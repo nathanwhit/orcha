@@ -38,6 +38,11 @@ func (o *Orchestrator) SpawnSession(managerSessionID string, spec SpawnSpec) (*m
 	if spec.Agent == "" {
 		spec.Agent = o.defaultAgent()
 	}
+	// Coding workers run one-shot (do the task and finish), which is what drives
+	// the worker-complete -> manager-notify handoff.
+	if spec.Mode == "" && needsIsolatedWorkspace(spec.Role) {
+		spec.Mode = model.ModeNoninteractive
+	}
 	var out *model.Session
 	err = o.withManagerLock(mgr.ObjectiveID, managerSessionID, func() error {
 		s, err := o.CreateSession(spec)

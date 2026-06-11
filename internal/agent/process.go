@@ -121,11 +121,13 @@ func (p *ProcessProvider) launch(ctx context.Context, spec Spec) (Handle, <-chan
 		return nil, nil, err
 	}
 
-	// Deliver the opening prompt over stdin using the same framing as steering.
-	// For an interactive provider the stdin pipe stays open so the session is a
-	// single durable process you keep talking to. For a non-interactive provider
-	// (e.g. a one-shot `codex exec`) we close stdin after the prompt so the tool
-	// sees EOF and runs.
+	// A session is one-shot when the provider is non-interactive (e.g. codex
+	// exec) OR the specific session is marked noninteractive (e.g. a worker that
+	// should do its task and finish). One-shot sessions get stdin closed after
+	// the prompt so the agent sees EOF, completes, and exits (-> EventDone).
+	// Interactive sessions keep stdin open so they stay steerable.
+	oneShot := !p.interactive || spec.Mode == model.ModeNoninteractive
+
 	if spec.Prompt != "" && proc.Stdin() != nil {
 		initial := spec.Prompt
 		if spec.CompactContext != "" {
@@ -134,11 +136,11 @@ func (p *ProcessProvider) launch(ctx context.Context, spec Spec) (Handle, <-chan
 		framed := p.encodeInput(initial)
 		go func() {
 			_, _ = io.WriteString(proc.Stdin(), framed)
-			if !p.interactive {
+			if oneShot {
 				_ = proc.Stdin().Close()
 			}
 		}()
-	} else if !p.interactive && proc.Stdin() != nil {
+	} else if oneShot && proc.Stdin() != nil {
 		_ = proc.Stdin().Close()
 	}
 
@@ -185,7 +187,7 @@ func (p *ProcessProvider) launch(ctx context.Context, spec Spec) (Handle, <-chan
 		close(out)
 	}()
 
-	return &processHandle{sessionID: spec.SessionID, pid: proc.Pid(), interactive: p.interactive}, out, nil
+	return &processHandle{sessionID: spec.SessionID, pid: proc.Pid(), interactive: p.interactive && !oneShot}, out, nil
 }
 
 // SendInput writes a steering line to the process stdin.

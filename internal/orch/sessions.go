@@ -262,6 +262,38 @@ func (o *Orchestrator) finishRun(r *run, success bool) {
 		return
 	}
 	_ = o.emit(r.sessionID, model.MsgSystem, model.KindStatus, "session "+string(next), nil)
+	o.notifyManagerOfChild(r.sessionID, success)
+}
+
+// notifyManagerOfChild re-prompts the objective's manager when a worker it
+// spawned finishes, so the manager can review, publish a PR, spawn follow-on
+// work, or mark the objective done. This closes the worker -> manager handoff
+// loop that makes the team self-driving.
+func (o *Orchestrator) notifyManagerOfChild(childID string, success bool) {
+	child, err := o.st.GetSession(childID)
+	if err != nil || child.Role == model.RoleManager || child.ParentSessionID == "" {
+		return
+	}
+	mgr, err := o.st.GetSession(child.ParentSessionID)
+	if err != nil || mgr.Role != model.RoleManager || mgr.Status.IsTerminal() {
+		return
+	}
+	outcome := "succeeded"
+	if !success {
+		outcome = "failed"
+	}
+	summary := child.LatestSummary
+	if summary == "" {
+		summary = child.CurrentActivity
+	}
+	msg := fmt.Sprintf(
+		"Worker session %s (%q) %s. Summary: %s\n"+
+			"Its isolated checkout holds the changes. If they look right, publish a PR with "+
+			"publish_pr(session_id=%q, title=..., body=...). Then spawn any follow-on work or "+
+			"mark_objective_done when the objective is complete.",
+		child.ID, child.Title, outcome, summary, child.ID)
+	o.audit(child.ObjectiveID, mgr.ID, "manager_notified", "worker "+outcome, model.JSONMap{"child": child.ID})
+	_ = o.Steer(context.Background(), mgr.ID, msg)
 }
 
 // cleanupRun releases locks always and the target slot exactly once per run —

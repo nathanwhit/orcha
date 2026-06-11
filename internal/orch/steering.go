@@ -126,9 +126,22 @@ func (o *Orchestrator) buildSpec(sess *model.Session, ws *model.Workspace, tgt *
 		if spec.Prompt != "" {
 			spec.Prompt = managerSystemPreamble + "\n\n" + spec.Prompt
 		}
+	} else if needsIsolatedWorkspace(sess.Role) {
+		// Coding workers run one-shot in an isolated checkout: let them edit files.
+		spec.PermissionMode = o.cfg.WorkerPermissionMode
+		if spec.Prompt != "" {
+			spec.Prompt = workerSystemPreamble + "\n\n" + spec.Prompt
+		}
 	}
 	return spec
 }
+
+// workerSystemPreamble orients a one-shot worker.
+const workerSystemPreamble = `You are a worker on an engineering team, running in an
+isolated checkout of the repository. Do the assigned task directly: read the
+relevant code, make the changes, and keep them small and correct. Do NOT push,
+open a PR, or use git remote operations — the orchestrator handles publishing.
+When done, briefly summarize what you changed.`
 
 // managerSystemPreamble orients the manager agent toward the tool surface and
 // the operating rules from the spec.

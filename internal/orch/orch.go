@@ -48,6 +48,11 @@ type Config struct {
 	// launched with the orcha tools wired in at <base>/mcp/<sessionID>. Empty
 	// disables manager tool-calling.
 	ManagerMCPBaseURL string
+	// WorkerPermissionMode is the agent permission mode for coding worker
+	// sessions running in isolated checkouts (default "acceptEdits" — edits only;
+	// "bypassPermissions" also lets them build/test/commit). Managers always run
+	// with "default".
+	WorkerPermissionMode string
 }
 
 // Orchestrator coordinates sessions across targets and providers.
@@ -88,6 +93,9 @@ func (o *Orchestrator) SetWorkspacePreparer(p *workspace.Preparer) { o.preparer 
 func New(st *store.Store, cfg Config) *Orchestrator {
 	if cfg.Guards == (GuardConfig{}) {
 		cfg.Guards = DefaultGuards()
+	}
+	if cfg.WorkerPermissionMode == "" {
+		cfg.WorkerPermissionMode = "acceptEdits"
 	}
 	return &Orchestrator{
 		st:        st,

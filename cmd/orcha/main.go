@@ -41,6 +41,8 @@ func main() {
 		schedEvery  = flag.Duration("schedule-interval", 2*time.Second, "scheduler idle tick interval")
 		mcpBase     = flag.String("mcp-base-url", "http://127.0.0.1:8080", "base URL where the manager MCP tool surface is reachable by agent CLIs")
 		showVersion = flag.Bool("version", false, "print version and exit")
+		workerPerm  = flag.String("worker-permissions", "acceptEdits", "agent permission mode for coding workers: acceptEdits (edits only) or bypassPermissions (also build/test/commit)")
+		prMonitor   = flag.Duration("pr-monitor", 0, "poll open PRs for new comments/checks this often and spawn follow-ups (0 = off; needs -real-forge)")
 	)
 	flag.Parse()
 
@@ -56,9 +58,10 @@ func main() {
 	defer st.Close()
 
 	o := orch.New(st, orch.Config{
-		Guards:            orch.DefaultGuards(),
-		ProviderFallback:  []model.AgentKind{model.AgentClaude, model.AgentCodex},
-		ManagerMCPBaseURL: *mcpBase,
+		Guards:               orch.DefaultGuards(),
+		ProviderFallback:     []model.AgentKind{model.AgentClaude, model.AgentCodex},
+		ManagerMCPBaseURL:    *mcpBase,
+		WorkerPermissionMode: *workerPerm,
 	})
 	switch {
 	case *fakeAgents:
@@ -103,6 +106,23 @@ func main() {
 	sched := orch.NewScheduler(o, *schedEvery, *maxConc)
 	o.SetNotify(sched.Wake)
 	go sched.Run(ctx)
+
+	// PR monitor: poll open PRs for new comments/checks and spawn follow-ups.
+	if *prMonitor > 0 {
+		go func() {
+			t := time.NewTicker(*prMonitor)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					o.SyncOpenPRs(ctx)
+				}
+			}
+		}()
+		log.Printf("PR monitor on (every %s)", *prMonitor)
+	}
 
 	srv := api.New(o)
 	mux := http.NewServeMux()

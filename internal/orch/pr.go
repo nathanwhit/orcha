@@ -53,6 +53,15 @@ func (o *Orchestrator) PublishPR(ctx context.Context, sessionID string, spec Pub
 	} else if !ok {
 		return nil, fmt.Errorf("%w: repo %s not found", ErrUnsafePublish, repo)
 	}
+	// Commit any edits the worker made but didn't commit (acceptEdits agents can
+	// edit but not run git), so there's a diff to publish.
+	commitMsg := spec.CommitMessage
+	if commitMsg == "" {
+		commitMsg = "orcha: " + spec.Title
+	}
+	if _, err := o.forge.CommitAll(ctx, ws.Path, commitMsg); err != nil {
+		return nil, err
+	}
 	if ok, err := o.forge.HasDiff(ctx, ws.Path); err != nil {
 		return nil, err
 	} else if !ok {

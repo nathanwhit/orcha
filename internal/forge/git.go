@@ -116,6 +116,28 @@ func (g *GitForge) resolveBase(ctx context.Context, dir string) (string, error) 
 	return "", nil
 }
 
+// CommitAll stages everything and commits if the tree is dirty. It sets an
+// author/committer so commits work on a freshly-prepared checkout without
+// per-machine git identity config.
+func (g *GitForge) CommitAll(ctx context.Context, workspacePath, message string) (bool, error) {
+	if _, err := g.git(ctx, workspacePath, "add", "-A"); err != nil {
+		return false, err
+	}
+	// `diff --cached --quiet` exits non-zero when there is something staged.
+	if _, err := g.git(ctx, workspacePath, "diff", "--cached", "--quiet"); err == nil {
+		return false, nil // nothing to commit
+	}
+	if message == "" {
+		message = "orcha: apply changes"
+	}
+	if _, err := g.git(ctx, workspacePath,
+		"-c", "user.name=orcha", "-c", "user.email=orcha@local",
+		"commit", "-m", message); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // PushBranch pushes the workspace's branch to origin. force is only set when the
 // caller has explicitly chosen and recorded a force push.
 func (g *GitForge) PushBranch(ctx context.Context, repo, workspacePath, branch string, force bool) (string, error) {

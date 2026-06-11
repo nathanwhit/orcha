@@ -36,6 +36,10 @@ type Forge interface {
 	// PushBranch pushes the workspace branch to the repo. force must be
 	// explicitly requested and is recorded with a reason by the caller.
 	PushBranch(ctx context.Context, repo, workspacePath, branch string, force bool) (headSHA string, err error)
+	// CommitAll stages and commits any uncommitted changes in the workspace with
+	// message, returning whether a commit was made (false if the tree was clean).
+	// Used so a worker that edits files but doesn't commit still yields a diff.
+	CommitAll(ctx context.Context, workspacePath, message string) (committed bool, err error)
 	// OpenPR opens a pull request.
 	OpenPR(ctx context.Context, repo, branch, base, title, body string) (OpenResult, error)
 	// GetPRState fetches the current PR state from the host.
@@ -61,12 +65,18 @@ type Fake struct {
 	Pushes    []PushRecord
 	ForcePush []PushRecord
 	Comments  []CommentRecord
+	Commits   []CommitRecord
 }
 
 // PushRecord captures a push for assertions.
 type PushRecord struct {
 	Repo, Branch, WorkspacePath string
 	Force                       bool
+}
+
+// CommitRecord captures a commit for assertions.
+type CommitRecord struct {
+	WorkspacePath, Message string
 }
 
 // CommentRecord captures a comment for assertions.
@@ -120,6 +130,13 @@ func (f *Fake) HasDiff(_ context.Context, workspacePath string) (bool, error) {
 		return v, nil
 	}
 	return true, nil // default: has changes
+}
+
+func (f *Fake) CommitAll(_ context.Context, workspacePath, message string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Commits = append(f.Commits, CommitRecord{WorkspacePath: workspacePath, Message: message})
+	return true, nil
 }
 
 func (f *Fake) PushBranch(_ context.Context, repo, workspacePath, branch string, force bool) (string, error) {

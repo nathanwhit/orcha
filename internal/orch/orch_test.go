@@ -916,3 +916,85 @@ func TestLive_RemoteTmux(t *testing.T) {
 	}
 	t.Fatal("did not see output from remote tmux pane")
 }
+
+// ---- autonomy: worker completion notifies the manager ----
+
+func TestOrch_WorkerCompletionNotifiesManager(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+
+	managerGot := make(chan string, 4)
+	script := func(ctx context.Context, spec agent.Spec, inputs <-chan string, out chan<- agent.Event) {
+		if spec.Role == model.RoleManager {
+			out <- agent.Event{Kind: agent.EventText, Source: model.MsgAgent, Content: "manager ready"}
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case m := <-inputs:
+					managerGot <- m
+				}
+			}
+		}
+		// worker: do the task and finish.
+		out <- agent.Event{Kind: agent.EventText, Source: model.MsgAgent, Content: "worker did the thing"}
+		out <- agent.Event{Kind: agent.EventDone, Success: true}
+	}
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, script))
+
+	_, mgr, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "do it", Agent: model.AgentClaude})
+	if _, err := o.StartRun(context.Background(), mgr.ID); err != nil {
+		t.Fatalf("start manager: %v", err)
+	}
+	waitFor(t, func() bool { m, _ := st.GetSession(mgr.ID); return m.Status == model.SessionRunning })
+
+	// Manager spawns a worker; it should be one-shot (noninteractive).
+	worker, err := o.SpawnSession(mgr.ID, SpawnSpec{Role: model.RoleImplementer, Title: "do X", Goal: "g"})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if worker.Mode != model.ModeNoninteractive {
+		t.Fatalf("coding worker should be one-shot, got mode %s", worker.Mode)
+	}
+
+	run, err := o.StartRun(context.Background(), worker.ID)
+	if err != nil {
+		t.Fatalf("start worker: %v", err)
+	}
+	run.Wait() // worker completes -> finishRun -> notifies manager
+
+	select {
+	case msg := <-managerGot:
+		if !strings.Contains(msg, "publish_pr") || !strings.Contains(msg, worker.ID) {
+			t.Fatalf("manager notification missing publish guidance / worker id: %q", msg)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("manager was not notified of worker completion")
+	}
+	_ = o.Cancel(mgr.ID, true)
+}
+
+func TestPublishPR_CommitsUncommittedChanges(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 2)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	f := forge.NewFake()
+	o.SetForge(f)
+
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	s, _ := o.CreateSession(SpawnSpec{ObjectiveID: obj.ID, Role: model.RoleImplementer, Agent: model.AgentClaude})
+	ws := &model.Workspace{ObjectiveID: obj.ID, SessionID: s.ID, TargetID: "t", Kind: model.WorkspaceIsolated,
+		ProjectPath: "owner/repo", VCS: model.VCSGit, Path: "/w/x", BranchName: "orcha/x", Status: model.WorkspaceReady}
+	_ = st.CreateWorkspace(ws)
+	_, _ = st.UpdateSessionRuntime(s.ID, func(se *model.Session) { se.WorkspaceID = ws.ID })
+
+	if _, err := o.PublishPR(context.Background(), s.ID, PublishSpec{Title: "add health", Body: "b", CommitMessage: "feat: health"}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if len(f.Commits) != 1 || f.Commits[0].Message != "feat: health" {
+		t.Fatalf("expected a commit before push, got %+v", f.Commits)
+	}
+	if len(f.Pushes) != 1 {
+		t.Fatalf("expected one push, got %d", len(f.Pushes))
+	}
+}
