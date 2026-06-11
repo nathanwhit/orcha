@@ -210,7 +210,9 @@ async function addMachine(e){
   capacity_sessions:parseInt(document.getElementById('m-cap').value||'2')};
  const msg=document.getElementById('mmsg');msg.textContent='checking…';
  const r=await fetch('/api/targets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
- if(r.ok){const d=await r.json();msg.style.color=d.status==='online'?'#3fb950':'#f85149';msg.textContent=d.status;refresh();}
+ if(r.ok){const d=await r.json();const st=d.target?d.target.status:'?';const miss=(d.doctor&&d.doctor.missing)||[];
+  msg.style.color=st==='online'?'#3fb950':'#f85149';
+  msg.textContent=st+(miss.length?(' — missing: '+miss.join(', ')):'');refresh();}
  else{msg.style.color='#f85149';msg.textContent='error '+r.status;}
  return false;
 }

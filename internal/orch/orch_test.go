@@ -824,19 +824,29 @@ func TestOrch_ManagerGetsNoWorkspace(t *testing.T) {
 
 // ---- remote targets ----
 
-func TestOrch_RegisterLocalTarget_HealthCheckOnline(t *testing.T) {
+func TestOrch_RegisterLocalTarget_DoctorGatesStatus(t *testing.T) {
 	o, _ := newTestOrch(t)
-	tgt, err := o.RegisterTarget(context.Background(), &model.Target{
+	tgt, rep, err := o.RegisterTarget(context.Background(), &model.Target{
 		Name: "box", Kind: model.TargetLocal, WorkRoot: t.TempDir(), CapacitySessions: 2,
 	})
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if tgt.Status != model.TargetOnline {
-		t.Fatalf("local target should be online after health check, got %s", tgt.Status)
+	// Connectivity, git, and a writable work root are always satisfiable locally;
+	// tmux and an agent CLI depend on the host. Status must agree with the doctor.
+	if rep.OK != (tgt.Status == model.TargetOnline) {
+		t.Fatalf("status %s disagrees with doctor.OK=%v (missing=%v)", tgt.Status, rep.OK, rep.Missing)
 	}
 	if tgt.LastSeenAt == nil {
-		t.Fatal("last_seen_at should be stamped by the health check")
+		t.Fatal("last_seen_at should be stamped")
+	}
+	// Connectivity and git must pass locally.
+	byName := map[string]Check{}
+	for _, c := range rep.Checks {
+		byName[c.Name] = c
+	}
+	if !byName["connectivity"].OK || !byName["git"].OK || !byName["workroot"].OK {
+		t.Fatalf("basic local checks failed: %+v", rep.Checks)
 	}
 }
 
@@ -872,7 +882,7 @@ func TestLive_RemoteTmux(t *testing.T) {
 	o, st := newTestOrch(t)
 	o.RegisterProvider(agent.NewTmuxShell(model.AgentClaude))
 
-	tgt, err := o.RegisterTarget(context.Background(), &model.Target{
+	tgt, rep, err := o.RegisterTarget(context.Background(), &model.Target{
 		Name: "remote", Kind: model.TargetSSH, Host: host, User: os.Getenv("ORCHA_SSH_TEST_USER"),
 		WorkRoot: "/tmp/orcha-work", CapacitySessions: 2,
 	})
@@ -880,7 +890,7 @@ func TestLive_RemoteTmux(t *testing.T) {
 		t.Fatalf("register remote: %v", err)
 	}
 	if tgt.Status != model.TargetOnline {
-		t.Fatalf("remote target offline: %+v", tgt)
+		t.Fatalf("remote target offline (doctor missing %v): %+v", rep.Missing, tgt)
 	}
 
 	s := &model.Session{Role: model.RoleImplementer, Agent: model.AgentClaude, Status: model.SessionQueued,

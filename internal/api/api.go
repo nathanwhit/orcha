@@ -52,6 +52,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/targets/{id}/enable", s.targetMode(model.TargetOnline))
 	mux.HandleFunc("POST /api/targets/{id}/disable", s.targetMode(model.TargetDisabled))
 	mux.HandleFunc("POST /api/targets/{id}/healthcheck", s.healthcheckTarget)
+	mux.HandleFunc("POST /api/targets/{id}/doctor", s.doctorTarget)
 
 	mux.HandleFunc("GET /api/pull-requests", s.listPRs)
 	mux.HandleFunc("GET /api/pull-requests/{id}", s.getPR)
@@ -337,12 +338,22 @@ func (s *Server) createTarget(w http.ResponseWriter, r *http.Request) {
 		WorkRoot: req.WorkRoot, Labels: req.Labels, CapacitySessions: req.CapacitySessions,
 		Metadata: meta,
 	}
-	created, err := s.o.RegisterTarget(r.Context(), t)
+	created, doctor, err := s.o.RegisterTarget(r.Context(), t)
 	if err != nil {
 		writeErr(w, httpStatusFor(err), err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, created)
+	writeJSON(w, http.StatusCreated, map[string]any{"target": created, "doctor": doctor})
+}
+
+// doctorTarget re-runs readiness diagnostics on a target.
+func (s *Server) doctorTarget(w http.ResponseWriter, r *http.Request) {
+	rep, err := s.o.DoctorTarget(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, httpStatusFor(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
 }
 
 func (s *Server) healthcheckTarget(w http.ResponseWriter, r *http.Request) {

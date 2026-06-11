@@ -186,10 +186,22 @@ func TestCreateTarget_RegistersAndHealthChecks(t *testing.T) {
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create status=%d, want 201", resp.StatusCode)
 	}
-	var created model.Target
-	_ = json.NewDecoder(resp.Body).Decode(&created)
-	if created.Status != model.TargetOnline {
-		t.Fatalf("target should be online, got %s", created.Status)
+	var body struct {
+		Target model.Target `json:"target"`
+		Doctor struct {
+			OK     bool `json:"ok"`
+			Checks []struct {
+				Name string `json:"name"`
+			} `json:"checks"`
+		} `json:"doctor"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	// The create response carries a doctor report so missing tools surface now.
+	if len(body.Doctor.Checks) == 0 {
+		t.Fatal("expected a doctor report in the create response")
+	}
+	if body.Doctor.OK != (body.Target.Status == model.TargetOnline) {
+		t.Fatalf("status %s disagrees with doctor.ok=%v", body.Target.Status, body.Doctor.OK)
 	}
 	// It shows up in the targets list.
 	var targets []model.Target

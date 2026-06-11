@@ -13,7 +13,7 @@ import (
 // or offline otherwise. SSH targets read host/user/work_root plus ssh_port /
 // identity_file / bootstrap from metadata. Registration nudges the scheduler so
 // queued work can land on the new machine.
-func (o *Orchestrator) RegisterTarget(ctx context.Context, t *model.Target) (*model.Target, error) {
+func (o *Orchestrator) RegisterTarget(ctx context.Context, t *model.Target) (*model.Target, *DoctorReport, error) {
 	if t.Kind == "" {
 		t.Kind = model.TargetLocal
 	}
@@ -24,12 +24,26 @@ func (o *Orchestrator) RegisterTarget(ctx context.Context, t *model.Target) (*mo
 		t.WorkRoot = "/tmp/orcha/work"
 	}
 	if err := o.st.CreateTarget(t); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	o.audit("", "", "target_registered", "registered "+string(t.Kind)+" target "+t.Name, model.JSONMap{"target_id": t.ID})
-	_ = o.HealthCheckTarget(ctx, t.ID) // best-effort; sets online/offline
+
+	// Diagnose readiness (connectivity + tools) and gate online/offline on it, so
+	// an unreachable or under-provisioned box isn't scheduled onto.
+	rep, err := o.DoctorTarget(ctx, t.ID)
+	if err != nil {
+		_ = o.st.MarkTargetSeen(t.ID, model.TargetOffline)
+		updated, _ := o.st.GetTarget(t.ID)
+		return updated, rep, nil
+	}
+	status := model.TargetOffline
+	if rep.OK {
+		status = model.TargetOnline
+	}
+	_ = o.st.MarkTargetSeen(t.ID, status)
 	o.notifyChange()
-	return o.st.GetTarget(t.ID)
+	updated, _ := o.st.GetTarget(t.ID)
+	return updated, rep, nil
 }
 
 // HealthCheckTarget bootstraps and pings a target, updating its status and

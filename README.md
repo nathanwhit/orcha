@@ -159,13 +159,18 @@ curl -X POST localhost:8080/api/targets -H 'Content-Type: application/json' -d '
 }'
 ```
 
-Registration runs the bootstrap command and a health check, marking the target
-`online`/`offline` (re-check with `POST /api/targets/:id/healthcheck`). Direct
-work to a box by pinning: `spawn_session(..., target: "gpu-box")`, or
-`drain`/`disable` to take it out of rotation. **Requirements on the remote
-host:** `tmux`, `git`, the agent CLIs (`claude`/`codex`) and their auth, plus
-key-based SSH (the executor uses `BatchMode=yes`). Verified locally; a live
-remote test is gated behind `ORCHA_SSH_TEST_HOST`.
+Registration runs a **doctor**: one round trip over the executor that checks
+connectivity, `tmux`, `git`, a writable work root, at least one agent CLI
+(`claude`/`codex`), and `gh` (informational). The target only goes `online` if
+all required checks pass — so a reachable-but-under-provisioned box is caught at
+registration, not on the first session. The `POST /api/targets` response and the
+dashboard form both show exactly what's missing; re-run anytime with
+`POST /api/targets/:id/doctor`. Direct work to a box by pinning:
+`spawn_session(..., target: "gpu-box")`, or `drain`/`disable` to take it out of
+rotation. **Requirements on the remote host:** `tmux`, `git`, the agent CLIs and
+their auth (the doctor checks presence, not auth), plus key-based SSH (the
+executor uses `BatchMode=yes`). Verified locally; a live remote test is gated
+behind `ORCHA_SSH_TEST_HOST`.
 
 ## Interactive tmux sessions (you can watch and take over)
 
