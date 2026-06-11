@@ -52,10 +52,22 @@ type Orchestrator struct {
 	providers map[model.AgentKind]agent.Provider
 	forge     forge.Forge
 	preparer  *workspace.Preparer
+	notify    func() // optional scheduler wake hook
 
 	mu     sync.Mutex
 	guards map[string]*guardState // keyed by session id
 	runs   map[string]*run        // active runs keyed by session id
+}
+
+// SetNotify installs a hook called whenever schedulable state changes (a
+// session is created, freed capacity, or reached a terminal state). The
+// scheduler uses this to react promptly instead of only on its tick.
+func (o *Orchestrator) SetNotify(fn func()) { o.notify = fn }
+
+func (o *Orchestrator) notifyChange() {
+	if o.notify != nil {
+		o.notify()
+	}
 }
 
 // SetForge installs the code-host/VCS backend used by the PR workflow.

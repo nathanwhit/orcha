@@ -14,6 +14,7 @@ var sessionTransitions = map[SessionStatus]map[SessionStatus]bool{
 	SessionQueued: {
 		SessionStarting:        true,
 		SessionWaitingCapacity: true,
+		SessionWaitingUser:     true, // parked: blocked on the user before ever starting
 		SessionCanceled:        true,
 		SessionFailed:          true,
 	},
@@ -38,11 +39,12 @@ var sessionTransitions = map[SessionStatus]map[SessionStatus]bool{
 		SessionSucceeded: true,
 	},
 	SessionWaitingCapacity: {
-		SessionQueued:   true,
-		SessionStarting: true,
-		SessionRunning:  true,
-		SessionCanceled: true,
-		SessionFailed:   true,
+		SessionQueued:      true,
+		SessionStarting:    true,
+		SessionRunning:     true,
+		SessionWaitingUser: true, // parked: blocked on the user while awaiting capacity
+		SessionCanceled:    true,
+		SessionFailed:      true,
 	},
 	// Terminal states: no outgoing transitions.
 	SessionSucceeded: {},

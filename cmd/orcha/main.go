@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/nathanwhit/orcha/internal/agent"
 	"github.com/nathanwhit/orcha/internal/api"
@@ -30,6 +31,8 @@ func main() {
 		claudeBin  = flag.String("claude-bin", "claude", "path to the claude CLI")
 		codexBin   = flag.String("codex-bin", "codex", "path to the codex CLI")
 		realForge  = flag.Bool("real-forge", false, "use the real git+gh forge (needs real workspace checkouts) instead of the in-memory fake")
+		maxConc    = flag.Int("max-concurrent", 8, "max simultaneously active sessions across all targets")
+		schedEvery = flag.Duration("schedule-interval", 2*time.Second, "scheduler idle tick interval")
 	)
 	flag.Parse()
 
@@ -71,15 +74,21 @@ func main() {
 	// Ensure a local target exists so sessions can be scheduled out of the box.
 	ensureLocalTarget(st)
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// The scheduler driver makes the system self-driving: creating an objective
+	// starts its manager, which spawns workers that the scheduler then runs.
+	sched := orch.NewScheduler(o, *schedEvery, *maxConc)
+	o.SetNotify(sched.Wake)
+	go sched.Run(ctx)
+
 	srv := api.New(o)
 	mux := http.NewServeMux()
 	mux.Handle("/api/", srv.Handler())
 	mux.HandleFunc("/", dashboard)
 
 	httpSrv := &http.Server{Addr: *addr, Handler: mux}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	go func() {
 		log.Printf("orcha listening on %s (db=%s)", *addr, *dbPath)

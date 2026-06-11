@@ -99,6 +99,14 @@ branches off the freshly-fetched base — never a stale local copy. PR follow-up
 workspaces check out the PR branch at its fresh head. Preparation runs through
 the `exec.Executor`, so it works identically on local and SSH targets.
 
-**Still not built:** a continuous **scheduler driver loop** that pulls queued
-sessions and starts them (the selection/lock/capacity primitives exist; the loop
-that calls them on a tick does not).
+## Scheduler driver
+
+`orch.Scheduler` makes the system self-driving: each tick it finds runnable
+queued/waiting-capacity sessions and starts them, respecting declared
+dependencies, a global concurrency cap, per-target capacity, workspace/PR-branch
+locks, and provider usage. It reacts promptly via a wake hook
+(`SetNotify`) when work is created or completes, falling back to an idle tick.
+Creating an objective therefore auto-starts its manager, which spawns workers
+the scheduler then runs — no manual restart. Dependencies that fail/cancel cancel
+their dependents; exhausted providers park the session and ask the user instead
+of respinning. Flags: `-max-concurrent`, `-schedule-interval`.

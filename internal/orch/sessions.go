@@ -23,11 +23,24 @@ type SpawnSpec struct {
 	Prompt          string
 	WorkspaceID     string
 	Target          TargetRequest
-	Metadata        model.JSONMap
+	// Dependencies are session ids that must succeed before this session is
+	// eligible to run. The scheduler enforces them.
+	Dependencies []string
+	Metadata     model.JSONMap
 }
 
 // CreateSession persists a new queued session. It does not start it.
 func (o *Orchestrator) CreateSession(spec SpawnSpec) (*model.Session, error) {
+	if len(spec.Dependencies) > 0 {
+		if spec.Metadata == nil {
+			spec.Metadata = model.JSONMap{}
+		}
+		deps := make([]any, len(spec.Dependencies))
+		for i, d := range spec.Dependencies {
+			deps[i] = d
+		}
+		spec.Metadata["depends_on"] = deps
+	}
 	sess := &model.Session{
 		ObjectiveID:     spec.ObjectiveID,
 		ParentSessionID: spec.ParentSessionID,
@@ -48,6 +61,7 @@ func (o *Orchestrator) CreateSession(spec SpawnSpec) (*model.Session, error) {
 		return nil, err
 	}
 	o.audit(spec.ObjectiveID, sess.ID, "session_created", "created "+string(spec.Role)+" session", nil)
+	o.notifyChange() // new runnable work
 	return sess, nil
 }
 
@@ -249,6 +263,7 @@ func (o *Orchestrator) cleanupRun(r *run) {
 		o.releaseSessionLocks(sess)
 		if sess.Status.IsTerminal() {
 			o.releaseTargetSlot(sess)
+			o.notifyChange() // freed a slot / unblocked dependents
 		}
 	})
 }
@@ -286,6 +301,7 @@ func (o *Orchestrator) Cancel(sessionID string, cancelChildren bool) error {
 		// No live run; release directly since no cleanup will fire.
 		o.releaseSessionLocks(sess)
 		o.releaseTargetSlot(sess)
+		o.notifyChange()
 	}
 	_ = o.emit(sessionID, model.MsgSystem, model.KindStatus, "session canceled", nil)
 	o.audit(sess.ObjectiveID, sessionID, "session_canceled", "canceled by request", nil)

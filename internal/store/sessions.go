@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"strings"
 
 	"github.com/nathanwhit/orcha/internal/model"
 )
@@ -85,6 +86,42 @@ func (s *Store) ListSessionsByObjective(objectiveID string) ([]*model.Session, e
 // ListChildSessions returns sessions whose parent is the given session.
 func (s *Store) ListChildSessions(parentID string) ([]*model.Session, error) {
 	return s.querySessions(`SELECT `+sessionCols+` FROM sessions WHERE parent_session_id = ?`, parentID)
+}
+
+// ListSessionsByStatuses returns sessions in any of the given statuses, oldest
+// first. Used by the scheduler to find runnable work without loading terminal
+// sessions.
+func (s *Store) ListSessionsByStatuses(statuses ...model.SessionStatus) ([]*model.Session, error) {
+	if len(statuses) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(statuses))
+	args := make([]any, len(statuses))
+	for i, st := range statuses {
+		placeholders[i] = "?"
+		args[i] = string(st)
+	}
+	q := `SELECT ` + sessionCols + ` FROM sessions WHERE status IN (` +
+		strings.Join(placeholders, ",") + `) ORDER BY created_at ASC`
+	return s.querySessions(q, args...)
+}
+
+// CountSessionsByStatuses returns how many sessions are in any of the given
+// statuses.
+func (s *Store) CountSessionsByStatuses(statuses ...model.SessionStatus) (int, error) {
+	if len(statuses) == 0 {
+		return 0, nil
+	}
+	placeholders := make([]string, len(statuses))
+	args := make([]any, len(statuses))
+	for i, st := range statuses {
+		placeholders[i] = "?"
+		args[i] = string(st)
+	}
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE status IN (`+
+		strings.Join(placeholders, ",")+`)`, args...).Scan(&n)
+	return n, err
 }
 
 func (s *Store) querySessions(q string, args ...any) ([]*model.Session, error) {
