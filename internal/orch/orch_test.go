@@ -1,0 +1,491 @@
+package orch
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/nathanwhit/orcha/internal/agent"
+	"github.com/nathanwhit/orcha/internal/forge"
+	"github.com/nathanwhit/orcha/internal/model"
+	"github.com/nathanwhit/orcha/internal/store"
+)
+
+func newTestOrch(t *testing.T) (*Orchestrator, *store.Store) {
+	t.Helper()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	o := New(st, Config{Guards: DefaultGuards(), ProviderFallback: []model.AgentKind{model.AgentClaude, model.AgentCodex}})
+	return o, st
+}
+
+func addTarget(t *testing.T, st *store.Store, name string, kind model.TargetKind, cap int) *model.Target {
+	t.Helper()
+	tgt := &model.Target{Name: name, Kind: kind, Status: model.TargetOnline, WorkRoot: "/work/" + name, CapacitySessions: cap}
+	if err := st.CreateTarget(tgt); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	return tgt
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("condition not met within deadline")
+}
+
+// ---- guards ----
+
+func TestSameErrorLoopPauses(t *testing.T) {
+	o, st := newTestOrch(t)
+	s := &model.Session{Role: model.RoleImplementer, Agent: model.AgentClaude, Status: model.SessionRunning}
+	_ = st.CreateSession(s)
+
+	var tripped bool
+	for i := 0; i < o.cfg.Guards.MaxSameErrorRetries; i++ {
+		if err := o.CheckError(s.ID, "boom: same error"); err != nil {
+			tripped = true
+			_ = o.PauseSession(s.ID, err.Error())
+		}
+	}
+	if !tripped {
+		t.Fatal("repeated identical error should trip the guard")
+	}
+	reloaded, _ := st.GetSession(s.ID)
+	if reloaded.Status != model.SessionWaitingUser {
+		t.Fatalf("session should be paused (waiting_user), got %s", reloaded.Status)
+	}
+	// A question is opened so the user/manager can give direction.
+	qs, _ := st.ListOpenQuestions()
+	if len(qs) == 0 {
+		t.Fatal("a guard pause should open a question")
+	}
+}
+
+func TestNoProgressLoopPauses(t *testing.T) {
+	o, st := newTestOrch(t)
+	s := &model.Session{Role: model.RoleImplementer, Agent: model.AgentClaude, Status: model.SessionRunning}
+	_ = st.CreateSession(s)
+
+	var tripped bool
+	for i := 0; i < o.cfg.Guards.MaxNoProgressTurns; i++ {
+		if err := o.CheckNoProgress(s.ID); err != nil {
+			tripped = true
+			_ = o.PauseSession(s.ID, err.Error())
+		}
+	}
+	if !tripped {
+		t.Fatal("no-progress turns should trip the guard")
+	}
+	// Progress resets the counter.
+	o.RecordProgress(s.ID)
+	if err := o.CheckNoProgress(s.ID); err != nil {
+		t.Fatal("counter should reset after progress")
+	}
+}
+
+// ---- usage exhaustion ----
+
+func TestUsageExhaustion_SwitchesProvider(t *testing.T) {
+	o, st := newTestOrch(t)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	o.RegisterProvider(agent.NewFake(model.AgentCodex, true, nil))
+
+	// Mark the preferred provider exhausted.
+	_ = st.UpsertUsage(&model.UsageBucket{Provider: string(model.AgentClaude), State: model.UsageExhausted, WindowStart: st.Now(), WindowEnd: st.Now()})
+
+	kind, err := o.SelectProvider(model.AgentClaude)
+	if err != nil {
+		t.Fatalf("expected fallback, got error %v", err)
+	}
+	if kind != model.AgentCodex {
+		t.Fatalf("expected fallback to codex, got %s", kind)
+	}
+}
+
+func TestUsageExhaustion_AsksUserWhenNoFallback(t *testing.T) {
+	o, st := newTestOrch(t)
+	o.cfg.ProviderFallback = nil
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	_ = st.UpsertUsage(&model.UsageBucket{Provider: string(model.AgentClaude), State: model.UsageExhausted, WindowStart: st.Now(), WindowEnd: st.Now()})
+
+	if _, err := o.SelectProvider(model.AgentClaude); err != ErrProviderExhausted {
+		t.Fatalf("expected ErrProviderExhausted, got %v", err)
+	}
+}
+
+// ---- steering ----
+
+func TestInteractiveSteering_ReachesSession(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 2)
+
+	// Script echoes any steering input back into the transcript as agent text.
+	echo := func(ctx context.Context, spec agent.Spec, inputs <-chan string, out chan<- agent.Event) {
+		out <- agent.Event{Kind: agent.EventText, Source: model.MsgAgent, Content: "ready"}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case msg := <-inputs:
+				out <- agent.Event{Kind: agent.EventText, Source: model.MsgAgent, Content: "ack:" + msg}
+			}
+		}
+	}
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, echo))
+
+	s := &model.Session{Role: model.RoleImplementer, Agent: model.AgentClaude, Status: model.SessionQueued}
+	_ = st.CreateSession(s)
+	if _, err := o.StartRun(context.Background(), s.ID); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if err := o.Steer(context.Background(), s.ID, "please refactor"); err != nil {
+		t.Fatalf("steer: %v", err)
+	}
+	waitFor(t, func() bool {
+		msgs, _ := st.MessagesAfter(s.ID, 0, 100)
+		for _, m := range msgs {
+			if m.Content == "ack:please refactor" {
+				return true
+			}
+		}
+		return false
+	})
+	_ = o.Cancel(s.ID, false)
+}
+
+func TestNonInteractiveSteering_CancelsAndResumes(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 2)
+
+	script := func(ctx context.Context, spec agent.Spec, inputs <-chan string, out chan<- agent.Event) {
+		out <- agent.Event{Kind: agent.EventText, Source: model.MsgAgent, Content: "phase"}
+		<-ctx.Done() // honor process-group cancellation
+	}
+	fake := agent.NewFake(model.AgentCodex, false, script) // non-interactive
+	o.RegisterProvider(fake)
+
+	s := &model.Session{Role: model.RoleImplementer, Agent: model.AgentCodex, Status: model.SessionQueued}
+	_ = st.CreateSession(s)
+	if _, err := o.StartRun(context.Background(), s.ID); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitFor(t, func() bool { s2, _ := st.GetSession(s.ID); return s2.Status == model.SessionRunning })
+
+	if err := o.Steer(context.Background(), s.ID, "change direction"); err != nil {
+		t.Fatalf("steer: %v", err)
+	}
+	// Non-interactive steering cancels the current process and resumes, while
+	// preserving the logical session identity (not terminal).
+	if !fake.WasCanceled(s.ID) {
+		t.Fatal("non-interactive steering should cancel the current process")
+	}
+	resumed := fake.Resumed()
+	found := false
+	for _, id := range resumed {
+		if id == s.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("session should have been resumed, resumed=%v", resumed)
+	}
+	reloaded, _ := st.GetSession(s.ID)
+	if reloaded.Status.IsTerminal() {
+		t.Fatalf("session identity must be preserved (non-terminal), got %s", reloaded.Status)
+	}
+	_ = o.Cancel(s.ID, false)
+}
+
+// ---- remote target ----
+
+func TestRemoteTarget_StreamsLogs(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "remote", model.TargetSSH, 1)
+
+	script := func(ctx context.Context, spec agent.Spec, inputs <-chan string, out chan<- agent.Event) {
+		for i := 0; i < 3; i++ {
+			out <- agent.Event{Kind: agent.EventStdout, Content: "build log line"}
+		}
+		out <- agent.Event{Kind: agent.EventDone, Success: true}
+	}
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, script))
+
+	s := &model.Session{Role: model.RoleImplementer, Agent: model.AgentClaude, Status: model.SessionQueued}
+	_ = st.CreateSession(s)
+	run, err := o.StartRun(context.Background(), s.ID)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	run.Wait()
+
+	msgs, _ := st.MessagesAfter(s.ID, 0, 100)
+	var stdout int
+	for _, m := range msgs {
+		if m.Source == model.MsgStdout {
+			stdout++
+		}
+	}
+	if stdout != 3 {
+		t.Fatalf("expected 3 streamed stdout log rows, got %d", stdout)
+	}
+	reloaded, _ := st.GetSession(s.ID)
+	if reloaded.Status != model.SessionSucceeded {
+		t.Fatalf("session should succeed, got %s", reloaded.Status)
+	}
+}
+
+func TestRemoteCancel_KillsProcessGroup(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "remote", model.TargetSSH, 1)
+
+	blocked := make(chan struct{})
+	script := func(ctx context.Context, spec agent.Spec, inputs <-chan string, out chan<- agent.Event) {
+		out <- agent.Event{Kind: agent.EventText, Source: model.MsgAgent, Content: "running"}
+		close(blocked)
+		<-ctx.Done() // models a long-running remote process group
+	}
+	fake := agent.NewFake(model.AgentClaude, true, script)
+	o.RegisterProvider(fake)
+
+	s := &model.Session{Role: model.RoleImplementer, Agent: model.AgentClaude, Status: model.SessionQueued}
+	_ = st.CreateSession(s)
+	run, err := o.StartRun(context.Background(), s.ID)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	<-blocked
+
+	if err := o.Cancel(s.ID, false); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	run.Wait()
+
+	if !fake.WasCanceled(s.ID) {
+		t.Fatal("cancel should kill the remote process group")
+	}
+	reloaded, _ := st.GetSession(s.ID)
+	if reloaded.Status != model.SessionCanceled {
+		t.Fatalf("session should be canceled, got %s", reloaded.Status)
+	}
+	// Slot must be released back to the target.
+	tgt, _ := st.ListTargets()
+	if tgt[0].AvailableSessions != tgt[0].CapacitySessions {
+		t.Fatalf("target slot not released: avail=%d cap=%d", tgt[0].AvailableSessions, tgt[0].CapacitySessions)
+	}
+}
+
+// A completion that arrives after cancellation must not resurrect the session.
+func TestLateCompletion_DoesNotResurrect(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 1)
+
+	release := make(chan struct{})
+	started := make(chan struct{})
+	script := func(ctx context.Context, spec agent.Spec, inputs <-chan string, out chan<- agent.Event) {
+		out <- agent.Event{Kind: agent.EventText, Source: model.MsgAgent, Content: "go"}
+		close(started)
+		<-release // ignores ctx on purpose: a late completion racing cancellation
+		out <- agent.Event{Kind: agent.EventDone, Success: true}
+	}
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, script))
+
+	s := &model.Session{Role: model.RoleImplementer, Agent: model.AgentClaude, Status: model.SessionQueued}
+	_ = st.CreateSession(s)
+	run, _ := o.StartRun(context.Background(), s.ID)
+	<-started
+
+	_ = o.Cancel(s.ID, false)
+	close(release) // now the (late) success completion fires
+	run.Wait()
+
+	reloaded, _ := st.GetSession(s.ID)
+	if reloaded.Status != model.SessionCanceled {
+		t.Fatalf("late completion resurrected canceled session to %s", reloaded.Status)
+	}
+}
+
+// ---- PRs ----
+
+func TestObjective_OpensTwoIndependentPRs(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	o.SetForge(forge.NewFake())
+
+	obj, _, err := o.CreateObjective(NewObjectiveSpec{Title: "Broad work", Prompt: "do two things"})
+	if err != nil {
+		t.Fatalf("create objective: %v", err)
+	}
+
+	publish := func(title string) *model.PullRequest {
+		s, err := o.CreateSession(SpawnSpec{ObjectiveID: obj.ID, Role: model.RoleImplementer, Agent: model.AgentClaude})
+		if err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		if _, err := o.PrepareIsolatedWorkspace(s.ID, "octo/repo", "/src/repo", "main"); err != nil {
+			t.Fatalf("workspace: %v", err)
+		}
+		pr, err := o.PublishPR(context.Background(), s.ID, PublishSpec{Title: title, Body: "b", CommitMessage: "c"})
+		if err != nil {
+			t.Fatalf("publish %s: %v", title, err)
+		}
+		return pr
+	}
+
+	pr1 := publish("First slice")
+	// Publishing the first PR must not block the objective.
+	reloaded, _ := st.GetObjective(obj.ID)
+	if reloaded.Status != model.ObjectiveActive {
+		t.Fatalf("objective should still be active after first PR, got %s", reloaded.Status)
+	}
+	pr2 := publish("Second slice")
+
+	if pr1.ID == pr2.ID || pr1.Number == pr2.Number {
+		t.Fatal("two distinct PRs expected")
+	}
+	prs, _ := st.ListPRsByObjective(obj.ID)
+	if len(prs) != 2 {
+		t.Fatalf("expected 2 PRs under objective, got %d", len(prs))
+	}
+}
+
+func TestPublishPR_RejectsWhenNoDiff(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 2)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	f := forge.NewFake()
+	o.SetForge(f)
+
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	s, _ := o.CreateSession(SpawnSpec{ObjectiveID: obj.ID, Role: model.RoleImplementer, Agent: model.AgentClaude})
+	ws, _ := o.PrepareIsolatedWorkspace(s.ID, "octo/repo", "/src/repo", "main")
+	f.SetDiff(ws.Path, false) // mechanical safety: no diff -> refuse to publish
+
+	if _, err := o.PublishPR(context.Background(), s.ID, PublishSpec{Title: "t", Body: "b"}); err == nil {
+		t.Fatal("publish should fail when workspace has no diff")
+	}
+}
+
+func TestUpdatePR_MergedCannotPush(t *testing.T) {
+	o, st := newTestOrch(t)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	f := forge.NewFake()
+	o.SetForge(f)
+
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "octo/repo", Number: 7, Branch: "b",
+		BaseBranch: "main", Status: model.PROpen, ChecksState: model.ChecksPassing}
+	_ = st.CreatePR(pr)
+	// Host reports the PR is merged.
+	f.SetPRState("octo/repo", 7, forge.PRState{Number: 7, Status: "merged", ChecksState: "passing"})
+
+	if _, err := o.UpdatePR(context.Background(), pr.ID, UpdateSpec{SessionID: "x"}); err == nil {
+		t.Fatal("must not push to a merged PR")
+	}
+	if len(f.Pushes) != 0 {
+		t.Fatalf("no push should have happened, got %d", len(f.Pushes))
+	}
+}
+
+func TestUpdatePR_ClosedCreatesManagerDecision(t *testing.T) {
+	o, st := newTestOrch(t)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	f := forge.NewFake()
+	o.SetForge(f)
+
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "octo/repo", Number: 9, Branch: "b",
+		BaseBranch: "main", Status: model.PROpen}
+	_ = st.CreatePR(pr)
+	f.SetPRState("octo/repo", 9, forge.PRState{Number: 9, Status: "closed"})
+
+	if _, err := o.UpdatePR(context.Background(), pr.ID, UpdateSpec{SessionID: "x"}); err == nil {
+		t.Fatal("closed PR should not push")
+	}
+	// A manager decision point (question) must be opened.
+	qs, _ := st.ListQuestionsByObjective(obj.ID)
+	if len(qs) == 0 {
+		t.Fatal("closed PR should create a manager decision question")
+	}
+}
+
+func TestUpdatePR_ForcePushRequiresReason(t *testing.T) {
+	o, st := newTestOrch(t)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	o.SetForge(forge.NewFake())
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "octo/repo", Number: 3, Branch: "b", BaseBranch: "main", Status: model.PROpen}
+	_ = st.CreatePR(pr)
+	if _, err := o.UpdatePR(context.Background(), pr.ID, UpdateSpec{SessionID: "x", Force: true}); err == nil {
+		t.Fatal("force push without a reason must be rejected")
+	}
+}
+
+// ---- feedback ----
+
+func TestPRFeedback_SpawnsFollowupWhileWorkerRuns(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	o.SetForge(forge.NewFake())
+
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+
+	// An unrelated worker is busy.
+	worker := &model.Session{ObjectiveID: obj.ID, Role: model.RoleImplementer, Agent: model.AgentClaude, Status: model.SessionRunning}
+	_ = st.CreateSession(worker)
+
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "octo/repo", Number: 11, Branch: "feature",
+		BaseBranch: "main", HeadSHA: "sha1", Status: model.PROpen}
+	_ = st.CreatePR(pr)
+
+	// CI failure feedback arrives.
+	if err := o.IngestFeedback(context.Background(), pr.ID, []model.PRFeedback{
+		{Kind: model.FeedbackCheckFailure, ExternalID: "run-1", Body: "tests failed", Actionable: true},
+	}); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	spawned, err := o.ProcessFeedback(context.Background(), pr.ID)
+	if err != nil {
+		t.Fatalf("process feedback: %v", err)
+	}
+	if len(spawned) != 1 {
+		t.Fatalf("expected 1 follow-up session, got %d", len(spawned))
+	}
+	fu := spawned[0]
+	if fu.Role != model.RoleCIFollowup {
+		t.Fatalf("expected ci_followup role, got %s", fu.Role)
+	}
+	if fu.Metadata["pr_id"] != pr.ID {
+		t.Fatal("follow-up must be attached to the PR")
+	}
+	// The follow-up uses a PR-branch workspace.
+	ws, _ := st.GetWorkspace(fu.WorkspaceID)
+	if ws.Kind != model.WorkspacePRBranch || ws.BranchName != pr.Branch {
+		t.Fatalf("follow-up should use the PR branch workspace, got %+v", ws)
+	}
+	// The unrelated worker continues running — feedback didn't wait on it.
+	w2, _ := st.GetSession(worker.ID)
+	if w2.Status != model.SessionRunning {
+		t.Fatalf("unrelated worker should still be running, got %s", w2.Status)
+	}
+
+	// Re-polling the same external event is deduped (no second follow-up).
+	_ = o.IngestFeedback(context.Background(), pr.ID, []model.PRFeedback{
+		{Kind: model.FeedbackCheckFailure, ExternalID: "run-1", Body: "tests failed", Actionable: true},
+	})
+	again, _ := o.ProcessFeedback(context.Background(), pr.ID)
+	if len(again) != 0 {
+		t.Fatalf("duplicate feedback should not spawn another follow-up, got %d", len(again))
+	}
+}
