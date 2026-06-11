@@ -28,6 +28,14 @@ func (o *Orchestrator) PrepareIsolatedWorkspace(ctx context.Context, sessionID, 
 	if err != nil {
 		return nil, err
 	}
+	return o.prepareIsolatedOn(ctx, sess, target, repo, cloneURL, baseRef)
+}
+
+// prepareIsolatedOn prepares an isolated workspace for a session on a specific
+// target — used when the session has already been placed, so the checkout lands
+// on the same machine the agent runs on.
+func (o *Orchestrator) prepareIsolatedOn(ctx context.Context, sess *model.Session, target *model.Target, repo, cloneURL, baseRef string) (*model.Workspace, error) {
+	sessionID := sess.ID
 	if baseRef == "" {
 		baseRef = "main"
 	}
@@ -92,4 +100,56 @@ func roleShort(r model.SessionRole) string {
 		return string(r)[:4]
 	}
 	return string(r)
+}
+
+// needsIsolatedWorkspace reports whether a role does code work that should get
+// its own fresh checkout. Managers work from summaries; PR follow-ups get a
+// PR-branch workspace via the feedback path instead.
+func needsIsolatedWorkspace(role model.SessionRole) bool {
+	switch role {
+	case model.RoleImplementer, model.RoleReviewer, model.RoleValidator, model.RoleCustom:
+		return true
+	}
+	return false
+}
+
+// ensureWorkspace auto-prepares an isolated checkout for a coding session on its
+// already-chosen target, if it has none yet. The repo is taken from the session
+// metadata (a spawn override) or inherited from the objective. It is a no-op
+// when no preparer is configured, the role doesn't need a checkout, or no repo
+// is known — so non-code work and offline/test runs are unaffected.
+//
+// target must be the session's placed target so the checkout and the agent run
+// on the same machine.
+func (o *Orchestrator) ensureWorkspace(ctx context.Context, sess *model.Session, target *model.Target) error {
+	if sess.WorkspaceID != "" || o.preparer == nil || target == nil {
+		return nil
+	}
+	if !needsIsolatedWorkspace(sess.Role) {
+		return nil
+	}
+	repo, cloneURL, base := o.resolveRepo(sess)
+	if repo == "" && cloneURL == "" {
+		return nil // nothing to clone
+	}
+	_, err := o.prepareIsolatedOn(ctx, sess, target, repo, cloneURL, base)
+	return err
+}
+
+// resolveRepo finds the repo/clone-url/base for a session: a per-session
+// override in its metadata wins, otherwise the objective's defaults.
+func (o *Orchestrator) resolveRepo(sess *model.Session) (repo, cloneURL, base string) {
+	repo, _ = sess.Metadata["repo"].(string)
+	cloneURL, _ = sess.Metadata["clone_url"].(string)
+	base, _ = sess.Metadata["base_branch"].(string)
+	if (repo == "" && cloneURL == "") && sess.ObjectiveID != "" {
+		if obj, err := o.st.GetObjective(sess.ObjectiveID); err == nil {
+			repo, _ = obj.Metadata["repo"].(string)
+			cloneURL, _ = obj.Metadata["clone_url"].(string)
+			if base == "" {
+				base, _ = obj.Metadata["base_branch"].(string)
+			}
+		}
+	}
+	return repo, cloneURL, base
 }

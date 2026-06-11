@@ -109,24 +109,38 @@ func (o *Orchestrator) StartRun(ctx context.Context, sessionID string) (*Run, er
 		return nil, ErrNoProvider
 	}
 
+	// Place on a target first so the workspace checkout lands on the same machine
+	// the agent will run on.
+	if sess.TargetID == "" {
+		if _, err := o.PlaceSession(sessionID, TargetRequest{}); err != nil {
+			_, _ = o.st.UpdateSessionStatus(sessionID, model.SessionWaitingCapacity)
+			return nil, err
+		}
+		sess, _ = o.st.GetSession(sessionID)
+	}
+	var tgt *model.Target
+	if sess.TargetID != "" {
+		tgt, _ = o.st.GetTarget(sess.TargetID)
+	}
+
+	// Auto-prepare an isolated checkout for coding sessions that don't have one
+	// (e.g. workers the manager spawned), on the session's target.
+	if err := o.ensureWorkspace(ctx, sess, tgt); err != nil {
+		o.releaseTargetSlot(sess)
+		_, _ = o.st.UpdateSessionStatus(sessionID, model.SessionFailed)
+		return nil, err
+	}
+	sess, _ = o.st.GetSession(sessionID)
+
 	// Acquire workspace lock (single writer per workspace).
 	if sess.WorkspaceID != "" {
 		if err := o.st.AcquireLock(workspaceLockKey(sess.WorkspaceID), model.LockWorkspace, sessionID, "session run"); err != nil {
+			o.releaseTargetSlot(sess)
 			if errors.Is(err, store.ErrLockHeld) {
 				_, _ = o.st.UpdateSessionStatus(sessionID, model.SessionWaitingCapacity)
 			}
 			return nil, err
 		}
-	}
-
-	// Place on a target if not already placed.
-	if sess.TargetID == "" {
-		if _, err := o.PlaceSession(sessionID, TargetRequest{}); err != nil {
-			o.releaseSessionLocks(sess)
-			_, _ = o.st.UpdateSessionStatus(sessionID, model.SessionWaitingCapacity)
-			return nil, err
-		}
-		sess, _ = o.st.GetSession(sessionID)
 	}
 
 	if _, err := o.st.UpdateSessionStatus(sessionID, model.SessionStarting); err != nil {
@@ -138,10 +152,6 @@ func (o *Orchestrator) StartRun(ctx context.Context, sessionID string) (*Run, er
 	var ws *model.Workspace
 	if sess.WorkspaceID != "" {
 		ws, _ = o.st.GetWorkspace(sess.WorkspaceID)
-	}
-	var tgt *model.Target
-	if sess.TargetID != "" {
-		tgt, _ = o.st.GetTarget(sess.TargetID)
 	}
 
 	spec := o.buildSpec(sess, ws, tgt)

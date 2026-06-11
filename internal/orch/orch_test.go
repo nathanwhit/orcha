@@ -750,3 +750,74 @@ func TestOrch_SessionScreen_TmuxPanel(t *testing.T) {
 	}
 	t.Fatal("orchestrator SessionScreen never showed the live panel content")
 }
+
+// A coding worker (e.g. one the manager spawned) auto-gets a fresh isolated
+// checkout on its target when the objective has a repo and a preparer is set.
+func TestOrch_AutoPreparesWorkspaceForWorker(t *testing.T) {
+	o, st := newTestOrch(t)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	o.SetWorkspacePreparer(workspace.New())
+
+	// Seed a bare remote.
+	root := t.TempDir()
+	bare := filepath.Join(root, "remote.git")
+	tgit(t, root, "init", "--bare", "-b", "main", bare)
+	seed := filepath.Join(root, "seed")
+	tgit(t, root, "init", "-b", "main", seed)
+	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tgit(t, seed, "add", ".")
+	tgit(t, seed, "commit", "-m", "initial")
+	tgit(t, seed, "remote", "add", "origin", bare)
+	tgit(t, seed, "push", "-u", "origin", "main")
+
+	tgt := &model.Target{Name: "local", Kind: model.TargetLocal, Status: model.TargetOnline,
+		WorkRoot: filepath.Join(root, "work"), CapacitySessions: 2}
+	_ = st.CreateTarget(tgt)
+
+	// Objective carries the repo (clone_url overrides to the local bare path).
+	_, mgr, err := o.CreateObjective(NewObjectiveSpec{
+		Title: "port it", Prompt: "do it", Agent: model.AgentClaude,
+		Repo: "owner/repo", CloneURL: bare,
+	})
+	if err != nil {
+		t.Fatalf("create objective: %v", err)
+	}
+
+	// Manager spawns an implementer (no explicit workspace).
+	worker, err := o.SpawnSession(mgr.ID, SpawnSpec{Role: model.RoleImplementer, Title: "w", Goal: "g"})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if worker.WorkspaceID != "" {
+		t.Fatal("worker should not have a workspace until it starts")
+	}
+
+	// Starting the worker auto-prepares its checkout.
+	run, err := o.StartRun(context.Background(), worker.ID)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	run.Wait()
+
+	reloaded, _ := st.GetSession(worker.ID)
+	if reloaded.WorkspaceID == "" {
+		t.Fatal("worker did not get an auto-prepared workspace")
+	}
+	ws, _ := st.GetWorkspace(reloaded.WorkspaceID)
+	if ws.Kind != model.WorkspaceIsolated || ws.Status != model.WorkspaceReady {
+		t.Fatalf("workspace not ready/isolated: %+v", ws)
+	}
+	// It's a real checkout on the worker's branch.
+	if got := tgit(t, ws.Path, "rev-parse", "--abbrev-ref", "HEAD"); got != ws.BranchName {
+		t.Fatalf("checkout branch %q != %q", got, ws.BranchName)
+	}
+}
+
+// A manager session never gets an auto workspace (it works from summaries).
+func TestOrch_ManagerGetsNoWorkspace(t *testing.T) {
+	if !needsIsolatedWorkspace(model.RoleImplementer) || needsIsolatedWorkspace(model.RoleManager) {
+		t.Fatal("role classification wrong")
+	}
+}

@@ -9,15 +9,32 @@ type NewObjectiveSpec struct {
 	Title  string
 	Prompt string
 	Agent  model.AgentKind // manager agent provider
+	// Repo is the code-host identifier (e.g. "owner/repo") the objective works
+	// on. Coding sessions the manager spawns inherit it and get a fresh isolated
+	// checkout. Optional.
+	Repo       string
+	CloneURL   string // explicit clone source; derived from Repo if empty
+	BaseBranch string // default base for checkouts (default "main")
 }
 
 // CreateObjective creates an objective and its manager session. Every objective
 // starts with a manager session, per the spec.
 func (o *Orchestrator) CreateObjective(spec NewObjectiveSpec) (*model.Objective, *model.Session, error) {
+	meta := model.JSONMap{}
+	if spec.Repo != "" {
+		meta["repo"] = spec.Repo
+	}
+	if spec.CloneURL != "" {
+		meta["clone_url"] = spec.CloneURL
+	}
+	if spec.BaseBranch != "" {
+		meta["base_branch"] = spec.BaseBranch
+	}
 	obj := &model.Objective{
-		Title:  spec.Title,
-		Prompt: spec.Prompt,
-		Status: model.ObjectiveActive,
+		Title:    spec.Title,
+		Prompt:   spec.Prompt,
+		Status:   model.ObjectiveActive,
+		Metadata: meta,
 	}
 	if err := o.st.CreateObjective(obj); err != nil {
 		return nil, nil, err

@@ -158,6 +158,16 @@ const dashboardHTML = `<!doctype html>
 <header><strong>orcha</strong> — agent team orchestrator</header>
 <div class="wrap">
  <main>
+  <h2>New objective</h2>
+  <form id="newobj" onsubmit="return submitObj(event)" style="margin-bottom:14px">
+   <input id="f-title" placeholder="title" required style="width:30%">
+   <input id="f-repo" placeholder="repo (owner/name, optional)" style="width:30%">
+   <input id="f-agent" placeholder="agent (claude/codex)" value="claude" style="width:14%">
+   <br>
+   <textarea id="f-prompt" placeholder="what should the team do?" required style="width:78%;height:48px;margin-top:4px"></textarea>
+   <br><button type="submit">create &amp; start</button>
+   <span id="newmsg" style="color:#3fb950;margin-left:8px"></span>
+  </form>
   <h2>Objectives</h2>
   <table id="objs"><thead><tr><th>status</th><th>title</th><th>repo</th>
    <th>sessions</th><th>PRs</th><th>needs</th><th>activity</th></tr></thead><tbody></tbody></table>
@@ -175,6 +185,18 @@ const dashboardHTML = `<!doctype html>
 </div>
 <script>
 async function j(u){return (await fetch(u)).json()}
+async function submitObj(e){
+ e.preventDefault();
+ const body={title:document.getElementById('f-title').value,prompt:document.getElementById('f-prompt').value,
+  agent:document.getElementById('f-agent').value||'claude',repo:document.getElementById('f-repo').value};
+ const r=await fetch('/api/objectives',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+ const msg=document.getElementById('newmsg');
+ if(r.ok){const d=await r.json();msg.textContent='created '+d.objective.id.slice(0,8)+' — manager starting…';
+  document.getElementById('f-title').value='';document.getElementById('f-prompt').value='';document.getElementById('f-repo').value='';
+  refresh();}
+ else{msg.style.color='#f85149';msg.textContent='error: '+r.status;}
+ return false;
+}
 let sel=null;
 function pick(id,title){sel=id;document.getElementById('selname').textContent=title?('— '+title):'';drawTerm();
  document.querySelectorAll('#sessions tr').forEach(r=>r.classList.toggle('sel',r.dataset.id===id));}

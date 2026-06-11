@@ -94,6 +94,14 @@ backends. Both fakes (for offline/tested flows) and real implementations exist:
 forge **and** real workspace checkouts). Live backend tests are gated behind
 `ORCHA_CLAUDE_LIVE`, `ORCHA_SSH_TEST_HOST`, and `ORCHA_GH_LIVE`.
 
+**Auto-prep for spawned workers:** when an objective carries a repo
+(`repo`/`base_branch` on the objective, or a per-spawn override on
+`spawn_session`), coding sessions the manager spawns get a fresh isolated
+checkout automatically. The checkout is prepared at start time on the session's
+placed target (so the clone and the agent run on the same machine), branched off
+the latest upstream. This closes the loop: objective → manager spawns worker →
+worker runs in a real checkout → `publish_pr`.
+
 **Workspace freshness:** every prepared workspace is based on the latest
 upstream. A per-target bare mirror cache gives clone speed and build/cache
 locality, but the isolated checkout always re-fetches from the real origin and

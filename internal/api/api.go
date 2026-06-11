@@ -107,9 +107,11 @@ func (s *Server) listObjectives(w http.ResponseWriter, r *http.Request) {
 }
 
 type createObjectiveReq struct {
-	Title  string `json:"title"`
-	Prompt string `json:"prompt"`
-	Agent  string `json:"agent"`
+	Title      string `json:"title"`
+	Prompt     string `json:"prompt"`
+	Agent      string `json:"agent"`
+	Repo       string `json:"repo"`
+	BaseBranch string `json:"base_branch"`
 }
 
 func (s *Server) createObjective(w http.ResponseWriter, r *http.Request) {
@@ -120,6 +122,7 @@ func (s *Server) createObjective(w http.ResponseWriter, r *http.Request) {
 	}
 	obj, mgr, err := s.o.CreateObjective(orch.NewObjectiveSpec{
 		Title: req.Title, Prompt: req.Prompt, Agent: model.AgentKind(req.Agent),
+		Repo: req.Repo, BaseBranch: req.BaseBranch,
 	})
 	if err != nil {
 		writeErr(w, httpStatusFor(err), err)

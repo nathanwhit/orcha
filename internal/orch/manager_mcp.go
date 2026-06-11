@@ -31,6 +31,8 @@ func (o *Orchestrator) ManagerMCPHandler() http.Handler {
 			"goal":         str,
 			"agent_hint":   map[string]any{"type": "string", "enum": []string{"claude", "codex"}},
 			"dependencies": map[string]any{"type": "array", "items": str},
+			"repo":         map[string]any{"type": "string", "description": "override the objective's repo for this worker's checkout (owner/repo)"},
+			"base_branch":  map[string]any{"type": "string", "description": "base branch for the checkout (default main)"},
 		}, "role", "title", "goal"),
 		Handler: o.mcpSpawnSession,
 	})
@@ -106,12 +108,20 @@ func (o *Orchestrator) mcpSpawnSession(ctx context.Context, args map[string]any)
 		return "", err
 	}
 	agentHint := model.AgentKind(mcp.StringArg(args, "agent_hint"))
+	var meta model.JSONMap
+	if repo := mcp.StringArg(args, "repo"); repo != "" {
+		meta = model.JSONMap{"repo": repo}
+		if base := mcp.StringArg(args, "base_branch"); base != "" {
+			meta["base_branch"] = base
+		}
+	}
 	sess, err := o.SpawnSession(mgr.ID, SpawnSpec{
 		Role:         model.SessionRole(mcp.StringArg(args, "role")),
 		Title:        mcp.StringArg(args, "title"),
 		Goal:         mcp.StringArg(args, "goal"),
 		Agent:        agentHint,
 		Dependencies: mcp.StringsArg(args, "dependencies"),
+		Metadata:     meta,
 	})
 	if err != nil {
 		return "", err
