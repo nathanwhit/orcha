@@ -175,3 +175,26 @@ func TestSessionScreen_NoLiveScreenReturns204(t *testing.T) {
 		t.Fatalf("status=%d, want 204", resp.StatusCode)
 	}
 }
+
+func TestCreateTarget_RegistersAndHealthChecks(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	// A local target health-checks instantly and comes up online.
+	resp := postJSON(t, srv.URL+"/api/targets", map[string]any{
+		"name": "box", "kind": "local", "work_root": t.TempDir(), "capacity_sessions": 3,
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status=%d, want 201", resp.StatusCode)
+	}
+	var created model.Target
+	_ = json.NewDecoder(resp.Body).Decode(&created)
+	if created.Status != model.TargetOnline {
+		t.Fatalf("target should be online, got %s", created.Status)
+	}
+	// It shows up in the targets list.
+	var targets []model.Target
+	getJSON(t, srv.URL+"/api/targets", &targets)
+	if len(targets) != 1 || targets[0].Name != "box" {
+		t.Fatalf("target not listed: %+v", targets)
+	}
+}

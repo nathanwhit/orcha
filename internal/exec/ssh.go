@@ -53,6 +53,7 @@ func (s *SSHExecutor) sshArgs(tty bool) []string {
 	args := []string{
 		"-o", "BatchMode=yes", // never prompt; fail fast if auth is not set up
 		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "ConnectTimeout=10", // don't hang on an unreachable host
 	}
 	if tty {
 		// Force a pty so the remote process group gets SIGHUP on disconnect.

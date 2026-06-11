@@ -821,3 +821,88 @@ func TestOrch_ManagerGetsNoWorkspace(t *testing.T) {
 		t.Fatal("role classification wrong")
 	}
 }
+
+// ---- remote targets ----
+
+func TestOrch_RegisterLocalTarget_HealthCheckOnline(t *testing.T) {
+	o, _ := newTestOrch(t)
+	tgt, err := o.RegisterTarget(context.Background(), &model.Target{
+		Name: "box", Kind: model.TargetLocal, WorkRoot: t.TempDir(), CapacitySessions: 2,
+	})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if tgt.Status != model.TargetOnline {
+		t.Fatalf("local target should be online after health check, got %s", tgt.Status)
+	}
+	if tgt.LastSeenAt == nil {
+		t.Fatal("last_seen_at should be stamped by the health check")
+	}
+}
+
+func TestOrch_TargetPinning_PlacesOnNamedTarget(t *testing.T) {
+	o, st := newTestOrch(t)
+	o.RegisterProvider(blockingFake(model.AgentClaude))
+	t1 := addTarget(t, st, "alpha", model.TargetLocal, 2)
+	t2 := addTarget(t, st, "beta", model.TargetLocal, 2)
+	_ = t1
+
+	// Pin the session to "beta" by name.
+	s := &model.Session{Role: model.RoleImplementer, Agent: model.AgentClaude, Status: model.SessionQueued,
+		Metadata: model.JSONMap{"pinned_target": "beta"}}
+	_ = st.CreateSession(s)
+
+	if _, err := o.StartRun(context.Background(), s.ID); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	reloaded, _ := st.GetSession(s.ID)
+	if reloaded.TargetID != t2.ID {
+		t.Fatalf("session placed on %s, want pinned target beta (%s)", reloaded.TargetID, t2.ID)
+	}
+	_ = o.Cancel(s.ID, false)
+}
+
+// TestLive_RemoteTmux runs a real tmux session on a remote SSH host.
+// Gated behind ORCHA_SSH_TEST_HOST (Remote Login enabled / a reachable box).
+func TestLive_RemoteTmux(t *testing.T) {
+	host := os.Getenv("ORCHA_SSH_TEST_HOST")
+	if host == "" {
+		t.Skip("set ORCHA_SSH_TEST_HOST to run the live remote-tmux test")
+	}
+	o, st := newTestOrch(t)
+	o.RegisterProvider(agent.NewTmuxShell(model.AgentClaude))
+
+	tgt, err := o.RegisterTarget(context.Background(), &model.Target{
+		Name: "remote", Kind: model.TargetSSH, Host: host, User: os.Getenv("ORCHA_SSH_TEST_USER"),
+		WorkRoot: "/tmp/orcha-work", CapacitySessions: 2,
+	})
+	if err != nil {
+		t.Fatalf("register remote: %v", err)
+	}
+	if tgt.Status != model.TargetOnline {
+		t.Fatalf("remote target offline: %+v", tgt)
+	}
+
+	s := &model.Session{Role: model.RoleImplementer, Agent: model.AgentClaude, Status: model.SessionQueued,
+		Metadata: model.JSONMap{"pinned_target": "remote"}}
+	_ = st.CreateSession(s)
+	run, err := o.StartRun(context.Background(), s.ID)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = o.Cancel(s.ID, false); _ = run }()
+
+	waitFor(t, func() bool { rs, _ := st.GetSession(s.ID); return rs.Status == model.SessionRunning })
+	_ = o.Steer(context.Background(), s.ID, "echo REMOTE-TMUX-OK")
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		screen, ok, _ := o.SessionScreen(s.ID)
+		if ok && strings.Contains(screen, "REMOTE-TMUX-OK") {
+			rs, _ := st.GetSession(s.ID)
+			t.Logf("remote tmux attach: %v", rs.Metadata["tmux_attach"])
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatal("did not see output from remote tmux pane")
+}

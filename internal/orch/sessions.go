@@ -112,7 +112,7 @@ func (o *Orchestrator) StartRun(ctx context.Context, sessionID string) (*Run, er
 	// Place on a target first so the workspace checkout lands on the same machine
 	// the agent will run on.
 	if sess.TargetID == "" {
-		if _, err := o.PlaceSession(sessionID, TargetRequest{}); err != nil {
+		if _, err := o.PlaceSession(sessionID, o.targetRequestFor(sess)); err != nil {
 			_, _ = o.st.UpdateSessionStatus(sessionID, model.SessionWaitingCapacity)
 			return nil, err
 		}

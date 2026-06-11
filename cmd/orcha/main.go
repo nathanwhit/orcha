@@ -179,6 +179,12 @@ const dashboardHTML = `<!doctype html>
  </main>
  <aside>
   <h2>Targets</h2><div id="targets"></div>
+  <form id="addmachine" onsubmit="return addMachine(event)" style="margin-top:6px;font-size:11px">
+   <input id="m-name" placeholder="name" style="width:46%"> <input id="m-host" placeholder="host" style="width:46%"><br>
+   <input id="m-user" placeholder="user" style="width:30%"> <input id="m-root" placeholder="work root" value="/home/bot/work" style="width:62%"><br>
+   <input id="m-cap" placeholder="capacity" value="2" style="width:30%"> <button type="submit">add ssh machine</button>
+   <span id="mmsg" style="color:#3fb950"></span>
+  </form>
   <h2>Needs user</h2><div id="questions"></div>
   <h2>Usage</h2><div id="usage"></div>
  </aside>
@@ -197,6 +203,17 @@ async function submitObj(e){
  else{msg.style.color='#f85149';msg.textContent='error: '+r.status;}
  return false;
 }
+async function addMachine(e){
+ e.preventDefault();
+ const body={name:document.getElementById('m-name').value,kind:'ssh',host:document.getElementById('m-host').value,
+  user:document.getElementById('m-user').value,work_root:document.getElementById('m-root').value,
+  capacity_sessions:parseInt(document.getElementById('m-cap').value||'2')};
+ const msg=document.getElementById('mmsg');msg.textContent='checking…';
+ const r=await fetch('/api/targets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+ if(r.ok){const d=await r.json();msg.style.color=d.status==='online'?'#3fb950':'#f85149';msg.textContent=d.status;refresh();}
+ else{msg.style.color='#f85149';msg.textContent='error '+r.status;}
+ return false;
+}
 let sel=null;
 function pick(id,title){sel=id;document.getElementById('selname').textContent=title?('— '+title):'';drawTerm();
  document.querySelectorAll('#sessions tr').forEach(r=>r.classList.toggle('sel',r.dataset.id===id));}
@@ -212,7 +229,7 @@ async function refresh(){
   '</span></td><td>'+s.role+'</td><td>'+s.agent+'</td><td>'+s.mode+'</td><td>'+(s.title||'')+'</td><td>'+(s.current_activity||'')+'</td></tr>').join('');
  if(sel)document.querySelectorAll('#sessions tr').forEach(r=>r.classList.toggle('sel',r.dataset.id===sel));
  const t=await j('/api/targets');
- document.getElementById('targets').innerHTML=t.map(x=>x.name+' ['+x.status+'] '+x.available_sessions+'/'+x.capacity_sessions).join('<br>');
+ document.getElementById('targets').innerHTML=t.map(x=>x.name+(x.host?(' ('+(x.user?x.user+'@':'')+x.host+')'):'')+' ['+x.status+'] '+x.available_sessions+'/'+x.capacity_sessions).join('<br>');
  const q=await j('/api/questions');
  document.getElementById('questions').innerHTML=q.length?q.map(x=>'• '+x.question).join('<br>'):'<i>none</i>';
  const u=await j('/api/usage');

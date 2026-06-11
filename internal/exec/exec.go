@@ -46,6 +46,8 @@ type Executor interface {
 	// HealthCheck verifies the executor can run a trivial command (used for
 	// target readiness / bootstrap verification).
 	HealthCheck(ctx context.Context) error
+	// Bootstrap prepares the target before first use (no-op for local).
+	Bootstrap(ctx context.Context) error
 	// Describe returns a short human-readable location, e.g. "local" or
 	// "ssh bot@host".
 	Describe() string

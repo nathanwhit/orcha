@@ -102,6 +102,14 @@ func (s *Store) SetTargetStatus(id string, status model.TargetStatus) error {
 	return nil
 }
 
+// MarkTargetSeen sets a target's status and stamps last_seen_at (after a
+// successful health check).
+func (s *Store) MarkTargetSeen(id string, status model.TargetStatus) error {
+	_, err := s.db.Exec(`UPDATE targets SET status = ?, last_seen_at = ? WHERE id = ?`,
+		string(status), s.now(), id)
+	return err
+}
+
 // ClaimTargetSlot atomically reserves one session slot on a target. It enforces
 // the scheduling status (only online targets accept new sessions) and capacity
 // limits in a single transaction, so concurrent schedulers cannot oversubscribe

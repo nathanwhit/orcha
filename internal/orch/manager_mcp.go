@@ -26,13 +26,15 @@ func (o *Orchestrator) ManagerMCPHandler() http.Handler {
 		Name:        "spawn_session",
 		Description: "Spawn a scoped worker session under this objective. Returns the new session id. Use dependencies to make a session wait for others to succeed.",
 		InputSchema: obj(map[string]any{
-			"role":         map[string]any{"type": "string", "enum": []string{"implementer", "reviewer", "validator", "researcher", "pr_followup", "ci_followup", "custom"}},
-			"title":        str,
-			"goal":         str,
-			"agent_hint":   map[string]any{"type": "string", "enum": []string{"claude", "codex"}},
-			"dependencies": map[string]any{"type": "array", "items": str},
-			"repo":         map[string]any{"type": "string", "description": "override the objective's repo for this worker's checkout (owner/repo)"},
-			"base_branch":  map[string]any{"type": "string", "description": "base branch for the checkout (default main)"},
+			"role":          map[string]any{"type": "string", "enum": []string{"implementer", "reviewer", "validator", "researcher", "pr_followup", "ci_followup", "custom"}},
+			"title":         str,
+			"goal":          str,
+			"agent_hint":    map[string]any{"type": "string", "enum": []string{"claude", "codex"}},
+			"dependencies":  map[string]any{"type": "array", "items": str},
+			"repo":          map[string]any{"type": "string", "description": "override the objective's repo for this worker's checkout (owner/repo)"},
+			"base_branch":   map[string]any{"type": "string", "description": "base branch for the checkout (default main)"},
+			"target":        map[string]any{"type": "string", "description": "pin this worker to a target machine (name or id), e.g. a remote SSH box"},
+			"target_labels": map[string]any{"type": "array", "items": str, "description": "require a target with these labels"},
 		}, "role", "title", "goal"),
 		Handler: o.mcpSpawnSession,
 	})
@@ -108,12 +110,25 @@ func (o *Orchestrator) mcpSpawnSession(ctx context.Context, args map[string]any)
 		return "", err
 	}
 	agentHint := model.AgentKind(mcp.StringArg(args, "agent_hint"))
-	var meta model.JSONMap
+	meta := model.JSONMap{}
 	if repo := mcp.StringArg(args, "repo"); repo != "" {
-		meta = model.JSONMap{"repo": repo}
+		meta["repo"] = repo
 		if base := mcp.StringArg(args, "base_branch"); base != "" {
 			meta["base_branch"] = base
 		}
+	}
+	if target := mcp.StringArg(args, "target"); target != "" {
+		meta["pinned_target"] = target
+	}
+	if labels := mcp.StringsArg(args, "target_labels"); len(labels) > 0 {
+		anyLabels := make([]any, len(labels))
+		for i, l := range labels {
+			anyLabels[i] = l
+		}
+		meta["target_labels"] = anyLabels
+	}
+	if len(meta) == 0 {
+		meta = nil
 	}
 	sess, err := o.SpawnSession(mgr.ID, SpawnSpec{
 		Role:         model.SessionRole(mcp.StringArg(args, "role")),

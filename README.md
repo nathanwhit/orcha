@@ -85,6 +85,7 @@ backends. Both fakes (for offline/tested flows) and real implementations exist:
 |---|---|---|---|
 | Agent runtime | `agent.Provider` | `agent.NewFake` | `agent.NewClaude` (interactive stream-json), `agent.NewCodex` (`codex exec`, resume-based steering), `agent.NewTmuxAgent` (interactive TUI in attachable tmux) |
 | Terminal multiplexing | `tmux.Controller` | — | real `tmux` over local/SSH |
+| Remote machines | `exec.SSHExecutor` | — | real `ssh` targets (register, health-check, bootstrap) |
 | Execution location | `exec.Executor` | — | `exec.NewLocal` (process group), `exec.NewSSH` (`ssh -tt`) |
 | Code host / VCS | `forge.Forge` | `forge.NewFake` | `forge.NewGit` (`git` + `gh`) |
 | Workspace checkout | `workspace.Preparer` | (row only) | `workspace.New` (mirror cache + fresh-upstream clone) |
@@ -135,6 +136,36 @@ scheduler.
 
 Verified live (`ORCHA_LIVE_MANAGER=1`): a real Claude manager connects over HTTP
 and calls `spawn_session`, creating a worker in the orchestrator.
+
+## Remote (SSH) machines
+
+Register an SSH box and sessions run there — agent, tmux pane, git checkout, and
+all. A target carries `host`/`user`/`work_root` (plus `ssh_port`/`identity_file`/
+`bootstrap` in metadata); everything routes through `exec.SSHExecutor` (which
+wraps commands in `ssh -tt`), so:
+
+- the agent's **tmux session runs on the remote host**, attachable with
+  `ssh -t user@host tmux attach -t orcha-<id>`,
+- **workspace checkouts** clone on the remote machine,
+- **process-group cancellation** works (kill the local ssh → remote SIGHUP).
+
+Add one via `POST /api/targets` (or the dashboard's "add ssh machine" form):
+
+```sh
+curl -X POST localhost:8080/api/targets -H 'Content-Type: application/json' -d '{
+  "name":"gpu-box","kind":"ssh","host":"1.2.3.4","user":"bot",
+  "work_root":"/home/bot/work","capacity_sessions":4,
+  "bootstrap":"mkdir -p /home/bot/work"
+}'
+```
+
+Registration runs the bootstrap command and a health check, marking the target
+`online`/`offline` (re-check with `POST /api/targets/:id/healthcheck`). Direct
+work to a box by pinning: `spawn_session(..., target: "gpu-box")`, or
+`drain`/`disable` to take it out of rotation. **Requirements on the remote
+host:** `tmux`, `git`, the agent CLIs (`claude`/`codex`) and their auth, plus
+key-based SSH (the executor uses `BatchMode=yes`). Verified locally; a live
+remote test is gated behind `ORCHA_SSH_TEST_HOST`.
 
 ## Interactive tmux sessions (you can watch and take over)
 

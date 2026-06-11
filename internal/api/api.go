@@ -46,10 +46,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sessions/{id}/screen", s.sessionScreen)
 
 	mux.HandleFunc("GET /api/targets", s.listTargets)
+	mux.HandleFunc("POST /api/targets", s.createTarget)
 	mux.HandleFunc("GET /api/targets/{id}", s.getTarget)
 	mux.HandleFunc("POST /api/targets/{id}/drain", s.targetMode(model.TargetDraining))
 	mux.HandleFunc("POST /api/targets/{id}/enable", s.targetMode(model.TargetOnline))
 	mux.HandleFunc("POST /api/targets/{id}/disable", s.targetMode(model.TargetDisabled))
+	mux.HandleFunc("POST /api/targets/{id}/healthcheck", s.healthcheckTarget)
 
 	mux.HandleFunc("GET /api/pull-requests", s.listPRs)
 	mux.HandleFunc("GET /api/pull-requests/{id}", s.getPR)
@@ -292,6 +294,70 @@ func (s *Server) getTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, t)
+}
+
+type createTargetReq struct {
+	Name             string   `json:"name"`
+	Kind             string   `json:"kind"` // local | ssh
+	Host             string   `json:"host"`
+	User             string   `json:"user"`
+	WorkRoot         string   `json:"work_root"`
+	Labels           []string `json:"labels"`
+	CapacitySessions int      `json:"capacity_sessions"`
+	SSHPort          int      `json:"ssh_port"`
+	IdentityFile     string   `json:"identity_file"`
+	Bootstrap        string   `json:"bootstrap"`
+}
+
+// createTarget registers a machine (local or SSH). For SSH it health-checks the
+// host, so the response status reflects whether it is reachable (this can take a
+// few seconds for an unreachable host).
+func (s *Server) createTarget(w http.ResponseWriter, r *http.Request) {
+	var req createTargetReq
+	if err := decode(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	kind := model.TargetKind(req.Kind)
+	if kind == "" {
+		kind = model.TargetSSH
+	}
+	meta := model.JSONMap{}
+	if req.SSHPort != 0 {
+		meta["ssh_port"] = float64(req.SSHPort)
+	}
+	if req.IdentityFile != "" {
+		meta["identity_file"] = req.IdentityFile
+	}
+	if req.Bootstrap != "" {
+		meta["bootstrap"] = req.Bootstrap
+	}
+	t := &model.Target{
+		Name: req.Name, Kind: kind, Host: req.Host, User: req.User,
+		WorkRoot: req.WorkRoot, Labels: req.Labels, CapacitySessions: req.CapacitySessions,
+		Metadata: meta,
+	}
+	created, err := s.o.RegisterTarget(r.Context(), t)
+	if err != nil {
+		writeErr(w, httpStatusFor(err), err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, created)
+}
+
+func (s *Server) healthcheckTarget(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	err := s.o.HealthCheckTarget(r.Context(), id)
+	t, gerr := s.st.GetTarget(id)
+	if gerr != nil {
+		writeErr(w, httpStatusFor(gerr), gerr)
+		return
+	}
+	resp := map[string]any{"target": t}
+	if err != nil {
+		resp["error"] = err.Error()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) targetMode(status model.TargetStatus) http.HandlerFunc {

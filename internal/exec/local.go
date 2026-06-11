@@ -20,6 +20,9 @@ func NewLocal() *LocalExecutor { return &LocalExecutor{} }
 // Describe implements Executor.
 func (l *LocalExecutor) Describe() string { return "local" }
 
+// Bootstrap is a no-op locally.
+func (l *LocalExecutor) Bootstrap(context.Context) error { return nil }
+
 // HealthCheck runs `true` to confirm the host can launch processes.
 func (l *LocalExecutor) HealthCheck(ctx context.Context) error {
 	p, err := l.Start(ctx, Command{Name: "true"})
