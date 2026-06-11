@@ -83,7 +83,8 @@ backends. Both fakes (for offline/tested flows) and real implementations exist:
 
 | Concern | Interface | Fake | Real |
 |---|---|---|---|
-| Agent runtime | `agent.Provider` | `agent.NewFake` | `agent.NewClaude` (interactive stream-json), `agent.NewCodex` (`codex exec`, resume-based steering) |
+| Agent runtime | `agent.Provider` | `agent.NewFake` | `agent.NewClaude` (interactive stream-json), `agent.NewCodex` (`codex exec`, resume-based steering), `agent.NewTmuxAgent` (interactive TUI in attachable tmux) |
+| Terminal multiplexing | `tmux.Controller` | — | real `tmux` over local/SSH |
 | Execution location | `exec.Executor` | — | `exec.NewLocal` (process group), `exec.NewSSH` (`ssh -tt`) |
 | Code host / VCS | `forge.Forge` | `forge.NewFake` | `forge.NewGit` (`git` + `gh`) |
 | Workspace checkout | `workspace.Preparer` | (row only) | `workspace.New` (mirror cache + fresh-upstream clone) |
@@ -127,7 +128,24 @@ scheduler.
 Verified live (`ORCHA_LIVE_MANAGER=1`): a real Claude manager connects over HTTP
 and calls `spawn_session`, creating a worker in the orchestrator.
 
-## Interactivity: Claude vs Codex
+## Interactive tmux sessions (you can watch and take over)
+
+Run with `-tmux` and every session becomes a real, **attachable** tmux session
+running the agent's interactive TUI (or a plain shell). `agent.TmuxProvider`
+(over `tmux.Controller`, which works on local and SSH targets):
+
+- starts a detached `tmux new-session` running the program in the workspace dir,
+- streams the pane via `pipe-pane` into the session transcript,
+- steers by typing into the live pane with `send-keys` (truly interactive),
+- cancels with `kill-session`,
+- and records the attach command on the session, so a human runs
+  `tmux attach -t orcha-<sessionID>` (or `ssh -t <host> tmux attach -t ...` for
+  SSH targets) to watch or take over live.
+
+Verified against real tmux: interactive shell, send-keys steering, pipe-pane
+streaming, and kill-session cancellation.
+
+## Interactivity: Claude vs Codex (headless mode)
 
 The two agents differ in how steering works, and the UI reflects each session's
 mode (`interactive` vs `noninteractive`):

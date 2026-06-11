@@ -28,6 +28,7 @@ func main() {
 		dbPath     = flag.String("db", "orcha.db", "path to SQLite database")
 		addr       = flag.String("addr", ":8080", "HTTP listen address")
 		fakeAgents = flag.Bool("fake-agents", false, "use in-process fake agents instead of the real claude/codex CLIs")
+		tmuxAgents = flag.Bool("tmux", false, "run agents as interactive TUIs inside attachable tmux sessions (tmux attach -t orcha-<id>)")
 		claudeBin  = flag.String("claude-bin", "claude", "path to the claude CLI")
 		codexBin   = flag.String("codex-bin", "codex", "path to the codex CLI")
 		realForge  = flag.Bool("real-forge", false, "use the real git+gh forge (needs real workspace checkouts) instead of the in-memory fake")
@@ -48,18 +49,25 @@ func main() {
 		ProviderFallback:  []model.AgentKind{model.AgentClaude, model.AgentCodex},
 		ManagerMCPBaseURL: *mcpBase,
 	})
-	if *fakeAgents {
+	switch {
+	case *fakeAgents:
 		// Offline: scriptable in-process agents, no external CLIs needed.
 		o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
 		o.RegisterProvider(agent.NewFake(model.AgentCodex, false, nil))
 		log.Println("using fake agents")
-	} else {
-		// Real CLIs. Claude runs as a persistent interactive stream-json session
-		// (steer = send a message to the running process); Codex runs one-shot
-		// `codex exec` and is steered via cancel/resume.
+	case *tmuxAgents:
+		// Each session is an interactive TUI inside a real, attachable tmux
+		// session. Watch or take over any session with `tmux attach -t orcha-<id>`
+		// (the attach command is recorded on each session).
+		o.RegisterProvider(agent.NewTmuxAgent(model.AgentClaude, *claudeBin))
+		o.RegisterProvider(agent.NewTmuxAgent(model.AgentCodex, *codexBin))
+		log.Println("using tmux interactive TUIs (attach: tmux attach -t orcha-<sessionID>)")
+	default:
+		// Real CLIs, headless. Claude runs as a persistent interactive stream-json
+		// session; Codex runs `codex exec` and is steered via resume.
 		o.RegisterProvider(agent.NewClaude(agent.ClaudeConfig{Binary: *claudeBin}))
 		o.RegisterProvider(agent.NewCodex(agent.CodexConfig{Binary: *codexBin}))
-		log.Println("using real claude + codex CLIs")
+		log.Println("using real claude + codex CLIs (headless)")
 	}
 	if *realForge {
 		// Real git push + gh PR operations, paired with real workspace

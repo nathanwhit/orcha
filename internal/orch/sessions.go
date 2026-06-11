@@ -218,12 +218,12 @@ func (o *Orchestrator) consume(r *run, events <-chan agent.Event) {
 				s.CurrentActivity = ev.Activity
 			})
 		}
-		// Capture a provider-side session handle (e.g. a Codex thread id) so a
-		// later resume can preserve the logical session/conversation.
+		// Capture durable provider-side handles into session metadata: a Codex
+		// thread id (so resume preserves the conversation) and the tmux session /
+		// attach command (so the UI can show "attach with ...").
 		if ev.Metadata != nil {
-			if psid, ok := ev.Metadata["provider_session_id"].(string); ok && psid != "" {
-				o.persistProviderSessionID(r.sessionID, psid)
-			}
+			o.persistSessionMeta(r.sessionID, ev.Metadata,
+				"provider_session_id", "tmux_session", "tmux_attach")
 		}
 	}
 	// Stream ended without an explicit done event (e.g. canceled). Finalization
@@ -324,21 +324,39 @@ func (o *Orchestrator) Cancel(sessionID string, cancelChildren bool) error {
 	return nil
 }
 
-// persistProviderSessionID records a provider-side session/thread id in the
-// session metadata, so the provider can resume the same conversation on steer.
-func (o *Orchestrator) persistProviderSessionID(sessionID, psid string) {
+// persistSessionMeta merges the named string keys from an event's metadata into
+// the session metadata, skipping no-ops. Used to durably record provider-side
+// handles (Codex thread id, tmux session/attach command).
+func (o *Orchestrator) persistSessionMeta(sessionID string, evMeta model.JSONMap, keys ...string) {
+	updates := map[string]string{}
+	for _, k := range keys {
+		if v, ok := evMeta[k].(string); ok && v != "" {
+			updates[k] = v
+		}
+	}
+	if len(updates) == 0 {
+		return
+	}
 	sess, err := o.st.GetSession(sessionID)
 	if err != nil {
 		return
 	}
-	if existing, _ := sess.Metadata["provider_session_id"].(string); existing == psid {
-		return // already recorded
+	changed := false
+	for k, v := range updates {
+		if existing, _ := sess.Metadata[k].(string); existing != v {
+			changed = true
+		}
+	}
+	if !changed {
+		return
 	}
 	_, _ = o.st.UpdateSessionRuntime(sessionID, func(s *model.Session) {
 		if s.Metadata == nil {
 			s.Metadata = model.JSONMap{}
 		}
-		s.Metadata["provider_session_id"] = psid
+		for k, v := range updates {
+			s.Metadata[k] = v
+		}
 	})
 }
 
