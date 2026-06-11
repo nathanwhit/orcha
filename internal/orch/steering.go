@@ -51,6 +51,12 @@ func (o *Orchestrator) resumeWithSteer(ctx context.Context, sess *model.Session,
 		<-r.done // wait for the prior run to fully unwind (releases its locks)
 	}
 
+	// Re-read the session so we pick up any provider_session_id captured during
+	// the prior run (used to resume the same conversation/thread).
+	if fresh, err := o.st.GetSession(sess.ID); err == nil {
+		sess = fresh
+	}
+
 	prov, ok := o.provider(sess.Agent)
 	if !ok {
 		return

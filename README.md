@@ -83,7 +83,7 @@ backends. Both fakes (for offline/tested flows) and real implementations exist:
 
 | Concern | Interface | Fake | Real |
 |---|---|---|---|
-| Agent runtime | `agent.Provider` | `agent.NewFake` | `agent.NewClaude` (interactive stream-json), `agent.NewCodex` (`codex exec`) |
+| Agent runtime | `agent.Provider` | `agent.NewFake` | `agent.NewClaude` (interactive stream-json), `agent.NewCodex` (`codex exec`, resume-based steering) |
 | Execution location | `exec.Executor` | — | `exec.NewLocal` (process group), `exec.NewSSH` (`ssh -tt`) |
 | Code host / VCS | `forge.Forge` | `forge.NewFake` | `forge.NewGit` (`git` + `gh`) |
 | Workspace checkout | `workspace.Preparer` | (row only) | `workspace.New` (mirror cache + fresh-upstream clone) |
@@ -126,3 +126,20 @@ scheduler.
 
 Verified live (`ORCHA_LIVE_MANAGER=1`): a real Claude manager connects over HTTP
 and calls `spawn_session`, creating a worker in the orchestrator.
+
+## Interactivity: Claude vs Codex
+
+The two agents differ in how steering works, and the UI reflects each session's
+mode (`interactive` vs `noninteractive`):
+
+- **Claude** has a real persistent mode (`--input-format/--output-format
+  stream-json`), so a session is one long-lived process and steering is just
+  another user message to its stdin — verified live including multi-turn.
+- **Codex** has no stable streaming-stdin equivalent; its only stable
+  programmatic mode is the one-shot `codex exec` (true interactive access is the
+  *experimental* app-server protocol). So Codex is non-interactive and steered
+  via the spec's cancel/resume protocol — but resume **preserves the
+  conversation**: Codex emits a `thread_id` on start (captured as
+  `provider_session_id`), and a resumed turn uses `codex exec resume <thread_id>`
+  so context carries over rather than restarting. Verified live
+  (`ORCHA_CODEX_LIVE=1`): a resumed thread recalls earlier context.

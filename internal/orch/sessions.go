@@ -218,6 +218,13 @@ func (o *Orchestrator) consume(r *run, events <-chan agent.Event) {
 				s.CurrentActivity = ev.Activity
 			})
 		}
+		// Capture a provider-side session handle (e.g. a Codex thread id) so a
+		// later resume can preserve the logical session/conversation.
+		if ev.Metadata != nil {
+			if psid, ok := ev.Metadata["provider_session_id"].(string); ok && psid != "" {
+				o.persistProviderSessionID(r.sessionID, psid)
+			}
+		}
 	}
 	// Stream ended without an explicit done event (e.g. canceled). Finalization
 	// happens in cleanupRun; do not force a terminal transition here so a
@@ -315,6 +322,24 @@ func (o *Orchestrator) Cancel(sessionID string, cancelChildren bool) error {
 		}
 	}
 	return nil
+}
+
+// persistProviderSessionID records a provider-side session/thread id in the
+// session metadata, so the provider can resume the same conversation on steer.
+func (o *Orchestrator) persistProviderSessionID(sessionID, psid string) {
+	sess, err := o.st.GetSession(sessionID)
+	if err != nil {
+		return
+	}
+	if existing, _ := sess.Metadata["provider_session_id"].(string); existing == psid {
+		return // already recorded
+	}
+	_, _ = o.st.UpdateSessionRuntime(sessionID, func(s *model.Session) {
+		if s.Metadata == nil {
+			s.Metadata = model.JSONMap{}
+		}
+		s.Metadata["provider_session_id"] = psid
+	})
 }
 
 func msgKind(k agent.EventKind) model.MessageKind {
