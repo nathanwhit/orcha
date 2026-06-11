@@ -23,8 +23,11 @@ import (
 
 func main() {
 	var (
-		dbPath = flag.String("db", "orcha.db", "path to SQLite database")
-		addr   = flag.String("addr", ":8080", "HTTP listen address")
+		dbPath     = flag.String("db", "orcha.db", "path to SQLite database")
+		addr       = flag.String("addr", ":8080", "HTTP listen address")
+		fakeAgents = flag.Bool("fake-agents", false, "use in-process fake agents instead of the real claude/codex CLIs")
+		claudeBin  = flag.String("claude-bin", "claude", "path to the claude CLI")
+		codexBin   = flag.String("codex-bin", "codex", "path to the codex CLI")
 	)
 	flag.Parse()
 
@@ -38,8 +41,21 @@ func main() {
 		Guards:           orch.DefaultGuards(),
 		ProviderFallback: []model.AgentKind{model.AgentClaude, model.AgentCodex},
 	})
-	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
-	o.RegisterProvider(agent.NewFake(model.AgentCodex, false, nil))
+	if *fakeAgents {
+		// Offline: scriptable in-process agents, no external CLIs needed.
+		o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+		o.RegisterProvider(agent.NewFake(model.AgentCodex, false, nil))
+		log.Println("using fake agents")
+	} else {
+		// Real CLIs. Claude runs as a persistent interactive stream-json session
+		// (steer = send a message to the running process); Codex runs one-shot
+		// `codex exec` and is steered via cancel/resume.
+		o.RegisterProvider(agent.NewClaude(agent.ClaudeConfig{Binary: *claudeBin}))
+		o.RegisterProvider(agent.NewCodex(agent.CodexConfig{Binary: *codexBin}))
+		log.Println("using real claude + codex CLIs")
+	}
+	// TODO: a real git+gh forge is the next backend; the fake forge keeps the
+	// PR workflow exercisable until then.
 	o.SetForge(forge.NewFake())
 
 	// Ensure a local target exists so sessions can be scheduled out of the box.
