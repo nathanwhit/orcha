@@ -145,6 +145,13 @@ running the agent's interactive TUI (or a plain shell). `agent.TmuxProvider`
 Verified against real tmux: interactive shell, send-keys steering, pipe-pane
 streaming, and kill-session cancellation.
 
+A tmux **manager** session is launched with the same MCP/tool flags as the
+headless one (`NewTmuxClaude`), so an attachable manager can also drive the
+orchestrator via its tools. The live pane renders in the dashboard: the
+`GET /api/sessions/:id/screen` endpoint returns a `capture-pane` snapshot (via
+the `agent.Snapshotter` capability), which the dashboard polls into a terminal
+panel alongside the `tmux attach` command.
+
 ## Interactivity: Claude vs Codex (headless mode)
 
 The two agents differ in how steering works, and the UI reflects each session's

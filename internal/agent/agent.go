@@ -79,3 +79,10 @@ type Provider interface {
 	// ResumeSession re-attaches/recreates a session from compact context.
 	ResumeSession(ctx context.Context, sessionID string, spec Spec) (Handle, <-chan Event, error)
 }
+
+// Snapshotter is an optional provider capability: return the current visible
+// screen for a session (e.g. a tmux capture-pane), so the UI can render the live
+// terminal panel.
+type Snapshotter interface {
+	Snapshot(h Handle) (string, error)
+}

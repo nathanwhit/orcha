@@ -161,3 +161,17 @@ func TestMessagesEndpoint_Incremental(t *testing.T) {
 		t.Fatalf("incremental fetch wrong: %+v", msgs)
 	}
 }
+
+func TestSessionScreen_NoLiveScreenReturns204(t *testing.T) {
+	srv, o, _ := newTestServer(t)
+	_, mgr, _ := o.CreateObjective(orch.NewObjectiveSpec{Title: "x", Prompt: "p", Agent: model.AgentClaude})
+	// The session isn't running (no tmux), so there is no live screen.
+	resp, err := http.Get(srv.URL + "/api/sessions/" + mgr.ID + "/screen")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status=%d, want 204", resp.StatusCode)
+	}
+}

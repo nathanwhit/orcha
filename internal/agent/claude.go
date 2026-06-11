@@ -42,23 +42,7 @@ func NewClaude(cfg ClaudeConfig) *ProcessProvider {
 		if cfg.Model != "" {
 			args = append(args, "--model", cfg.Model)
 		}
-		// Per-session MCP servers (e.g. the manager tool surface). Tools appear to
-		// the agent as mcp__<server>__<tool>.
-		if len(spec.MCP) > 0 {
-			servers := map[string]any{}
-			for name, url := range spec.MCP {
-				servers[name] = map[string]any{"type": "http", "url": url}
-			}
-			cfgJSON, _ := json.Marshal(map[string]any{"mcpServers": servers})
-			args = append(args, "--mcp-config", string(cfgJSON))
-		}
-		if spec.PermissionMode != "" {
-			args = append(args, "--permission-mode", spec.PermissionMode)
-		}
-		if len(spec.AllowedTools) > 0 {
-			args = append(args, "--allowedTools")
-			args = append(args, spec.AllowedTools...)
-		}
+		args = append(args, claudeControlArgs(spec)...)
 		args = append(args, cfg.ExtraArgs...)
 		dir := ""
 		if spec.Workspace != nil {
@@ -73,6 +57,54 @@ func NewClaude(cfg ClaudeConfig) *ProcessProvider {
 		NewParser:   func() LineParser { return &claudeParser{} },
 		EncodeInput: encodeClaudeInput,
 		ExecutorFor: cfg.ExecutorFor,
+	})
+}
+
+// claudeControlArgs renders the per-session control flags shared by the headless
+// and tmux Claude launchers: MCP servers (the manager tool surface),
+// pre-approved tools, and permission mode. Tools appear to the agent as
+// mcp__<server>__<tool>.
+func claudeControlArgs(spec Spec) []string {
+	var args []string
+	if len(spec.MCP) > 0 {
+		servers := map[string]any{}
+		for name, url := range spec.MCP {
+			servers[name] = map[string]any{"type": "http", "url": url}
+		}
+		cfgJSON, _ := json.Marshal(map[string]any{"mcpServers": servers})
+		args = append(args, "--mcp-config", string(cfgJSON))
+	}
+	if spec.PermissionMode != "" {
+		args = append(args, "--permission-mode", spec.PermissionMode)
+	}
+	if len(spec.AllowedTools) > 0 {
+		args = append(args, "--allowedTools")
+		args = append(args, spec.AllowedTools...)
+	}
+	return args
+}
+
+// NewTmuxClaude runs Claude's interactive TUI inside an attachable tmux session,
+// wired with the same per-session MCP/tool flags as the headless launcher — so
+// an attachable manager can also drive the orchestrator. The opening prompt is
+// typed into the TUI.
+func NewTmuxClaude(cfg ClaudeConfig) *TmuxProvider {
+	bin := cfg.Binary
+	if bin == "" {
+		bin = "claude"
+	}
+	return NewTmux(TmuxConfig{
+		Kind:              model.AgentClaude,
+		SendInitialPrompt: true,
+		ExecutorFor:       cfg.ExecutorFor,
+		Command: func(spec Spec) []string {
+			args := []string{bin}
+			if cfg.Model != "" {
+				args = append(args, "--model", cfg.Model)
+			}
+			args = append(args, claudeControlArgs(spec)...)
+			return append(args, cfg.ExtraArgs...)
+		},
 	})
 }
 

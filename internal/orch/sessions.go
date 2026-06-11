@@ -360,6 +360,27 @@ func (o *Orchestrator) persistSessionMeta(sessionID string, evMeta model.JSONMap
 	})
 }
 
+// SessionScreen returns the current visible terminal screen for a live session
+// when its provider supports snapshots (e.g. tmux capture-pane). ok is false
+// when the session is not running or the provider has no screen.
+func (o *Orchestrator) SessionScreen(sessionID string) (screen string, ok bool, err error) {
+	o.mu.Lock()
+	r := o.runs[sessionID]
+	o.mu.Unlock()
+	if r == nil {
+		return "", false, nil
+	}
+	snap, isSnap := r.provider.(agent.Snapshotter)
+	if !isSnap {
+		return "", false, nil
+	}
+	s, err := snap.Snapshot(r.handle)
+	if err != nil {
+		return "", true, err
+	}
+	return s, true, nil
+}
+
 func msgKind(k agent.EventKind) model.MessageKind {
 	switch k {
 	case agent.EventToolCall:

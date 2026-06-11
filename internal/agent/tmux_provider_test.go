@@ -109,3 +109,34 @@ func (s *stringSet) has(sub string) bool {
 	}
 	return false
 }
+
+func TestTmuxProvider_Snapshot(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	p := NewTmux(TmuxConfig{Kind: model.AgentOther})
+	h, events, err := p.StartSession(context.Background(), Spec{SessionID: "tmux-snap-1"})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	go func() {
+		for range events {
+		}
+	}() // drain
+	defer p.CancelSession(h)
+
+	if err := p.SendInput(h, "echo SNAPSHOT-CONTENT"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	// The provider implements the Snapshotter capability.
+	var snap Snapshotter = p
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) {
+		screen, err := snap.Snapshot(h)
+		if err == nil && strings.Contains(screen, "SNAPSHOT-CONTENT") {
+			return
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	t.Fatal("snapshot never showed the typed content")
+}

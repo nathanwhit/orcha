@@ -43,6 +43,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/sessions/{id}/cancel", s.cancelSession)
 	mux.HandleFunc("POST /api/sessions/{id}/restart", s.restartSession)
 	mux.HandleFunc("GET /api/sessions/{id}/stream", s.streamSession)
+	mux.HandleFunc("GET /api/sessions/{id}/screen", s.sessionScreen)
 
 	mux.HandleFunc("GET /api/targets", s.listTargets)
 	mux.HandleFunc("GET /api/targets/{id}", s.getTarget)
@@ -227,6 +228,28 @@ func (s *Server) postSessionMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
+}
+
+// sessionScreen returns the live terminal screen (e.g. tmux capture-pane) for a
+// running session, for the dashboard's terminal panel. 204 when there is no live
+// screen (session not running, or a non-terminal provider).
+func (s *Server) sessionScreen(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	screen, ok, err := s.o.SessionScreen(id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !ok {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	sess, _ := s.st.GetSession(id)
+	attach := ""
+	if sess != nil {
+		attach, _ = sess.Metadata["tmux_attach"].(string)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"screen": screen, "attach": attach})
 }
 
 func (s *Server) cancelSession(w http.ResponseWriter, r *http.Request) {

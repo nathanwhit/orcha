@@ -708,3 +708,45 @@ func TestManagerMCP_SpawnWithDependencies(t *testing.T) {
 		t.Fatalf("B dependencies=%v, want [%s]", deps, aID)
 	}
 }
+
+// ---- live tmux terminal panel ----
+
+func TestOrch_SessionScreen_TmuxPanel(t *testing.T) {
+	if _, err := osexec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	o.RegisterProvider(agent.NewTmuxShell(model.AgentClaude))
+
+	s := &model.Session{Role: model.RoleImplementer, Agent: model.AgentClaude, Status: model.SessionQueued}
+	_ = st.CreateSession(s)
+	run, err := o.StartRun(context.Background(), s.ID)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = o.Cancel(s.ID, false); _ = run }()
+
+	// Drive the live shell and read its screen back through the orchestrator.
+	waitFor(t, func() bool {
+		rs, _ := st.GetSession(s.ID)
+		return rs.Status == model.SessionRunning
+	})
+	// Steer through the orchestrator (interactive send-keys).
+	_ = o.Steer(context.Background(), s.ID, "echo PANEL-VISIBLE")
+
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) {
+		screen, ok, err := o.SessionScreen(s.ID)
+		if err == nil && ok && strings.Contains(screen, "PANEL-VISIBLE") {
+			// The attach command is also recorded on the session.
+			rs, _ := st.GetSession(s.ID)
+			if a, _ := rs.Metadata["tmux_attach"].(string); !strings.Contains(a, "tmux attach -t orcha-") {
+				t.Fatalf("attach command not recorded: %q", a)
+			}
+			return
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	t.Fatal("orchestrator SessionScreen never showed the live panel content")
+}

@@ -59,7 +59,7 @@ func main() {
 		// Each session is an interactive TUI inside a real, attachable tmux
 		// session. Watch or take over any session with `tmux attach -t orcha-<id>`
 		// (the attach command is recorded on each session).
-		o.RegisterProvider(agent.NewTmuxAgent(model.AgentClaude, *claudeBin))
+		o.RegisterProvider(agent.NewTmuxClaude(agent.ClaudeConfig{Binary: *claudeBin}))
 		o.RegisterProvider(agent.NewTmuxAgent(model.AgentCodex, *codexBin))
 		log.Println("using tmux interactive TUIs (attach: tmux attach -t orcha-<sessionID>)")
 	default:
@@ -146,6 +146,14 @@ const dashboardHTML = `<!doctype html>
  .needs{background:#9e6a03}
  h2{font-size:12px;text-transform:uppercase;color:#8b949e}
 </style></head>
+<style>
+ #sessions tr{cursor:pointer}
+ #sessions tr.sel{background:#1f6feb33}
+ #term{background:#000;color:#d0d0d0;padding:8px;border:1px solid #30363d;border-radius:4px;
+   white-space:pre;overflow:auto;max-height:60vh;min-height:120px;font-size:12px}
+ .attach{color:#3fb950;font-size:11px;margin:4px 0}
+ code{background:#21262d;padding:1px 4px;border-radius:3px}
+</style>
 <body>
 <header><strong>orcha</strong> — agent team orchestrator</header>
 <div class="wrap">
@@ -153,6 +161,11 @@ const dashboardHTML = `<!doctype html>
   <h2>Objectives</h2>
   <table id="objs"><thead><tr><th>status</th><th>title</th><th>repo</th>
    <th>sessions</th><th>PRs</th><th>needs</th><th>activity</th></tr></thead><tbody></tbody></table>
+  <h2>Sessions</h2>
+  <table id="sessions"><thead><tr><th>status</th><th>role</th><th>agent</th><th>mode</th><th>title</th><th>activity</th></tr></thead><tbody></tbody></table>
+  <h2>Live terminal <span id="selname" style="color:#8b949e"></span></h2>
+  <div id="attach" class="attach"></div>
+  <div id="term">select a running session to view its live tmux panel…</div>
  </main>
  <aside>
   <h2>Targets</h2><div id="targets"></div>
@@ -162,12 +175,20 @@ const dashboardHTML = `<!doctype html>
 </div>
 <script>
 async function j(u){return (await fetch(u)).json()}
+let sel=null;
+function pick(id,title){sel=id;document.getElementById('selname').textContent=title?('— '+title):'';drawTerm();
+ document.querySelectorAll('#sessions tr').forEach(r=>r.classList.toggle('sel',r.dataset.id===id));}
 async function refresh(){
  const objs=await j('/api/objectives');
  document.querySelector('#objs tbody').innerHTML=objs.map(o=>
   '<tr><td><span class="badge">'+o.status+'</span></td><td>'+o.title+'</td><td>'+(o.repo||'')+
   '</td><td>'+o.active_sessions+'</td><td>'+o.pr_count+'</td><td>'+
   (o.needs_user?'<span class="badge needs">user</span>':'')+'</td><td>'+(o.latest_activity||'')+'</td></tr>').join('');
+ const ss=await j('/api/sessions');
+ document.querySelector('#sessions tbody').innerHTML=ss.map(s=>
+  '<tr data-id="'+s.id+'" onclick="pick(\''+s.id+'\',\''+(s.title||s.role)+'\')"><td><span class="badge">'+s.status+
+  '</span></td><td>'+s.role+'</td><td>'+s.agent+'</td><td>'+s.mode+'</td><td>'+(s.title||'')+'</td><td>'+(s.current_activity||'')+'</td></tr>').join('');
+ if(sel)document.querySelectorAll('#sessions tr').forEach(r=>r.classList.toggle('sel',r.dataset.id===sel));
  const t=await j('/api/targets');
  document.getElementById('targets').innerHTML=t.map(x=>x.name+' ['+x.status+'] '+x.available_sessions+'/'+x.capacity_sessions).join('<br>');
  const q=await j('/api/questions');
@@ -175,7 +196,17 @@ async function refresh(){
  const u=await j('/api/usage');
  document.getElementById('usage').innerHTML=u.length?u.map(x=>x.provider+': '+x.state).join('<br>'):'<i>n/a</i>';
 }
+async function drawTerm(){
+ if(!sel)return;
+ const r=await fetch('/api/sessions/'+sel+'/screen');
+ const term=document.getElementById('term'),att=document.getElementById('attach');
+ if(r.status===204){term.textContent='(no live terminal — session not running or not a tmux session)';att.textContent='';return;}
+ const d=await r.json();
+ term.textContent=d.screen||'(empty)';
+ att.innerHTML=d.attach?('attach live: <code>'+d.attach+'</code>'):'';
+}
 refresh();setInterval(refresh,2000);
+setInterval(drawTerm,1000);
 </script>
 </body></html>`
 

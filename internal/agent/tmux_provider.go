@@ -129,8 +129,11 @@ func (p *TmuxProvider) StartSession(ctx context.Context, spec Spec) (Handle, <-c
 		Metadata: model.JSONMap{"tmux_session": name, "tmux_attach": attachCommand(spec.Target, name)},
 	}
 
-	// Stream pane output.
+	// Stream pane output. This is the only producer of stream events; it ends
+	// when the tail process is killed (on teardown), signalled via streamExited.
+	streamExited := make(chan struct{})
 	go func() {
+		defer close(streamExited)
 		sc := bufio.NewScanner(tailProc.Stdout())
 		sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 		for sc.Scan() {
@@ -155,25 +158,33 @@ func (p *TmuxProvider) StartSession(ctx context.Context, spec Spec) (Handle, <-c
 		}()
 	}
 
-	// Watch for the session to end.
+	// Watch for the session to end, then own channel teardown: stop the stream
+	// producer first (so there are no concurrent sends), then emit the single
+	// terminal event and close the channel.
 	go func() {
 		defer close(out)
+		success := true
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
+	wait:
 		for {
 			select {
 			case <-runCtx.Done():
-				p.teardown(spec.SessionID)
-				out <- Event{Kind: EventDone, Success: false, Content: "tmux session canceled"}
-				return
+				success = false
+				break wait
 			case <-ticker.C:
 				if alive, _ := ctrl.HasSession(context.Background(), name); !alive {
-					p.teardown(spec.SessionID)
-					out <- Event{Kind: EventDone, Success: true, Content: "tmux session ended"}
-					return
+					break wait
 				}
 			}
 		}
+		p.teardown(spec.SessionID) // kills tail -> stream goroutine reaches EOF
+		<-streamExited             // no more stream sends after this point
+		msg := "tmux session ended"
+		if !success {
+			msg = "tmux session canceled"
+		}
+		out <- Event{Kind: EventDone, Success: success, Content: msg}
 	}()
 
 	return &tmuxHandle{sessionID: spec.SessionID}, out, nil
@@ -215,6 +226,22 @@ func (p *TmuxProvider) CancelSession(h Handle) error {
 	_ = sess.ctrl.KillSession(context.Background(), sess.name)
 	sess.cancel()
 	return nil
+}
+
+// Snapshot returns the current visible pane content for a live session, so the
+// UI can render the terminal panel. Implements Snapshotter.
+func (p *TmuxProvider) Snapshot(h Handle) (string, error) {
+	th, ok := h.(*tmuxHandle)
+	if !ok {
+		return "", nil
+	}
+	p.mu.Lock()
+	sess := p.sessions[th.sessionID]
+	p.mu.Unlock()
+	if sess == nil {
+		return "", nil
+	}
+	return sess.ctrl.CapturePane(context.Background(), sess.name)
 }
 
 func (p *TmuxProvider) teardown(sessionID string) {
