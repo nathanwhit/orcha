@@ -75,11 +75,24 @@ another worker runs, interactive vs non-interactive steering, remote log
 streaming, remote cancel killing the process group, and the small-dashboard
 guarantee under large transcripts.
 
-## Status vs. the spec
+## Backends
 
-The domain model, storage, scheduler, locks, guards, PR workflow, feedback
-monitor, manager tools, and HTTP API are implemented against in-process **fake**
-agent and forge backends so the whole flow is exercisable and tested end to end.
-Production backends (a real Claude/Codex provider, SSH transport + process
-supervision, and a `git`/`gh` forge) implement the same `agent.Provider` and
-`forge.Forge` interfaces and are the natural next step.
+The orchestrator core (model, storage, scheduler primitives, locks, guards, PR
+workflow, feedback monitor, manager tools, HTTP API) runs against pluggable
+backends. Both fakes (for offline/tested flows) and real implementations exist:
+
+| Concern | Interface | Fake | Real |
+|---|---|---|---|
+| Agent runtime | `agent.Provider` | `agent.NewFake` | `agent.NewClaude` (interactive stream-json), `agent.NewCodex` (`codex exec`) |
+| Execution location | `exec.Executor` | — | `exec.NewLocal` (process group), `exec.NewSSH` (`ssh -tt`) |
+| Code host / VCS | `forge.Forge` | `forge.NewFake` | `forge.NewGit` (`git` + `gh`) |
+
+`cmd/orcha` flags: `-fake-agents` (offline agents) and `-real-forge` (git+gh).
+Live backend tests are gated behind `ORCHA_CLAUDE_LIVE`, `ORCHA_SSH_TEST_HOST`,
+and `ORCHA_GH_LIVE`.
+
+**Still fake / not yet built:** real **workspace preparation** (a genuine `git
+clone` + branch checkout per session, target-local) — the real forge needs this
+to be useful end to end. And a continuous **scheduler driver loop** that pulls
+queued sessions and starts them (the selection/lock/capacity primitives exist;
+the loop that calls them on a tick does not).

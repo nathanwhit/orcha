@@ -28,6 +28,7 @@ func main() {
 		fakeAgents = flag.Bool("fake-agents", false, "use in-process fake agents instead of the real claude/codex CLIs")
 		claudeBin  = flag.String("claude-bin", "claude", "path to the claude CLI")
 		codexBin   = flag.String("codex-bin", "codex", "path to the codex CLI")
+		realForge  = flag.Bool("real-forge", false, "use the real git+gh forge (needs real workspace checkouts) instead of the in-memory fake")
 	)
 	flag.Parse()
 
@@ -54,9 +55,15 @@ func main() {
 		o.RegisterProvider(agent.NewCodex(agent.CodexConfig{Binary: *codexBin}))
 		log.Println("using real claude + codex CLIs")
 	}
-	// TODO: a real git+gh forge is the next backend; the fake forge keeps the
-	// PR workflow exercisable until then.
-	o.SetForge(forge.NewFake())
+	if *realForge {
+		// Real git push + gh PR operations. Requires sessions to run in real git
+		// checkouts (workspace preparation), which is the next backend to land.
+		o.SetForge(forge.NewGit())
+		log.Println("using real git+gh forge")
+	} else {
+		o.SetForge(forge.NewFake())
+		log.Println("using fake forge")
+	}
 
 	// Ensure a local target exists so sessions can be scheduled out of the box.
 	ensureLocalTarget(st)
