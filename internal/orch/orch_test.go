@@ -2,6 +2,10 @@ package orch
 
 import (
 	"context"
+	"os"
+	osexec "os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,6 +13,7 @@ import (
 	"github.com/nathanwhit/orcha/internal/forge"
 	"github.com/nathanwhit/orcha/internal/model"
 	"github.com/nathanwhit/orcha/internal/store"
+	"github.com/nathanwhit/orcha/internal/workspace"
 )
 
 func newTestOrch(t *testing.T) (*Orchestrator, *store.Store) {
@@ -332,7 +337,7 @@ func TestObjective_OpensTwoIndependentPRs(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create session: %v", err)
 		}
-		if _, err := o.PrepareIsolatedWorkspace(s.ID, "octo/repo", "/src/repo", "main"); err != nil {
+		if _, err := o.PrepareIsolatedWorkspace(context.Background(), s.ID, "octo/repo", "", "main"); err != nil {
 			t.Fatalf("workspace: %v", err)
 		}
 		pr, err := o.PublishPR(context.Background(), s.ID, PublishSpec{Title: title, Body: "b", CommitMessage: "c"})
@@ -368,7 +373,7 @@ func TestPublishPR_RejectsWhenNoDiff(t *testing.T) {
 
 	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
 	s, _ := o.CreateSession(SpawnSpec{ObjectiveID: obj.ID, Role: model.RoleImplementer, Agent: model.AgentClaude})
-	ws, _ := o.PrepareIsolatedWorkspace(s.ID, "octo/repo", "/src/repo", "main")
+	ws, _ := o.PrepareIsolatedWorkspace(context.Background(), s.ID, "octo/repo", "", "main")
 	f.SetDiff(ws.Path, false) // mechanical safety: no diff -> refuse to publish
 
 	if _, err := o.PublishPR(context.Background(), s.ID, PublishSpec{Title: "t", Body: "b"}); err == nil {
@@ -487,5 +492,75 @@ func TestPRFeedback_SpawnsFollowupWhileWorkerRuns(t *testing.T) {
 	again, _ := o.ProcessFeedback(context.Background(), pr.ID)
 	if len(again) != 0 {
 		t.Fatalf("duplicate feedback should not spawn another follow-up, got %d", len(again))
+	}
+}
+
+// ---- real workspace preparation ----
+
+func tgit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	c := osexec.Command("git", args...)
+	c.Dir = dir
+	c.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=orcha", "GIT_AUTHOR_EMAIL=orcha@test",
+		"GIT_COMMITTER_NAME=orcha", "GIT_COMMITTER_EMAIL=orcha@test")
+	out, err := c.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// The orchestrator, with a real preparer installed, materializes an isolated
+// workspace as a real git checkout branched off fresh upstream.
+func TestOrch_PreparesRealWorkspace(t *testing.T) {
+	o, st := newTestOrch(t)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	o.SetWorkspacePreparer(workspace.New())
+
+	// Seed a bare "remote" with a commit on main.
+	root := t.TempDir()
+	bare := filepath.Join(root, "remote.git")
+	tgit(t, root, "init", "--bare", "-b", "main", bare)
+	seed := filepath.Join(root, "seed")
+	tgit(t, root, "init", "-b", "main", seed)
+	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tgit(t, seed, "add", ".")
+	tgit(t, seed, "commit", "-m", "initial")
+	tgit(t, seed, "remote", "add", "origin", bare)
+	tgit(t, seed, "push", "-u", "origin", "main")
+	mainSha := tgit(t, seed, "rev-parse", "HEAD")
+
+	// Target work root is a writable temp dir.
+	tgt := &model.Target{Name: "local", Kind: model.TargetLocal, Status: model.TargetOnline,
+		WorkRoot: filepath.Join(root, "work"), CapacitySessions: 2}
+	if err := st.CreateTarget(tgt); err != nil {
+		t.Fatalf("target: %v", err)
+	}
+
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	sess, _ := o.CreateSession(SpawnSpec{ObjectiveID: obj.ID, Role: model.RoleImplementer, Agent: model.AgentClaude})
+
+	// cloneURL is the bare repo path; base is main.
+	ws, err := o.PrepareIsolatedWorkspace(context.Background(), sess.ID, "owner/repo", bare, "main")
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if ws.Status != model.WorkspaceReady {
+		t.Fatalf("workspace status=%s, want ready", ws.Status)
+	}
+	// It is a real checkout on the session branch, based on fresh upstream.
+	if got := tgit(t, ws.Path, "rev-parse", "--abbrev-ref", "HEAD"); got != ws.BranchName {
+		t.Fatalf("checkout on branch %q, want %q", got, ws.BranchName)
+	}
+	if got := tgit(t, ws.Path, "rev-parse", "origin/main"); got != mainSha {
+		t.Fatalf("origin/main=%s, want fresh %s", got, mainSha)
+	}
+	// The session is bound to the workspace.
+	reloaded, _ := st.GetSession(sess.ID)
+	if reloaded.WorkspaceID != ws.ID {
+		t.Fatal("session not bound to workspace")
 	}
 }

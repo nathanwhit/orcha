@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/nathanwhit/orcha/internal/agent"
 	"github.com/nathanwhit/orcha/internal/model"
+	"github.com/nathanwhit/orcha/internal/workspace"
 )
 
 // IngestFeedback records observed PR feedback (deduped) and reacts to lifecycle
@@ -77,22 +79,36 @@ func (o *Orchestrator) ProcessFeedback(ctx context.Context, prID string) ([]*mod
 	if err != nil {
 		return nil, err
 	}
+	cloneURL := cloneURLFor(pr.Repo)
+	dir := fmt.Sprintf("%s/pr-%d", target.WorkRoot, pr.Number)
 	ws := &model.Workspace{
 		ObjectiveID: pr.ObjectiveID,
 		TargetID:    target.ID,
 		Kind:        model.WorkspacePRBranch,
 		ProjectPath: pr.Repo,
 		VCS:         model.VCSGit,
-		Path:        fmt.Sprintf("%s/pr-%d", target.WorkRoot, pr.Number),
+		Path:        dir,
 		BaseRef:     pr.Branch,
 		BaseSHA:     pr.HeadSHA,
 		BranchName:  pr.Branch,
-		Status:      model.WorkspaceReady,
-		Metadata:    model.JSONMap{"repo": pr.Repo, "pr_id": prID},
+		Status:      model.WorkspacePreparing,
+		Metadata:    model.JSONMap{"repo": pr.Repo, "pr_id": prID, "clone_url": cloneURL},
 	}
 	if err := o.st.CreateWorkspace(ws); err != nil {
 		return nil, err
 	}
+	// Materialize the PR-branch checkout at its fresh head so follow-up work
+	// updates the correct branch.
+	if o.preparer != nil {
+		ex := agent.NewExecutor(target)
+		if perr := o.preparer.PreparePRBranch(ctx, ex, workspace.Spec{
+			WorkRoot: target.WorkRoot, RepoURL: cloneURL, Dir: dir, Branch: pr.Branch,
+		}); perr != nil {
+			_ = o.st.SetWorkspaceStatus(ws.ID, model.WorkspaceFailed)
+			return nil, perr
+		}
+	}
+	_ = o.st.SetWorkspaceStatus(ws.ID, model.WorkspaceReady)
 
 	goal := fmt.Sprintf("Address feedback on PR #%d (%s).\n\nFeedback:\n%s\n\nPrior PR summary: %s",
 		pr.Number, pr.Title, strings.Join(checkLogs, "\n"), pr.Summary)

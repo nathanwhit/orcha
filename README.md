@@ -86,13 +86,19 @@ backends. Both fakes (for offline/tested flows) and real implementations exist:
 | Agent runtime | `agent.Provider` | `agent.NewFake` | `agent.NewClaude` (interactive stream-json), `agent.NewCodex` (`codex exec`) |
 | Execution location | `exec.Executor` | — | `exec.NewLocal` (process group), `exec.NewSSH` (`ssh -tt`) |
 | Code host / VCS | `forge.Forge` | `forge.NewFake` | `forge.NewGit` (`git` + `gh`) |
+| Workspace checkout | `workspace.Preparer` | (row only) | `workspace.New` (mirror cache + fresh-upstream clone) |
 
-`cmd/orcha` flags: `-fake-agents` (offline agents) and `-real-forge` (git+gh).
-Live backend tests are gated behind `ORCHA_CLAUDE_LIVE`, `ORCHA_SSH_TEST_HOST`,
-and `ORCHA_GH_LIVE`.
+`cmd/orcha` flags: `-fake-agents` (offline agents) and `-real-forge` (git+gh
+forge **and** real workspace checkouts). Live backend tests are gated behind
+`ORCHA_CLAUDE_LIVE`, `ORCHA_SSH_TEST_HOST`, and `ORCHA_GH_LIVE`.
 
-**Still fake / not yet built:** real **workspace preparation** (a genuine `git
-clone` + branch checkout per session, target-local) — the real forge needs this
-to be useful end to end. And a continuous **scheduler driver loop** that pulls
-queued sessions and starts them (the selection/lock/capacity primitives exist;
-the loop that calls them on a tick does not).
+**Workspace freshness:** every prepared workspace is based on the latest
+upstream. A per-target bare mirror cache gives clone speed and build/cache
+locality, but the isolated checkout always re-fetches from the real origin and
+branches off the freshly-fetched base — never a stale local copy. PR follow-up
+workspaces check out the PR branch at its fresh head. Preparation runs through
+the `exec.Executor`, so it works identically on local and SSH targets.
+
+**Still not built:** a continuous **scheduler driver loop** that pulls queued
+sessions and starts them (the selection/lock/capacity primitives exist; the loop
+that calls them on a tick does not).

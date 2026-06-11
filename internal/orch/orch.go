@@ -12,6 +12,7 @@ import (
 	"github.com/nathanwhit/orcha/internal/forge"
 	"github.com/nathanwhit/orcha/internal/model"
 	"github.com/nathanwhit/orcha/internal/store"
+	"github.com/nathanwhit/orcha/internal/workspace"
 )
 
 // GuardConfig holds the loop-guard thresholds. When any trips, the offending
@@ -50,6 +51,7 @@ type Orchestrator struct {
 	cfg       Config
 	providers map[model.AgentKind]agent.Provider
 	forge     forge.Forge
+	preparer  *workspace.Preparer
 
 	mu     sync.Mutex
 	guards map[string]*guardState // keyed by session id
@@ -58,6 +60,12 @@ type Orchestrator struct {
 
 // SetForge installs the code-host/VCS backend used by the PR workflow.
 func (o *Orchestrator) SetForge(f forge.Forge) { o.forge = f }
+
+// SetWorkspacePreparer installs the real git checkout backend. When set,
+// isolated and PR-branch workspaces are materialized as fresh git checkouts on
+// the session's target. When nil (e.g. in unit tests), workspace rows are
+// recorded without a real checkout.
+func (o *Orchestrator) SetWorkspacePreparer(p *workspace.Preparer) { o.preparer = p }
 
 // New builds an Orchestrator.
 func New(st *store.Store, cfg Config) *Orchestrator {

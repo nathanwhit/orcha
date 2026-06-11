@@ -239,7 +239,12 @@ func (rawParser) Done(error) []Event { return nil }
 // ExecutorForTarget chooses an executor based on a session's target. Local
 // targets (or a nil target) run on this host; SSH targets run remotely.
 func ExecutorForTarget(spec Spec) exec.Executor {
-	t := spec.Target
+	return NewExecutor(spec.Target)
+}
+
+// NewExecutor builds the executor for a target. A nil or local target runs on
+// this host; an SSH target runs remotely.
+func NewExecutor(t *model.Target) exec.Executor {
 	if t == nil || t.Kind != model.TargetSSH {
 		return exec.NewLocal()
 	}

@@ -19,6 +19,7 @@ import (
 	"github.com/nathanwhit/orcha/internal/model"
 	"github.com/nathanwhit/orcha/internal/orch"
 	"github.com/nathanwhit/orcha/internal/store"
+	"github.com/nathanwhit/orcha/internal/workspace"
 )
 
 func main() {
@@ -56,10 +57,12 @@ func main() {
 		log.Println("using real claude + codex CLIs")
 	}
 	if *realForge {
-		// Real git push + gh PR operations. Requires sessions to run in real git
-		// checkouts (workspace preparation), which is the next backend to land.
+		// Real git push + gh PR operations, paired with real workspace
+		// preparation so sessions run in fresh git checkouts branched off the
+		// latest upstream.
 		o.SetForge(forge.NewGit())
-		log.Println("using real git+gh forge")
+		o.SetWorkspacePreparer(workspace.New())
+		log.Println("using real git+gh forge with real workspace checkouts")
 	} else {
 		o.SetForge(forge.NewFake())
 		log.Println("using fake forge")
