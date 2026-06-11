@@ -33,6 +33,7 @@ func main() {
 		realForge  = flag.Bool("real-forge", false, "use the real git+gh forge (needs real workspace checkouts) instead of the in-memory fake")
 		maxConc    = flag.Int("max-concurrent", 8, "max simultaneously active sessions across all targets")
 		schedEvery = flag.Duration("schedule-interval", 2*time.Second, "scheduler idle tick interval")
+		mcpBase    = flag.String("mcp-base-url", "http://127.0.0.1:8080", "base URL where the manager MCP tool surface is reachable by agent CLIs")
 	)
 	flag.Parse()
 
@@ -43,8 +44,9 @@ func main() {
 	defer st.Close()
 
 	o := orch.New(st, orch.Config{
-		Guards:           orch.DefaultGuards(),
-		ProviderFallback: []model.AgentKind{model.AgentClaude, model.AgentCodex},
+		Guards:            orch.DefaultGuards(),
+		ProviderFallback:  []model.AgentKind{model.AgentClaude, model.AgentCodex},
+		ManagerMCPBaseURL: *mcpBase,
 	})
 	if *fakeAgents {
 		// Offline: scriptable in-process agents, no external CLIs needed.
@@ -86,6 +88,9 @@ func main() {
 	srv := api.New(o)
 	mux := http.NewServeMux()
 	mux.Handle("/api/", srv.Handler())
+	// Manager tool surface (MCP). Manager sessions' Claude connects to
+	// /mcp/<sessionID> to drive the orchestrator.
+	mux.Handle("/mcp/", http.StripPrefix("/mcp", o.ManagerMCPHandler()))
 	mux.HandleFunc("/", dashboard)
 
 	httpSrv := &http.Server{Addr: *addr, Handler: mux}

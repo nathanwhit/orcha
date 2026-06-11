@@ -43,6 +43,11 @@ type Config struct {
 	// ProviderFallback is the ordered preference of providers when the primary
 	// is exhausted. Empty means "ask the user".
 	ProviderFallback []model.AgentKind
+	// ManagerMCPBaseURL is the base URL where the manager MCP tool surface is
+	// served (e.g. "http://127.0.0.1:8080"). When set, manager sessions are
+	// launched with the orcha tools wired in at <base>/mcp/<sessionID>. Empty
+	// disables manager tool-calling.
+	ManagerMCPBaseURL string
 }
 
 // Orchestrator coordinates sessions across targets and providers.

@@ -21,6 +21,13 @@ type Spec struct {
 	Workspace      *model.Workspace
 	Target         *model.Target
 	Metadata       model.JSONMap
+	// MCP maps an MCP server name to its URL (e.g. {"orcha": "http://.../mcp/<id>"}).
+	// Providers that support MCP (Claude) expose these tools to the session.
+	MCP map[string]string
+	// AllowedTools are auto-approved tool names/patterns (e.g. "mcp__orcha").
+	AllowedTools []string
+	// PermissionMode overrides the agent's permission mode (e.g. "acceptEdits").
+	PermissionMode string
 }
 
 // EventKind classifies a runtime event emitted by a provider.

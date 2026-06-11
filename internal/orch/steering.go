@@ -101,7 +101,7 @@ func (o *Orchestrator) resumeWithSteer(ctx context.Context, sess *model.Session,
 // buildSpec assembles the agent.Spec handed to a provider from a session and
 // its bound resources. The context is summary-only.
 func (o *Orchestrator) buildSpec(sess *model.Session, ws *model.Workspace, tgt *model.Target) agent.Spec {
-	return agent.Spec{
+	spec := agent.Spec{
 		SessionID:      sess.ID,
 		Role:           sess.Role,
 		Mode:           sess.Mode,
@@ -112,4 +112,25 @@ func (o *Orchestrator) buildSpec(sess *model.Session, ws *model.Workspace, tgt *
 		Target:         tgt,
 		Metadata:       sess.Metadata,
 	}
+	// Wire the manager tool surface into manager sessions.
+	if sess.Role == model.RoleManager && o.cfg.ManagerMCPBaseURL != "" {
+		spec.MCP = map[string]string{"orcha": o.cfg.ManagerMCPBaseURL + "/mcp/" + sess.ID}
+		spec.AllowedTools = []string{"mcp__orcha"}
+		spec.PermissionMode = "default"
+		if spec.Prompt != "" {
+			spec.Prompt = managerSystemPreamble + "\n\n" + spec.Prompt
+		}
+	}
+	return spec
 }
+
+// managerSystemPreamble orients the manager agent toward the tool surface and
+// the operating rules from the spec.
+const managerSystemPreamble = `You are the MANAGER of an engineering team working toward an objective.
+You coordinate via your orcha tools (mcp__orcha__*): spawn_session to delegate
+scoped work, ask_user when direction/credentials are unclear, publish_pr to ship
+coherent slices, comment_pr/update_pr for follow-ups, create_note for shared
+memory, and mark_objective_done when finished. Prefer several clean PR-sized
+slices over one giant PR. Keep working after publishing intermediate PRs unless
+truly blocked. You work from summaries; spawn workers to do the actual coding.
+Keep your messages concise and operational.`

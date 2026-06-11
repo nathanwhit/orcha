@@ -3,14 +3,18 @@ package orch
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	osexec "os/exec"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/nathanwhit/orcha/internal/agent"
 	"github.com/nathanwhit/orcha/internal/exec"
 	"github.com/nathanwhit/orcha/internal/forge"
+	"github.com/nathanwhit/orcha/internal/model"
 	"github.com/nathanwhit/orcha/internal/workspace"
 )
 
@@ -87,4 +91,66 @@ func TestLive_OneShotPR(t *testing.T) {
 		t.Fatalf("expected a PR number, got %+v", res)
 	}
 	t.Logf("opened PR #%d: %s", res.Number, res.URL)
+}
+
+// TestLive_ManagerToolCalling drives a real manager: Claude connects to the MCP
+// server over HTTP and calls spawn_session, which must create a worker in the
+// orchestrator. Gated behind ORCHA_LIVE_MANAGER=1 (spends tokens).
+//
+//	ORCHA_LIVE_MANAGER=1 go test ./internal/orch/ -run TestLive_ManagerToolCalling -v
+func TestLive_ManagerToolCalling(t *testing.T) {
+	if os.Getenv("ORCHA_LIVE_MANAGER") != "1" {
+		t.Skip("set ORCHA_LIVE_MANAGER=1 to run the live manager tool-calling test")
+	}
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	o.RegisterProvider(agent.NewClaude(agent.ClaudeConfig{}))
+
+	// Stand up the manager MCP surface and point the orchestrator at it.
+	mux := http.NewServeMux()
+	mux.Handle("/mcp/", http.StripPrefix("/mcp", o.ManagerMCPHandler()))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	o.cfg.ManagerMCPBaseURL = srv.URL
+
+	obj, mgr, err := o.CreateObjective(NewObjectiveSpec{
+		Title:  "tiny",
+		Prompt: "Use your spawn_session tool to create exactly ONE implementer worker with title 'hello' and goal 'print hello world'. Then stop. Do nothing else.",
+		Agent:  model.AgentClaude,
+	})
+	if err != nil {
+		t.Fatalf("create objective: %v", err)
+	}
+
+	run, err := o.StartRun(context.Background(), mgr.ID)
+	if err != nil {
+		t.Fatalf("start manager: %v", err)
+	}
+	defer func() { _ = o.Cancel(mgr.ID, true); _ = run }()
+
+	deadline := time.Now().Add(150 * time.Second)
+	for time.Now().Before(deadline) {
+		sessions, _ := st.ListSessionsByObjective(obj.ID)
+		for _, s := range sessions {
+			if s.Role == model.RoleImplementer {
+				t.Logf("manager spawned worker %s (%q) via MCP tool call", s.ID, s.Title)
+				return // success: the live tool call reached the orchestrator
+			}
+		}
+		time.Sleep(time.Second)
+	}
+
+	// Dump the manager transcript to debug a protocol/handshake issue.
+	msgs, _ := st.MessagesAfter(mgr.ID, 0, 200)
+	for _, m := range msgs {
+		t.Logf("[%s/%s] %s", m.Source, m.Kind, truncate(m.Content, 200))
+	}
+	t.Fatal("manager did not spawn a worker via MCP within the deadline")
+}
+
+func truncate(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
 }

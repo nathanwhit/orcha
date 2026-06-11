@@ -1,7 +1,11 @@
 package orch
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -562,5 +566,145 @@ func TestOrch_PreparesRealWorkspace(t *testing.T) {
 	reloaded, _ := st.GetSession(sess.ID)
 	if reloaded.WorkspaceID != ws.ID {
 		t.Fatal("session not bound to workspace")
+	}
+}
+
+// ---- manager tool-calling (MCP) ----
+
+func mcpCall(t *testing.T, h http.Handler, sessionID, tool string, args map[string]any) map[string]any {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{"name": tool, "arguments": args},
+	})
+	req := httptest.NewRequest("POST", "/mcp/"+sessionID, bytes.NewReader(body))
+	req = req.WithContext(context.Background())
+	rec := httptest.NewRecorder()
+	// Mount the same way main does: strip the /mcp prefix.
+	http.StripPrefix("/mcp", h).ServeHTTP(rec, req)
+	var out map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	res, _ := out["result"].(map[string]any)
+	if res == nil {
+		t.Fatalf("no result: %s", rec.Body.String())
+	}
+	return res
+}
+
+func mcpText(res map[string]any) (string, bool) {
+	isErr, _ := res["isError"].(bool)
+	content, _ := res["content"].([]any)
+	if len(content) == 0 {
+		return "", isErr
+	}
+	text, _ := content[0].(map[string]any)["text"].(string)
+	return text, isErr
+}
+
+// The manager's tool calls, arriving over MCP, drive the orchestrator: spawning
+// workers, asking the user, and marking the objective done.
+func TestManagerMCP_DrivesOrchestrator(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	h := o.ManagerMCPHandler()
+
+	obj, mgr, err := o.CreateObjective(NewObjectiveSpec{Title: "Broad work", Prompt: "do it", Agent: model.AgentClaude})
+	if err != nil {
+		t.Fatalf("create objective: %v", err)
+	}
+
+	// spawn_session -> a worker appears under the objective.
+	res := mcpCall(t, h, mgr.ID, "spawn_session", map[string]any{
+		"role": "implementer", "title": "Port module", "goal": "port it",
+	})
+	text, isErr := mcpText(res)
+	if isErr {
+		t.Fatalf("spawn_session errored: %s", text)
+	}
+	sessions, _ := st.ListSessionsByObjective(obj.ID)
+	var worker *model.Session
+	for _, s := range sessions {
+		if s.Role == model.RoleImplementer {
+			worker = s
+		}
+	}
+	if worker == nil {
+		t.Fatal("spawn_session did not create an implementer worker")
+	}
+	if worker.ParentSessionID != mgr.ID {
+		t.Fatal("worker not parented to the manager")
+	}
+
+	// ask_user -> a question is opened and the objective waits.
+	res = mcpCall(t, h, mgr.ID, "ask_user", map[string]any{"question": "Which DB?", "context": "need a choice"})
+	if _, isErr := mcpText(res); isErr {
+		t.Fatal("ask_user errored")
+	}
+	qs, _ := st.ListOpenQuestions()
+	if len(qs) != 1 {
+		t.Fatalf("expected 1 open question, got %d", len(qs))
+	}
+	if ro, _ := st.GetObjective(obj.ID); ro.Status != model.ObjectiveWaitingUser {
+		t.Fatalf("objective should be waiting_user, got %s", ro.Status)
+	}
+
+	// create_note -> shared-memory artifact.
+	res = mcpCall(t, h, mgr.ID, "create_note", map[string]any{"title": "decision", "body": "use postgres"})
+	if _, isErr := mcpText(res); isErr {
+		t.Fatal("create_note errored")
+	}
+	arts, _ := st.ListArtifactsByObjective(obj.ID)
+	if len(arts) == 0 {
+		t.Fatal("create_note did not record an artifact")
+	}
+
+	// mark_objective_done -> objective succeeds.
+	res = mcpCall(t, h, mgr.ID, "mark_objective_done", map[string]any{"summary": "shipped"})
+	if _, isErr := mcpText(res); isErr {
+		t.Fatal("mark_objective_done errored")
+	}
+	if ro, _ := st.GetObjective(obj.ID); ro.Status != model.ObjectiveSucceeded {
+		t.Fatalf("objective should be succeeded, got %s", ro.Status)
+	}
+}
+
+// Dependencies passed by the manager are honored by the scheduler.
+func TestManagerMCP_SpawnWithDependencies(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	h := o.ManagerMCPHandler()
+
+	_, mgr, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p", Agent: model.AgentClaude})
+	r1 := mcpCall(t, h, mgr.ID, "spawn_session", map[string]any{"role": "implementer", "title": "A", "goal": "a"})
+	a, _ := mcpText(r1)
+	// Extract the session id from the response text "spawned ... session <id> ...".
+	var aID string
+	for _, f := range strings.Fields(a) {
+		if len(f) == 36 { // uuid
+			aID = f
+		}
+	}
+	if aID == "" {
+		t.Fatalf("could not find session id in %q", a)
+	}
+	mcpCall(t, h, mgr.ID, "spawn_session", map[string]any{
+		"role": "implementer", "title": "B", "goal": "b", "dependencies": []any{aID},
+	})
+
+	// Find B and confirm its declared dependency.
+	sessions, _ := st.ListSessions()
+	var b *model.Session
+	for _, s := range sessions {
+		if s.Title == "B" {
+			b = s
+		}
+	}
+	if b == nil {
+		t.Fatal("B not created")
+	}
+	if deps := dependencyIDs(b); len(deps) != 1 || deps[0] != aID {
+		t.Fatalf("B dependencies=%v, want [%s]", deps, aID)
 	}
 }

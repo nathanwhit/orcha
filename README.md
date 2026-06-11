@@ -87,6 +87,7 @@ backends. Both fakes (for offline/tested flows) and real implementations exist:
 | Execution location | `exec.Executor` | — | `exec.NewLocal` (process group), `exec.NewSSH` (`ssh -tt`) |
 | Code host / VCS | `forge.Forge` | `forge.NewFake` | `forge.NewGit` (`git` + `gh`) |
 | Workspace checkout | `workspace.Preparer` | (row only) | `workspace.New` (mirror cache + fresh-upstream clone) |
+| Manager tools | `mcp` server | (call orch directly) | `Orchestrator.ManagerMCPHandler` (MCP over HTTP) |
 
 `cmd/orcha` flags: `-fake-agents` (offline agents) and `-real-forge` (git+gh
 forge **and** real workspace checkouts). Live backend tests are gated behind
@@ -110,3 +111,18 @@ Creating an objective therefore auto-starts its manager, which spawns workers
 the scheduler then runs — no manual restart. Dependencies that fail/cancel cancel
 their dependents; exhausted providers park the session and ask the user instead
 of respinning. Flags: `-max-concurrent`, `-schedule-interval`.
+
+## Manager tool-calling
+
+Every objective starts with a manager session. The manager *agent* drives the
+orchestrator through tools exposed over MCP: `Orchestrator.ManagerMCPHandler`
+serves a minimal Streamable-HTTP MCP server (mounted at `/mcp/<sessionID>`), and
+each manager session's Claude is launched with `--mcp-config` pointing at its own
+endpoint (`Config.ManagerMCPBaseURL`). Tool calls — `spawn_session`, `ask_user`,
+`publish_pr`, `update_pr`, `comment_pr`, `create_note`, `mark_objective_done`,
+`cancel_session` — are scoped to the calling session and execute the
+corresponding orchestrator methods. Spawned workers are then auto-started by the
+scheduler.
+
+Verified live (`ORCHA_LIVE_MANAGER=1`): a real Claude manager connects over HTTP
+and calls `spawn_session`, creating a worker in the orchestrator.

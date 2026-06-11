@@ -42,6 +42,23 @@ func NewClaude(cfg ClaudeConfig) *ProcessProvider {
 		if cfg.Model != "" {
 			args = append(args, "--model", cfg.Model)
 		}
+		// Per-session MCP servers (e.g. the manager tool surface). Tools appear to
+		// the agent as mcp__<server>__<tool>.
+		if len(spec.MCP) > 0 {
+			servers := map[string]any{}
+			for name, url := range spec.MCP {
+				servers[name] = map[string]any{"type": "http", "url": url}
+			}
+			cfgJSON, _ := json.Marshal(map[string]any{"mcpServers": servers})
+			args = append(args, "--mcp-config", string(cfgJSON))
+		}
+		if spec.PermissionMode != "" {
+			args = append(args, "--permission-mode", spec.PermissionMode)
+		}
+		if len(spec.AllowedTools) > 0 {
+			args = append(args, "--allowedTools")
+			args = append(args, spec.AllowedTools...)
+		}
 		args = append(args, cfg.ExtraArgs...)
 		dir := ""
 		if spec.Workspace != nil {
