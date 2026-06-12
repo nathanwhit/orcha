@@ -1,7 +1,8 @@
-import { Component, useState } from "react";
+import { Component, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import * as api from "./api";
 import { useHashPath, usePoll } from "./hooks";
+import { IconButton } from "./ui";
 import { Icon } from "./icons";
 import type { IconName } from "./icons";
 import { ActivityPage } from "./pages/Activity";
@@ -183,16 +184,42 @@ function NavItems({
 }
 
 function HealthFooter() {
-  const health = usePoll(() => api.get<api.Health>("/api/health"), 30000);
+  const health = usePoll(() => api.get<api.Health>("/api/health"), 10000);
+  const [restarting, setRestarting] = useState(false);
+  const startedRef = useRef<string | undefined>(undefined);
+  const started = health.data?.started;
+  // A new `started` timestamp means the restarted process is up.
+  useEffect(() => {
+    if (started && startedRef.current && started !== startedRef.current)
+      setRestarting(false);
+    if (started) startedRef.current = started;
+  }, [started]);
+
   const ok = health.data?.status === "ok";
   return (
-    <div className="border-t border-edge px-5 py-3.5">
-      <p className="flex items-center gap-2 text-[11px] text-faint">
-        <span
-          className={`size-1.5 rounded-full ${ok ? "bg-emerald-400" : "bg-rose-400"}`}
+    <div className="border-t border-edge px-3 py-2">
+      <div className="flex items-center justify-between">
+        <p
+          className="flex items-center gap-2 px-2 text-[11px] text-faint"
+          title={health.data ? `build ${health.data.build} · started ${health.data.started}` : undefined}
+        >
+          <span
+            className={`size-1.5 rounded-full ${restarting ? "animate-pulse bg-amber-400" : ok ? "bg-emerald-400" : "bg-rose-400"}`}
+          />
+          {restarting ? "restarting…" : ok ? `v${health.data?.version}` : "unreachable"}
+        </p>
+        <IconButton
+          name="refresh"
+          title="Rebuild & restart orcha (needs scripts/dev.sh supervising)"
+          disabled={restarting}
+          onClick={() => {
+            if (!confirm("Rebuild and restart the orcha server? Live tmux sessions are re-adopted."))
+              return;
+            setRestarting(true);
+            void api.post("/api/restart").catch(() => setRestarting(false));
+          }}
         />
-        {ok ? `v${health.data?.version}` : "unreachable"}
-      </p>
+      </div>
     </div>
   );
 }

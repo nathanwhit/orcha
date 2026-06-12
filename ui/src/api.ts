@@ -182,6 +182,8 @@ export interface Project {
 export interface Health {
   status: string;
   version: string;
+  build: string;
+  started: string;
   time: string;
 }
 

@@ -133,6 +133,20 @@ func main() {
 
 	srv := api.New(o)
 	mux := http.NewServeMux()
+	// Restart support: exits with code 42 after a graceful shutdown, which the
+	// scripts/dev.sh supervisor takes as "rebuild from source and relaunch".
+	// Without a supervisor this just stops the server. Restarting is safe for
+	// in-flight work: shutdown leaves sessions recoverable and live tmux
+	// sessions are re-adopted on the next boot.
+	restart := make(chan struct{}, 1)
+	mux.HandleFunc("POST /api/restart", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"restarting"}` + "\n"))
+		select {
+		case restart <- struct{}{}:
+		default:
+		}
+	})
 	mux.Handle("/api/", srv.Handler())
 	// Manager tool surface (MCP). Manager sessions' Claude connects to
 	// /mcp/<sessionID> to drive the orchestrator.
@@ -149,10 +163,19 @@ func main() {
 		}
 	}()
 
-	<-ctx.Done()
+	restarting := false
+	select {
+	case <-ctx.Done():
+	case <-restart:
+		restarting = true
+		stop() // unwind runs the same way a signal would
+	}
 	log.Println("shutting down")
 	_ = httpSrv.Shutdown(context.Background())
 	o.CloseTunnels() // ssh -N children don't exit on their own
+	if restarting {
+		os.Exit(42) // restart sentinel for scripts/dev.sh
+	}
 }
 
 func ensureLocalTarget(st *store.Store) {
