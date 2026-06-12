@@ -1558,6 +1558,74 @@ func terminateSession(t *testing.T, st *store.Store, id string, final model.Sess
 	}
 }
 
+func TestReclaimWorkspaces(t *testing.T) {
+	o, st := newTestOrch(t)
+	tgt := addTarget(t, st, "local", model.TargetLocal, 4)
+
+	mkdir := func(name string) string {
+		d := filepath.Join(t.TempDir(), name)
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	newWS := func(objID, path string) *model.Workspace {
+		ws := &model.Workspace{ObjectiveID: objID, TargetID: tgt.ID,
+			Kind: model.WorkspaceIsolated, Path: path, Status: model.WorkspaceReady}
+		if err := st.CreateWorkspace(ws); err != nil {
+			t.Fatal(err)
+		}
+		return ws
+	}
+
+	// Terminal objective with no live sessions -> its checkout is reclaimed.
+	doneObj := &model.Objective{Title: "done", Prompt: "p", Status: model.ObjectiveSucceeded}
+	_ = st.CreateObjective(doneObj)
+	donePath := mkdir("done")
+	doneWS := newWS(doneObj.ID, donePath)
+
+	// Active objective -> left alone (it may still publish/inherit the checkout).
+	activeObj := &model.Objective{Title: "active", Prompt: "p", Status: model.ObjectiveActive}
+	_ = st.CreateObjective(activeObj)
+	activePath := mkdir("active")
+	activeWS := newWS(activeObj.ID, activePath)
+
+	// Terminal objective but a non-terminal session still references the
+	// workspace -> left alone (safety against the sharing hazard).
+	busyObj := &model.Objective{Title: "busy", Prompt: "p", Status: model.ObjectiveSucceeded}
+	_ = st.CreateObjective(busyObj)
+	busyPath := mkdir("busy")
+	busyWS := newWS(busyObj.ID, busyPath)
+	if err := st.CreateSession(&model.Session{ObjectiveID: busyObj.ID, Role: model.RoleImplementer,
+		Agent: model.AgentClaude, Status: model.SessionRunning, WorkspaceID: busyWS.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	o.ReclaimWorkspaces(context.Background())
+
+	// Reclaimed: dir gone, status archived.
+	if _, err := os.Stat(donePath); !os.IsNotExist(err) {
+		t.Fatalf("terminal objective's checkout should be removed, stat err=%v", err)
+	}
+	if ws, _ := st.GetWorkspace(doneWS.ID); ws.Status != model.WorkspaceArchived {
+		t.Fatalf("reclaimed workspace should be archived, got %s", ws.Status)
+	}
+	// Kept: active objective.
+	if _, err := os.Stat(activePath); err != nil {
+		t.Fatalf("active objective's checkout must be kept, stat err=%v", err)
+	}
+	if ws, _ := st.GetWorkspace(activeWS.ID); ws.Status != model.WorkspaceReady {
+		t.Fatalf("active workspace must stay ready, got %s", ws.Status)
+	}
+	// Kept: in-use by a live session.
+	if _, err := os.Stat(busyPath); err != nil {
+		t.Fatalf("in-use checkout must be kept, stat err=%v", err)
+	}
+	if ws, _ := st.GetWorkspace(busyWS.ID); ws.Status != model.WorkspaceReady {
+		t.Fatalf("in-use workspace must stay ready, got %s", ws.Status)
+	}
+}
+
 func TestFailingChecksPR_SpawnsCIFollowup(t *testing.T) {
 	o, st := newTestOrch(t)
 	addTarget(t, st, "local", model.TargetLocal, 4)

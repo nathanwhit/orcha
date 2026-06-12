@@ -46,10 +46,19 @@ func (s *Scheduler) Wake() {
 	}
 }
 
+// workspaceGCInterval is how often the scheduler reclaims unneeded checkouts.
+// Disk cleanup is not latency-sensitive, so it runs far less often than the
+// scheduling tick.
+var workspaceGCInterval = 5 * time.Minute
+
 // Run drives the scheduler until ctx is canceled.
 func (s *Scheduler) Run(ctx context.Context) {
 	t := time.NewTicker(s.interval)
+	gc := time.NewTicker(workspaceGCInterval)
 	defer t.Stop()
+	defer gc.Stop()
+	// Sweep stale checkouts left by a previous process at startup, then on a tick.
+	go s.o.ReclaimWorkspaces(ctx)
 	for {
 		_, _ = s.Tick(ctx)
 		// Re-engage any active objective that has gone idle (no worker making
@@ -61,6 +70,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 			return
 		case <-t.C:
 		case <-s.wake:
+		case <-gc.C:
+			// Reclaim asynchronously: a remote rm must not stall scheduling.
+			go s.o.ReclaimWorkspaces(ctx)
 		}
 	}
 }

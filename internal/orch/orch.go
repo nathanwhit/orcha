@@ -80,6 +80,8 @@ type Orchestrator struct {
 
 	pokeMu   sync.Mutex           // guards lastPoke
 	lastPoke map[string]time.Time // per-objective last supervisor re-poke time (cooldown)
+
+	gcMu sync.Mutex // held during a workspace-reclaim pass so passes don't overlap
 }
 
 // SetNotify installs a hook called whenever schedulable state changes (a
