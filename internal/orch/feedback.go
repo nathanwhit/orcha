@@ -181,6 +181,28 @@ func (o *Orchestrator) notifyManagerOfMerge(pr *model.PullRequest) {
 	_ = o.Steer(context.Background(), mgr.ID, msg)
 }
 
+// hasActivePRFollowup reports whether a non-terminal follow-up is already working
+// the given PR — so the conflict/feedback path doesn't dispatch a duplicate while
+// one is in flight (and does re-dispatch once a prior attempt has finished).
+func (o *Orchestrator) hasActivePRFollowup(objectiveID, prID string) bool {
+	sessions, err := o.st.ListSessionsByObjective(objectiveID)
+	if err != nil {
+		return false
+	}
+	for _, s := range sessions {
+		if s.Status.IsTerminal() {
+			continue
+		}
+		if s.Role != model.RolePRFollowup && s.Role != model.RoleCIFollowup {
+			continue
+		}
+		if id, _ := s.Metadata["pr_id"].(string); id == prID {
+			return true
+		}
+	}
+	return false
+}
+
 // activeManagerFor returns the objective's live (non-terminal) manager session,
 // or nil if there isn't one.
 func (o *Orchestrator) activeManagerFor(objectiveID string) *model.Session {

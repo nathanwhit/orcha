@@ -1428,11 +1428,23 @@ func TestConflictingPR_SpawnsRebaseFollowup(t *testing.T) {
 		t.Fatalf("follow-up should be a PR follow-up tasked to rebase, got role=%s goal=%q", spawned[0].Role, spawned[0].Goal)
 	}
 
-	// Re-observing the same conflicting head does not spawn a second follow-up.
+	// While that follow-up is still active, re-observing the conflict does NOT
+	// dispatch a duplicate.
 	_, _ = o.RefreshPR(context.Background(), pr.ID)
 	again, _ := o.ProcessFeedback(context.Background(), pr.ID)
 	if len(again) != 0 {
-		t.Fatalf("the same conflict must not re-spawn, got %d", len(again))
+		t.Fatalf("a duplicate follow-up must not spawn while one is active, got %d", len(again))
+	}
+
+	// The follow-up finishes WITHOUT resolving it (e.g. it couldn't push) and the
+	// PR is still conflicting -> a retry is dispatched.
+	for _, s := range []model.SessionStatus{model.SessionStarting, model.SessionRunning, model.SessionFailed} {
+		_, _ = st.UpdateSessionStatus(spawned[0].ID, s)
+	}
+	_, _ = o.RefreshPR(context.Background(), pr.ID)
+	retry, _ := o.ProcessFeedback(context.Background(), pr.ID)
+	if len(retry) != 1 {
+		t.Fatalf("a finished-but-unresolved conflict should re-dispatch, got %d", len(retry))
 	}
 }
 

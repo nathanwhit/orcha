@@ -177,6 +177,16 @@ func (s *Store) RecordFeedback(f *model.PRFeedback) (inserted bool, err error) {
 	return n > 0, nil
 }
 
+// DeleteHandledConflictFeedback removes already-handled merge_conflict feedback
+// for a PR, so a fresh conflict observation can re-fire a follow-up when the
+// previous attempt finished without resolving it.
+func (s *Store) DeleteHandledConflictFeedback(prID string) error {
+	_, err := s.db.Exec(
+		`DELETE FROM pr_feedback WHERE pr_id = ? AND kind = ? AND handled = 1`,
+		prID, string(model.FeedbackConflict))
+	return err
+}
+
 // UnhandledFeedback returns actionable, unhandled feedback for a PR.
 func (s *Store) UnhandledFeedback(prID string) ([]*model.PRFeedback, error) {
 	rows, err := s.db.Query(

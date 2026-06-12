@@ -318,7 +318,11 @@ func (o *Orchestrator) RefreshPR(ctx context.Context, prID string) (*model.PullR
 	// head and again only if a new push is still conflicting) — ProcessFeedback
 	// then spawns a follow-up that rebases and force-updates the PR.
 	if err == nil && (updated.Status == model.PROpen || updated.Status == model.PRDraft) &&
-		st.Mergeable == "CONFLICTING" {
+		st.Mergeable == "CONFLICTING" && !o.hasActivePRFollowup(updated.ObjectiveID, prID) {
+		// No follow-up is currently working this PR. If a prior attempt finished
+		// without fixing it (e.g. it couldn't push), its handled feedback would
+		// block a retry — clear it so this re-fires.
+		_ = o.st.DeleteHandledConflictFeedback(prID)
 		_ = o.IngestFeedback(ctx, prID, []model.PRFeedback{{
 			Kind:       model.FeedbackConflict,
 			ExternalID: "conflict@" + updated.HeadSHA,
