@@ -12,8 +12,13 @@
 # Each (re)start first pulls the latest source: `jj git fetch` + rebase of the
 # local stack onto the fresh trunk in a jj repo (a plain `git pull` fails on
 # jj's detached HEAD), or `git pull --ff-only` otherwise. A pull/rebase failure
-# is logged and the current source is used — it never blocks the restart. Set
-# ORCHA_NO_PULL=1 to skip pulling entirely.
+# is logged and the current source is used — it never blocks the restart.
+#
+#   ORCHA_NO_PULL=1       skip pulling entirely
+#   ORCHA_PULL_REMOTE=…   git remote to pull from (default origin) — e.g. on a
+#                         machine whose clone is a fork, pull upstream instead:
+#                         ORCHA_PULL_REMOTE=upstream ORCHA_PULL_BRANCH=main
+#   ORCHA_PULL_BRANCH=…   branch to pull (default: the current branch's own)
 #
 # Any other exit code stops the loop (Ctrl-C included).
 set -u
@@ -31,7 +36,9 @@ update_source() {
     # in `jj st` and in the build below.
     jj rebase -d 'trunk()' || echo "dev.sh: rebase onto trunk failed; continuing" >&2
   elif [ -d .git ]; then
-    git pull --ff-only || echo "dev.sh: git pull failed; continuing with local source" >&2
+    # shellcheck disable=SC2086 — an empty branch must expand to no argument
+    git pull --ff-only "${ORCHA_PULL_REMOTE:-origin}" ${ORCHA_PULL_BRANCH:-} ||
+      echo "dev.sh: git pull failed; continuing with local source" >&2
   fi
 }
 
