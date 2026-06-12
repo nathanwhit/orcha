@@ -1370,3 +1370,30 @@ func TestManagerNotify_WaitsForPendingDependents(t *testing.T) {
 		t.Fatal("no dependents should be pending once the validator succeeded")
 	}
 }
+
+func TestMarkObjectiveDone_GatedOnOpenPRs(t *testing.T) {
+	o, st := newTestOrch(t)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	o.SetForge(forge.NewFake())
+	obj, mgr, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "o/r", Number: 5, Branch: "b", Status: model.PROpen}
+	_ = st.CreatePR(pr)
+
+	// An open (unmerged) PR blocks completion.
+	if err := o.MarkObjectiveDone(mgr.ID, "done"); err == nil {
+		t.Fatal("mark_objective_done should be refused while a PR is open")
+	}
+	if cur, _ := st.GetObjective(obj.ID); cur.Status == model.ObjectiveSucceeded {
+		t.Fatal("objective must not be succeeded while a PR is open")
+	}
+
+	// Once the PR merges, completion is allowed.
+	_, _ = st.UpdatePR(pr.ID, func(p *model.PullRequest) { p.Status = model.PRMerged })
+	if err := o.MarkObjectiveDone(mgr.ID, "done"); err != nil {
+		t.Fatalf("mark_objective_done should succeed once the PR merged: %v", err)
+	}
+	if cur, _ := st.GetObjective(obj.ID); cur.Status != model.ObjectiveSucceeded {
+		t.Fatalf("objective should be succeeded once PRs merged, got %s", cur.Status)
+	}
+}

@@ -206,6 +206,13 @@ coherent slices, comment_pr/update_pr for follow-ups, create_note for shared
 memory, and mark_objective_done when finished. Prefer several clean PR-sized
 slices over one giant PR. Keep working after publishing intermediate PRs unless
 truly blocked.
+A published PR is NOT a finished objective — the work lands when the PR MERGES.
+After publishing, do NOT call mark_objective_done while any PR is still open; it
+will be refused. Wait — you are steered automatically when a PR merges, gets
+review comments, fails CI, or has merge conflicts. To resolve conflicts or
+address feedback, push fixes with update_pr or spawn a follow-up; do not merge
+PRs yourself. Call mark_objective_done only once every PR has merged (or there
+was never a PR to open).
 When the objective names a repo, you are running in a fresh checkout of it:
 explore the code first and scope workers' goals precisely, with verified file
 references. Do NOT code, commit, or push yourself — workers do the coding in

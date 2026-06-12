@@ -3,6 +3,7 @@ package orch
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/nathanwhit/orcha/internal/model"
 	"github.com/nathanwhit/orcha/internal/store"
@@ -157,9 +158,28 @@ func (o *Orchestrator) MarkObjectiveDone(managerSessionID, summary string) error
 		return err
 	}
 	// Capture any PR the manager opened out-of-band (e.g. via the gh CLI rather
-	// than publish_pr) before the objective goes terminal, so it is still tracked
-	// and monitored to merge instead of becoming invisible.
+	// than publish_pr) before the gate/finalize, so it is tracked and seen here.
 	o.AdoptUntrackedPRs(context.Background(), mgr.ObjectiveID)
+	// An objective is not done while it has open (unmerged) PRs: the work lands
+	// when they MERGE, not when they are opened. Refuse so the manager keeps the
+	// objective alive and waits — it is steered automatically when a PR merges,
+	// gets review, or needs conflict/CI fixes. This is the guard that stops an
+	// objective from going prematurely "succeeded" with an unmerged (or
+	// conflicting) PR still outstanding.
+	if prs, err := o.st.ListPRsByObjective(mgr.ObjectiveID); err == nil {
+		var open []int
+		for _, pr := range prs {
+			if pr.Status == model.PROpen || pr.Status == model.PRDraft {
+				open = append(open, pr.Number)
+			}
+		}
+		if len(open) > 0 {
+			return fmt.Errorf("objective is not done: %d open PR(s) %v are not merged yet. "+
+				"It completes when its PRs merge — you are steered automatically then. If a PR "+
+				"needs review replies, CI fixes, or conflict resolution, push fixes with update_pr "+
+				"or spawn a follow-up; do NOT mark the objective done now", len(open), open)
+		}
+	}
 	if err := o.withManagerLock(mgr.ObjectiveID, managerSessionID, func() error {
 		return o.st.UpdateObjectiveStatus(mgr.ObjectiveID, model.ObjectiveSucceeded, summary)
 	}); err != nil {
