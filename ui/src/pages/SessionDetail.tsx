@@ -116,7 +116,11 @@ export function SessionPage({ id }: { id: string }) {
 }
 
 // Transcript incrementally polls messages by seq cursor — it never refetches
-// what it already has, mirroring how the API is meant to be consumed.
+// what it already has, mirroring how the API is meant to be consumed. Only the
+// most recent messages are kept; a long-running session's history would
+// otherwise grow the DOM without bound.
+const KEEP_MESSAGES = 1500;
+
 function Transcript({ id }: { id: string }) {
   const [msgs, setMsgs] = useState<api.Message[]>([]);
   const boxRef = useRef<HTMLDivElement>(null);
@@ -133,9 +137,9 @@ function Transcript({ id }: { id: string }) {
           `/api/sessions/${id}/messages?after=${after}&limit=500`,
         );
         if (!live) return;
-        if (batch.length > 0) {
+        if (batch && batch.length > 0) {
           after = batch[batch.length - 1].seq;
-          setMsgs((m) => [...m, ...batch]);
+          setMsgs((m) => [...m, ...batch].slice(-KEEP_MESSAGES));
         }
       } catch {
         // transient; retry on the next tick
@@ -154,6 +158,8 @@ function Transcript({ id }: { id: string }) {
     if (box && pinnedRef.current) box.scrollTop = box.scrollHeight;
   }, [msgs]);
 
+  const rows = groupMessages(msgs);
+
   return (
     <Card>
       <div
@@ -165,14 +171,54 @@ function Transcript({ id }: { id: string }) {
         }}
         className="flex h-[28rem] flex-col gap-2.5 overflow-y-auto p-4"
       >
-        {msgs.length === 0 && (
+        {rows.length === 0 && (
           <p className="m-auto text-sm text-faint">No messages yet.</p>
         )}
-        {msgs.map((m) => (
-          <MessageRow key={m.seq} m={m} />
-        ))}
+        {rows.map((row) =>
+          row.kind === "log" ? (
+            <LogBlock key={row.key} lines={row.lines} source={row.source} />
+          ) : (
+            <MessageRow key={row.key} m={row.m} />
+          ),
+        )}
       </div>
     </Card>
+  );
+}
+
+// groupMessages folds runs of consecutive raw stdout/stderr lines into a
+// single log block — they're process output, not conversation.
+type TranscriptRow =
+  | { kind: "msg"; key: number; m: api.Message }
+  | { kind: "log"; key: number; source: string; lines: string[] };
+
+function groupMessages(msgs: api.Message[]): TranscriptRow[] {
+  const rows: TranscriptRow[] = [];
+  for (const m of msgs) {
+    if (m.source === "stdout" || m.source === "stderr") {
+      const last = rows[rows.length - 1];
+      if (last && last.kind === "log" && last.source === m.source) {
+        last.lines.push(m.content);
+      } else {
+        rows.push({ kind: "log", key: m.seq, source: m.source, lines: [m.content] });
+      }
+    } else {
+      rows.push({ kind: "msg", key: m.seq, m });
+    }
+  }
+  return rows;
+}
+
+function LogBlock({ lines, source }: { lines: string[]; source: string }) {
+  return (
+    <details className="group rounded-lg border border-edge/70 bg-raised/40">
+      <summary className="cursor-pointer px-3 py-1.5 font-mono text-[11px] text-faint select-none">
+        {source} · {lines.length} line{lines.length === 1 ? "" : "s"}
+      </summary>
+      <pre className="max-h-64 overflow-auto px-3 pb-2 font-mono text-[11px] whitespace-pre-wrap text-mute">
+        {lines.join("\n")}
+      </pre>
+    </details>
   );
 }
 

@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bufio"
 	"context"
 	"strings"
 	"sync"
@@ -29,9 +28,11 @@ type TmuxConfig struct {
 }
 
 // TmuxProvider runs each session as an interactive program inside a real,
-// attachable tmux session. Steering types into the live pane (send-keys); output
-// is streamed via pipe-pane; cancellation kills the session. A human can
-// `tmux attach -t <name>` (printed as a status event) to watch or take over.
+// attachable tmux session. Steering types into the live pane (send-keys); the
+// live view is Snapshot (capture-pane) or `tmux attach -t <name>` (printed as
+// a status event); pipe-pane keeps a raw log file on the target. Pane output
+// is deliberately NOT streamed into the transcript — a TUI redraws constantly,
+// so per-line events are unreadable fragments.
 type TmuxProvider struct {
 	cfg TmuxConfig
 
@@ -73,7 +74,6 @@ func NewTmuxShell(kind model.AgentKind) *TmuxProvider {
 type tmuxSession struct {
 	name   string
 	ctrl   *tmux.Controller
-	tail   exec.Process
 	cancel context.CancelFunc
 }
 
@@ -103,17 +103,14 @@ func (p *TmuxProvider) StartSession(ctx context.Context, spec Spec) (Handle, <-c
 		return nil, nil, err
 	}
 
-	// Stream the pane to a log file, then tail it.
+	// Keep a durable raw log of the pane on the target. The transcript does NOT
+	// get per-line pane output: a TUI redraws constantly, so streamed lines are
+	// unreadable fragments. The live view is Snapshot / tmux attach; the log file
+	// is the forensic record.
 	logPath := "/tmp/orcha-tmux-" + sanitizeID(spec.SessionID) + ".log"
 	_ = ctrl.PipePane(runCtx, name, "cat >> "+logPath)
-	tailProc, err := ex.Start(runCtx, exec.Command{Name: "tail", Args: []string{"-n", "+1", "-F", logPath}})
-	if err != nil {
-		_ = ctrl.KillSession(runCtx, name)
-		cancel()
-		return nil, nil, err
-	}
 
-	sess := &tmuxSession{name: name, ctrl: ctrl, tail: tailProc, cancel: cancel}
+	sess := &tmuxSession{name: name, ctrl: ctrl, cancel: cancel}
 	p.mu.Lock()
 	p.sessions[spec.SessionID] = sess
 	p.mu.Unlock()
@@ -126,24 +123,8 @@ func (p *TmuxProvider) StartSession(ctx context.Context, spec Spec) (Handle, <-c
 		Source:   model.MsgSystem,
 		Content:  "tmux session " + name + " — attach: " + attachCommand(spec.Target, name),
 		Activity: "interactive tmux session " + name,
-		Metadata: model.JSONMap{"tmux_session": name, "tmux_attach": attachCommand(spec.Target, name)},
+		Metadata: model.JSONMap{"tmux_session": name, "tmux_attach": attachCommand(spec.Target, name), "tmux_log": logPath},
 	}
-
-	// Stream pane output. This is the only producer of stream events; it ends
-	// when the tail process is killed (on teardown), signalled via streamExited.
-	streamExited := make(chan struct{})
-	go func() {
-		defer close(streamExited)
-		sc := bufio.NewScanner(tailProc.Stdout())
-		sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-		for sc.Scan() {
-			line := stripANSI(sc.Text())
-			if strings.TrimSpace(line) == "" {
-				continue
-			}
-			out <- Event{Kind: EventStdout, Source: model.MsgStdout, Content: line}
-		}
-	}()
 
 	// Type the opening prompt once the program has had time to start.
 	if p.cfg.SendInitialPrompt && spec.Prompt != "" {
@@ -158,9 +139,8 @@ func (p *TmuxProvider) StartSession(ctx context.Context, spec Spec) (Handle, <-c
 		}()
 	}
 
-	// Watch for the session to end, then own channel teardown: stop the stream
-	// producer first (so there are no concurrent sends), then emit the single
-	// terminal event and close the channel.
+	// Watch for the session to end, then emit the single terminal event and
+	// close the channel.
 	go func() {
 		defer close(out)
 		success := true
@@ -178,8 +158,7 @@ func (p *TmuxProvider) StartSession(ctx context.Context, spec Spec) (Handle, <-c
 				}
 			}
 		}
-		p.teardown(spec.SessionID) // kills tail -> stream goroutine reaches EOF
-		<-streamExited             // no more stream sends after this point
+		p.teardown(spec.SessionID)
 		msg := "tmux session ended"
 		if !success {
 			msg = "tmux session canceled"
@@ -250,7 +229,6 @@ func (p *TmuxProvider) teardown(sessionID string) {
 	delete(p.sessions, sessionID)
 	p.mu.Unlock()
 	if sess != nil {
-		_ = sess.tail.Kill()
 		sess.cancel()
 	}
 }
@@ -269,41 +247,4 @@ func attachCommand(t *model.Target, name string) string {
 
 func sanitizeID(s string) string {
 	return strings.NewReplacer(".", "-", ":", "-", "/", "-").Replace(s)
-}
-
-// stripANSI removes the most common terminal escape sequences so streamed pane
-// text is readable in the transcript (the live view is tmux attach).
-func stripANSI(s string) string {
-	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c == 0x1b { // ESC
-			// CSI: ESC [ ... <final byte 0x40-0x7e>
-			if i+1 < len(s) && s[i+1] == '[' {
-				j := i + 2
-				for j < len(s) && (s[j] < 0x40 || s[j] > 0x7e) {
-					j++
-				}
-				i = j
-				continue
-			}
-			// OSC: ESC ] ... BEL
-			if i+1 < len(s) && s[i+1] == ']' {
-				j := i + 2
-				for j < len(s) && s[j] != 0x07 {
-					j++
-				}
-				i = j
-				continue
-			}
-			// Other two-byte escapes.
-			i++
-			continue
-		}
-		if c == '\r' {
-			continue
-		}
-		b.WriteByte(c)
-	}
-	return b.String()
 }

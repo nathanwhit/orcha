@@ -4,7 +4,6 @@ import (
 	"context"
 	"os/exec"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -27,7 +26,6 @@ func TestTmuxProvider_InteractiveShellSession(t *testing.T) {
 
 	// Collect events in the background.
 	var (
-		mu      stringSet
 		sawDone = make(chan bool, 1)
 		attach  = make(chan string, 1)
 	)
@@ -41,8 +39,6 @@ func TestTmuxProvider_InteractiveShellSession(t *testing.T) {
 					default:
 					}
 				}
-			case ev.Kind == EventStdout:
-				mu.add(ev.Content)
 			case ev.Kind == EventDone:
 				select {
 				case sawDone <- ev.Success:
@@ -62,18 +58,19 @@ func TestTmuxProvider_InteractiveShellSession(t *testing.T) {
 		t.Fatal("no attach command surfaced")
 	}
 
-	// Steer the live shell via send-keys.
+	// Steer the live shell via send-keys; the effect is visible in the live
+	// pane snapshot (pane output is not streamed into the transcript).
 	if err := p.SendInput(h, "echo TMUX-PROVIDER-OK"); err != nil {
 		t.Fatalf("send input: %v", err)
 	}
 	deadline := time.Now().Add(6 * time.Second)
 	for time.Now().Before(deadline) {
-		if mu.has("TMUX-PROVIDER-OK") {
+		if screen, err := p.Snapshot(h); err == nil && strings.Contains(screen, "TMUX-PROVIDER-OK") {
 			goto steered
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatal("did not observe steered output streamed from the pane")
+	t.Fatal("did not observe steered output in the pane snapshot")
 steered:
 
 	// Cancel -> the session ends.
@@ -85,29 +82,6 @@ steered:
 	case <-time.After(6 * time.Second):
 		t.Fatal("no done event after cancel")
 	}
-}
-
-// stringSet is a tiny concurrency-safe substring matcher for streamed lines.
-type stringSet struct {
-	mu    sync.Mutex
-	lines []string
-}
-
-func (s *stringSet) add(line string) {
-	s.mu.Lock()
-	s.lines = append(s.lines, line)
-	s.mu.Unlock()
-}
-
-func (s *stringSet) has(sub string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, l := range s.lines {
-		if strings.Contains(l, sub) {
-			return true
-		}
-	}
-	return false
 }
 
 func TestTmuxProvider_Snapshot(t *testing.T) {

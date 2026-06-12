@@ -74,12 +74,28 @@ export function timeAgo(iso?: string | null): string {
   return new Date(t).toLocaleDateString();
 }
 
-// useNow re-renders periodically so relative timestamps stay fresh.
-export function useNow(ms = 15000): number {
-  const [now, setNow] = useState(() => Date.now());
+// useNow re-renders periodically so relative timestamps stay fresh. All
+// subscribers share ONE interval — a transcript can mount thousands of
+// timestamps, and one timer per row would hang the page.
+const nowSubs = new Set<() => void>();
+let nowTimer: number | undefined;
+
+export function useNow(): number {
+  const [, force] = useState(0);
   useEffect(() => {
-    const t = window.setInterval(() => setNow(Date.now()), ms);
-    return () => clearInterval(t);
-  }, [ms]);
-  return now;
+    const cb = () => force((n) => n + 1);
+    nowSubs.add(cb);
+    if (nowTimer === undefined)
+      nowTimer = window.setInterval(() => {
+        for (const f of nowSubs) f();
+      }, 15000);
+    return () => {
+      nowSubs.delete(cb);
+      if (nowSubs.size === 0 && nowTimer !== undefined) {
+        clearInterval(nowTimer);
+        nowTimer = undefined;
+      }
+    };
+  }, []);
+  return Date.now();
 }
