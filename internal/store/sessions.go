@@ -27,14 +27,14 @@ func (s *Store) CreateSession(sess *model.Session) error {
 	_, err := s.db.Exec(
 		`INSERT INTO sessions(id, objective_id, parent_session_id, role, agent, mode,
 		   status, title, goal, current_activity, latest_summary, target_id,
-		   workspace_id, usage_provider, created_at, started_at, updated_at,
-		   completed_at, metadata)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		   workspace_id, usage_provider, used_tokens, created_at, started_at,
+		   updated_at, completed_at, metadata)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		sess.ID, nullStr(sess.ObjectiveID), nullStr(sess.ParentSessionID),
 		string(sess.Role), string(sess.Agent), string(sess.Mode), string(sess.Status),
 		sess.Title, sess.Goal, sess.CurrentActivity, sess.LatestSummary,
 		nullStr(sess.TargetID), nullStr(sess.WorkspaceID), nullStr(sess.UsageProvider),
-		sess.CreatedAt, nullTime(sess.StartedAt), sess.UpdatedAt,
+		sess.UsedTokens, sess.CreatedAt, nullTime(sess.StartedAt), sess.UpdatedAt,
 		nullTime(sess.CompletedAt), sess.Metadata,
 	)
 	return err
@@ -42,7 +42,7 @@ func (s *Store) CreateSession(sess *model.Session) error {
 
 var sessionCols = `id, objective_id, parent_session_id, role, agent, mode, status,
 	title, goal, current_activity, latest_summary, target_id, workspace_id,
-	usage_provider, created_at, started_at, updated_at, completed_at, metadata`
+	usage_provider, used_tokens, created_at, started_at, updated_at, completed_at, metadata`
 
 func scanSession(r rowScanner) (*model.Session, error) {
 	var s model.Session
@@ -50,7 +50,7 @@ func scanSession(r rowScanner) (*model.Session, error) {
 	var started, completed sql.NullTime
 	err := r.Scan(&s.ID, &obj, &parent, &s.Role, &s.Agent, &s.Mode, &s.Status,
 		&s.Title, &s.Goal, &s.CurrentActivity, &s.LatestSummary, &target, &ws,
-		&provider, &s.CreatedAt, &started, &s.UpdatedAt, &completed, &s.Metadata)
+		&provider, &s.UsedTokens, &s.CreatedAt, &started, &s.UpdatedAt, &completed, &s.Metadata)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -249,4 +249,66 @@ func (s *Store) RequeueInterruptedSessions() ([]*model.Session, error) {
 		sess.UpdatedAt = now
 	}
 	return sessions, nil
+}
+
+// AddSessionTokens increments a session's running token total. It is a small,
+// self-contained UPDATE and deliberately does not touch updated_at or the
+// session state machine — usage accrues independently of lifecycle changes.
+func (s *Store) AddSessionTokens(sessionID string, tokens int64) error {
+	if tokens == 0 {
+		return nil
+	}
+	_, err := s.db.Exec(
+		`UPDATE sessions SET used_tokens = used_tokens + ? WHERE id = ?`,
+		tokens, sessionID)
+	return err
+}
+
+// SessionUsedTokens returns a session's running token total.
+func (s *Store) SessionUsedTokens(sessionID string) (int64, error) {
+	var n int64
+	err := s.db.QueryRow(`SELECT used_tokens FROM sessions WHERE id = ?`, sessionID).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	return n, err
+}
+
+// ObjectiveUsage aggregates token usage across all sessions of one objective:
+// a grand total plus per-session and per-provider breakdowns. The effective
+// provider is sessions.usage_provider when set, otherwise sessions.agent.
+func (s *Store) ObjectiveUsage(objectiveID string) (*model.ObjectiveUsage, error) {
+	rows, err := s.db.Query(
+		`SELECT id, title, role,
+		   COALESCE(NULLIF(usage_provider, ''), agent) AS provider, used_tokens
+		 FROM sessions WHERE objective_id = ? ORDER BY created_at ASC`, objectiveID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := &model.ObjectiveUsage{ObjectiveID: objectiveID}
+	byProvider := map[string]int64{}
+	var providerOrder []string
+	for rows.Next() {
+		var b model.SessionUsageBreakdown
+		if err := rows.Scan(&b.SessionID, &b.Title, &b.Role, &b.Provider, &b.UsedTokens); err != nil {
+			return nil, err
+		}
+		out.Sessions = append(out.Sessions, b)
+		out.TotalTokens += b.UsedTokens
+		if _, seen := byProvider[b.Provider]; !seen {
+			providerOrder = append(providerOrder, b.Provider)
+		}
+		byProvider[b.Provider] += b.UsedTokens
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, p := range providerOrder {
+		out.Providers = append(out.Providers, model.ProviderUsageTotal{
+			Provider: p, UsedTokens: byProvider[p],
+		})
+	}
+	return out, nil
 }

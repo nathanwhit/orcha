@@ -50,6 +50,9 @@ export function SessionPage({ id }: { id: string }) {
               <Chip>{sess.role.replaceAll("_", " ")}</Chip>
               <Chip>{sess.agent}</Chip>
               <Chip>{sess.mode}</Chip>
+              {sess.used_tokens > 0 && (
+                <Chip>{api.formatTokens(sess.used_tokens)} tokens</Chip>
+              )}
               {sess.current_activity && <span>{sess.current_activity}</span>}
             </p>
           </div>

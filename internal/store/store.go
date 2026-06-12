@@ -74,7 +74,37 @@ func Open(path string, opts ...Option) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("store: apply schema: %w", err)
 	}
+	if err := s.migrate(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("store: migrate: %w", err)
+	}
 	return s, nil
+}
+
+// migrate brings a pre-existing database up to the current schema. Open only
+// runs CREATE TABLE IF NOT EXISTS, which never adds a column to a table that
+// already exists, so columns introduced after a table's first release need an
+// explicit, idempotent ALTER for older DBs. New DBs already have the column
+// from schema.sql and these calls become no-ops.
+func (s *Store) migrate() error {
+	return s.ensureColumn("sessions", "used_tokens", "INTEGER NOT NULL DEFAULT 0")
+}
+
+// ensureColumn adds a column to a table if it is not already present. Existing
+// rows take the column's DEFAULT, so a NOT NULL DEFAULT 0 column backfills to 0.
+func (s *Store) ensureColumn(table, column, decl string) error {
+	var exists int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&exists)
+	if err != nil {
+		return err
+	}
+	if exists > 0 {
+		return nil
+	}
+	// Table/column identifiers are internal constants, not user input.
+	_, err = s.db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, decl))
+	return err
 }
 
 // Close closes the underlying database.

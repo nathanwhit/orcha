@@ -245,6 +245,7 @@ type Session struct {
 	TargetID        string        `json:"target_id,omitempty"`
 	WorkspaceID     string        `json:"workspace_id,omitempty"`
 	UsageProvider   string        `json:"usage_provider,omitempty"`
+	UsedTokens      int64         `json:"used_tokens"`
 	CreatedAt       time.Time     `json:"created_at"`
 	StartedAt       *time.Time    `json:"started_at,omitempty"`
 	UpdatedAt       time.Time     `json:"updated_at"`
@@ -363,6 +364,31 @@ type UsageBucket struct {
 	UsedPercent *float64   `json:"used_percent,omitempty"`
 	State       UsageState `json:"state"`
 	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+// ObjectiveUsage is the aggregate token usage for one objective: a grand
+// total plus per-session and per-provider breakdowns.
+type ObjectiveUsage struct {
+	ObjectiveID string                  `json:"objective_id"`
+	TotalTokens int64                   `json:"total_tokens"`
+	Sessions    []SessionUsageBreakdown `json:"sessions"`
+	Providers   []ProviderUsageTotal    `json:"providers"`
+}
+
+// SessionUsageBreakdown is one session's contribution to an objective's usage.
+type SessionUsageBreakdown struct {
+	SessionID  string `json:"session_id"`
+	Title      string `json:"title"`
+	Role       string `json:"role"`
+	Provider   string `json:"provider"`
+	UsedTokens int64  `json:"used_tokens"`
+}
+
+// ProviderUsageTotal is the total tokens an objective spent against one
+// provider (sessions.usage_provider, falling back to sessions.agent).
+type ProviderUsageTotal struct {
+	Provider   string `json:"provider"`
+	UsedTokens int64  `json:"used_tokens"`
 }
 
 // Lock is a scheduling lock held by a session.

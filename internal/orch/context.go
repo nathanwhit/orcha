@@ -71,6 +71,10 @@ func (o *Orchestrator) recordUsage(sessionID string, tokens int64) {
 		provider = string(sess.Agent)
 	}
 	_ = o.st.AddUsageTokens(provider, "", tokens, "")
+	// Also attribute the tokens to the session itself so per-session and
+	// per-objective usage can be reported independently of the scheduling
+	// provider buckets.
+	_ = o.st.AddSessionTokens(sessionID, tokens)
 	_ = o.emit(sessionID, model.MsgSystem, model.KindUsage,
 		fmt.Sprintf("used %d tokens", tokens), model.JSONMap{"tokens": tokens})
 }

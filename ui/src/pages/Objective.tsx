@@ -40,6 +40,7 @@ export function ObjectivePage({
   const pull_requests = detail.data.pull_requests ?? [];
   const questions = detail.data.questions ?? [];
   const artifacts = detail.data.artifacts ?? [];
+  const usage = detail.data.usage;
   const openQs = questions.filter((q) => q.status === "open");
   const terminal = ["succeeded", "failed", "canceled"].includes(obj.status);
 
@@ -127,7 +128,22 @@ export function ObjectivePage({
       )}
 
       <section>
-        <SectionTitle>Sessions</SectionTitle>
+        <SectionTitle
+          right={
+            usage && usage.total_tokens > 0 ? (
+              <span className="flex flex-wrap items-center gap-1.5">
+                <Chip>{api.formatTokens(usage.total_tokens)} tokens</Chip>
+                {usage.providers.map((p) => (
+                  <Chip key={p.provider}>
+                    {p.provider} {api.formatTokens(p.used_tokens)}
+                  </Chip>
+                ))}
+              </span>
+            ) : undefined
+          }
+        >
+          Sessions
+        </SectionTitle>
         <Card className="overflow-x-auto">
           {sessions.length === 0 ? (
             <EmptyState>No sessions yet.</EmptyState>
@@ -229,6 +245,7 @@ export function SessionTable({
           <Th>Title</Th>
           <Th>Role</Th>
           <Th>Agent</Th>
+          <Th>Tokens</Th>
           <Th>Activity</Th>
           <Th>Updated</Th>
         </tr>
@@ -250,6 +267,9 @@ export function SessionTable({
               <Chip>{s.role.replaceAll("_", " ")}</Chip>
             </Td>
             <Td className="text-mute">{s.agent}</Td>
+            <Td className="font-mono text-mute tabular-nums">
+              {s.used_tokens > 0 ? api.formatTokens(s.used_tokens) : "—"}
+            </Td>
             <Td className="max-w-[260px] truncate text-mute">
               {s.current_activity || "—"}
             </Td>

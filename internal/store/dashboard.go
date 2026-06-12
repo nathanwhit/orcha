@@ -69,6 +69,7 @@ type SessionRow struct {
 	Title           string    `json:"title"`
 	TargetID        string    `json:"target_id"`
 	CurrentActivity string    `json:"current_activity"`
+	UsedTokens      int64     `json:"used_tokens"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
 
@@ -76,7 +77,7 @@ type SessionRow struct {
 // objective. It selects no message/transcript columns.
 func (s *Store) DashboardSessions(objectiveID string) ([]SessionRow, error) {
 	q := `SELECT id, COALESCE(objective_id,''), status, role, agent, mode, title,
-	         COALESCE(target_id,''), current_activity, updated_at
+	         COALESCE(target_id,''), current_activity, used_tokens, updated_at
 	      FROM sessions`
 	var args []any
 	if objectiveID != "" {
@@ -93,7 +94,7 @@ func (s *Store) DashboardSessions(objectiveID string) ([]SessionRow, error) {
 	for rows.Next() {
 		var r SessionRow
 		if err := rows.Scan(&r.ID, &r.ObjectiveID, &r.Status, &r.Role, &r.Agent,
-			&r.Mode, &r.Title, &r.TargetID, &r.CurrentActivity, &r.UpdatedAt); err != nil {
+			&r.Mode, &r.Title, &r.TargetID, &r.CurrentActivity, &r.UsedTokens, &r.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
