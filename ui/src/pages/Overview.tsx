@@ -6,6 +6,7 @@ import { Icon } from "../icons";
 import {
   Button,
   Card,
+  Collapsible,
   EmptyState,
   Field,
   Modal,
@@ -39,6 +40,8 @@ export function Overview({ nav }: { nav: (to: string) => void }) {
   const [creating, setCreating] = useState(false);
 
   const objs = objectives.data ?? [];
+  const activeObjs = objs.filter((o) => o.status !== "canceled");
+  const canceledObjs = objs.filter((o) => o.status === "canceled");
   const running = (sessions.data ?? []).filter(
     (s) => s.status === "running",
   ).length;
@@ -80,52 +83,26 @@ export function Overview({ nav }: { nav: (to: string) => void }) {
               No objectives yet — create one and a manager session will start
               planning.
             </EmptyState>
+          ) : activeObjs.length === 0 ? (
+            <EmptyState>No active objectives.</EmptyState>
           ) : (
-            <table className="w-full min-w-[640px] text-[13px]">
-              <thead className="border-b border-edge">
-                <tr>
-                  <Th>Status</Th>
-                  <Th>Title</Th>
-                  <Th>Repo</Th>
-                  <Th>Sessions</Th>
-                  <Th>PRs</Th>
-                  <Th>Activity</Th>
-                  <Th>Updated</Th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-edge/60">
-                {objs.map((o) => (
-                  <tr
-                    key={o.id}
-                    onClick={() => nav(`/objectives/${o.id}`)}
-                    className="cursor-pointer transition-colors hover:bg-raised/60"
-                  >
-                    <Td>
-                      <span className="flex items-center gap-2">
-                        <Pill status={o.status} />
-                        {o.needs_user && <Pill status="waiting_user" />}
-                      </span>
-                    </Td>
-                    <Td className="font-medium">{o.title}</Td>
-                    <Td className="text-mute">{o.repo || "—"}</Td>
-                    <Td className="text-mute">{o.active_sessions}</Td>
-                    <Td className="text-mute">{o.pr_count}</Td>
-                    <Td className="max-w-[260px] truncate text-mute">
-                      {o.latest_activity || "—"}
-                    </Td>
-                    <Td>
-                      <TimeAgo iso={o.updated_at} />
-                    </Td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <ObjectivesTable objectives={activeObjs} nav={nav} />
           )}
         </Card>
         {objectives.error && (
           <p className="mt-2 text-xs text-rose-400">{objectives.error}</p>
         )}
       </section>
+
+      {canceledObjs.length > 0 && (
+        <section>
+          <Collapsible title="Canceled objectives" count={canceledObjs.length}>
+            <Card className="overflow-x-auto">
+              <ObjectivesTable objectives={canceledObjs} nav={nav} />
+            </Card>
+          </Collapsible>
+        </section>
+      )}
 
       {creating && (
         <NewObjectiveModal
@@ -137,6 +114,56 @@ export function Overview({ nav }: { nav: (to: string) => void }) {
         />
       )}
     </div>
+  );
+}
+
+function ObjectivesTable({
+  objectives,
+  nav,
+}: {
+  objectives: api.DashboardObjective[];
+  nav: (to: string) => void;
+}) {
+  return (
+    <table className="w-full min-w-[640px] text-[13px]">
+      <thead className="border-b border-edge">
+        <tr>
+          <Th>Status</Th>
+          <Th>Title</Th>
+          <Th>Repo</Th>
+          <Th>Sessions</Th>
+          <Th>PRs</Th>
+          <Th>Activity</Th>
+          <Th>Updated</Th>
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-edge/60">
+        {objectives.map((o) => (
+          <tr
+            key={o.id}
+            onClick={() => nav(`/objectives/${o.id}`)}
+            className="cursor-pointer transition-colors hover:bg-raised/60"
+          >
+            <Td>
+              <span className="flex items-center gap-2">
+                <Pill status={o.status} />
+                {o.needs_user && <Pill status="waiting_user" />}
+              </span>
+            </Td>
+            <Td className="font-medium">{o.title}</Td>
+            <Td className="text-mute">{o.repo || "—"}</Td>
+            <Td className="text-mute">{o.active_sessions}</Td>
+            <Td className="text-mute">{o.pr_count}</Td>
+            <Td className="max-w-[260px] truncate text-mute">
+              {o.latest_activity || "—"}
+            </Td>
+            <Td>
+              <TimeAgo iso={o.updated_at} />
+            </Td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 
