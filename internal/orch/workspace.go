@@ -167,6 +167,26 @@ func (o *Orchestrator) ensureWorkspace(ctx context.Context, sess *model.Session,
 	if !needsIsolatedWorkspace(sess.Role) {
 		return nil
 	}
+
+	// A worker that depends on prior work continues that work's checkout instead
+	// of cloning a clean tree off the base. Without this a validator/fixer spawned
+	// after an implementer gets a fresh branch off main, never sees the
+	// implementer's commits, and reports "nothing changed" — so the manager
+	// thinks the work failed and cancels/re-spawns. Inheriting the predecessor's
+	// workspace keeps the chain on one coherent branch. The dependent was placed
+	// on the predecessor's target (targetRequestFor pins it), so the checkout is
+	// local; dependencies run in order, so there is no concurrent writer.
+	if dep := o.dependencyWorkspace(sess); dep != nil && (sess.TargetID == "" || sess.TargetID == dep.TargetID) {
+		if _, err := o.st.UpdateSessionRuntime(sess.ID, func(s *model.Session) {
+			s.WorkspaceID = dep.ID
+		}); err != nil {
+			return err
+		}
+		o.audit(sess.ObjectiveID, sess.ID, "workspace_inherited",
+			"continuing "+dep.BranchName+" from a dependency", model.JSONMap{"workspace_id": dep.ID})
+		return nil
+	}
+
 	if repo == "" && cloneURL == "" {
 		// A coding worker with nothing to clone must fail loudly here: the
 		// fallback would be an empty scratch dir it can't do its task in (and
@@ -175,6 +195,33 @@ func (o *Orchestrator) ensureWorkspace(ctx context.Context, sess *model.Session,
 	}
 	_, err := o.prepareIsolatedOn(ctx, sess, target, repo, pushRepo, cloneURL, base)
 	return err
+}
+
+// dependencyWorkspace returns the workspace a dependent session should continue:
+// the first dependency (depends_on) that has a ready isolated checkout. This is
+// how sequential workers (implement -> validate -> fix) build on each other's
+// work rather than each starting from a clean tree. Returns nil when the session
+// has no dependency with a usable workspace (so it gets its own fresh checkout).
+func (o *Orchestrator) dependencyWorkspace(sess *model.Session) *model.Workspace {
+	for _, depID := range dependencyIDs(sess) {
+		dep, err := o.st.GetSession(depID)
+		if err != nil || dep.WorkspaceID == "" {
+			continue
+		}
+		// Never continue the manager's checkout: it is long-lived and holds its
+		// workspace lock for its whole life, so a dependent would block forever.
+		if dep.Role == model.RoleManager {
+			continue
+		}
+		ws, err := o.st.GetWorkspace(dep.WorkspaceID)
+		if err != nil {
+			continue
+		}
+		if ws.Kind == model.WorkspaceIsolated && ws.Status == model.WorkspaceReady {
+			return ws
+		}
+	}
+	return nil
 }
 
 // resolveRepo finds the repo/push-repo/clone-url/base for a session: a
