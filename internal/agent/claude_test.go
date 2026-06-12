@@ -170,3 +170,16 @@ func TestClaudeControlArgs_AllowedToolsCannotSlurpPrompt(t *testing.T) {
 		t.Fatalf("missing =-attached allowedTools token in %q", args)
 	}
 }
+
+func TestClaudeControlArgs_DisablesCoAuthorByline(t *testing.T) {
+	args := claudeControlArgs(Spec{PermissionMode: "default"})
+	var settings string
+	for i, a := range args {
+		if a == "--settings" && i+1 < len(args) {
+			settings = args[i+1]
+		}
+	}
+	if !strings.Contains(settings, `"includeCoAuthoredBy":false`) {
+		t.Fatalf("expected a settings override disabling the co-author byline, got %q", settings)
+	}
+}

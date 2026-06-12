@@ -80,6 +80,10 @@ func claudeControlArgs(spec Spec) []string {
 		// prompt, which silently became "tool rules" instead of the prompt.
 		args = append(args, "--allowedTools="+strings.Join(spec.AllowedTools, ","))
 	}
+	// Don't stamp orcha's commits and PRs with a "Co-Authored-By: Claude" byline:
+	// the work is the team's, not the model's, and the attribution is noise on the
+	// PR. Injected as an inline settings override so it applies to every session.
+	args = append(args, "--settings", `{"includeCoAuthoredBy":false}`)
 	return args
 }
 
