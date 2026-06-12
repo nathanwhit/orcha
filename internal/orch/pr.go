@@ -129,13 +129,14 @@ func (o *Orchestrator) PublishPR(ctx context.Context, sessionID string, spec Pub
 
 // UpdateSpec carries a follow-up update.
 type UpdateSpec struct {
-	SessionID   string // follow-up session performing the update
-	WorkspaceID string // PR-branch workspace
-	Force       bool
-	ForceReason string
-	Title       string
-	Body        string
-	Comment     string // optional GitHub comment; agent decides content
+	SessionID     string // follow-up session performing the update
+	WorkspaceID   string // PR-branch workspace
+	Force         bool
+	ForceReason   string
+	Title         string
+	Body          string
+	CommitMessage string // used only if the agent left changes uncommitted
+	Comment       string // optional GitHub comment; agent decides content
 }
 
 // UpdatePR pushes follow-up changes to an existing PR, enforcing branch safety:
@@ -199,11 +200,12 @@ func (o *Orchestrator) UpdatePR(ctx context.Context, prID string, spec UpdateSpe
 			wsPath = ws.Path
 		}
 	}
-	// Commit any uncommitted follow-up edits so there is something to push.
+	// Fallback: commit any edits the agent left uncommitted (normally the agent
+	// commits its own work with its own message, so this is a no-op).
 	if wsPath != "" {
-		msg := spec.Body
+		msg := spec.CommitMessage
 		if msg == "" {
-			msg = "orcha: address PR feedback"
+			msg = "Address PR feedback"
 		}
 		if _, err := o.forge.CommitAll(ctx, wsPath, msg); err != nil {
 			return nil, err

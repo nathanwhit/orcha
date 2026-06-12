@@ -59,11 +59,12 @@ func (o *Orchestrator) ManagerMCPHandler() http.Handler {
 		Name:        "update_pr",
 		Description: "Push follow-up changes to an existing PR (branch-safe: never pushes to a merged PR).",
 		InputSchema: obj(map[string]any{
-			"pr_id":        str,
-			"session_id":   str,
-			"title":        str,
-			"body":         str,
-			"push_changes": map[string]any{"type": "boolean"},
+			"pr_id":          str,
+			"session_id":     str,
+			"title":          str,
+			"body":           str,
+			"commit_message": map[string]any{"type": "string", "description": "used only if you left changes uncommitted; prefer committing yourself with git"},
+			"push_changes":   map[string]any{"type": "boolean"},
 		}, "pr_id"),
 		Handler: o.mcpUpdatePR,
 	})
@@ -180,10 +181,11 @@ func (o *Orchestrator) mcpUpdatePR(ctx context.Context, args map[string]any) (st
 		workspaceID = s.WorkspaceID
 	}
 	pr, err := o.UpdatePR(ctx, mcp.StringArg(args, "pr_id"), UpdateSpec{
-		SessionID:   sessionID,
-		WorkspaceID: workspaceID,
-		Title:       mcp.StringArg(args, "title"),
-		Body:        mcp.StringArg(args, "body"),
+		SessionID:     sessionID,
+		WorkspaceID:   workspaceID,
+		Title:         mcp.StringArg(args, "title"),
+		Body:          mcp.StringArg(args, "body"),
+		CommitMessage: mcp.StringArg(args, "commit_message"),
 	})
 	if err != nil {
 		return "", err

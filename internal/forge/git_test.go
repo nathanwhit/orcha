@@ -187,3 +187,33 @@ func TestGitForge_GHLive(t *testing.T) {
 		t.Fatalf("nonexistent repo: ok=%v err=%v", ok, err)
 	}
 }
+
+// CommitAll must use the checkout's inherited git identity, not a synthetic
+// "orcha" author (regression: follow-up commits showed up authored by orcha).
+func TestGitForge_CommitAll_UsesInheritedIdentity(t *testing.T) {
+	work, _ := setupRepo(t)
+	// The checkout has its own identity configured (as a real clone would).
+	mustGit(t, work, "config", "user.name", "Real Dev")
+	mustGit(t, work, "config", "user.email", "real@dev.example")
+
+	if err := os.WriteFile(filepath.Join(work, "new.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	committed, err := NewGit().CommitAll(context.Background(), work, "feat: add new.txt")
+	if err != nil || !committed {
+		t.Fatalf("CommitAll: committed=%v err=%v", committed, err)
+	}
+	author := mustGit(t, work, "log", "-1", "--pretty=%an <%ae>")
+	if author != "Real Dev <real@dev.example>" {
+		t.Fatalf("commit author = %q, want the inherited identity (not orcha)", author)
+	}
+	msg := mustGit(t, work, "log", "-1", "--pretty=%s")
+	if msg != "feat: add new.txt" {
+		t.Fatalf("commit message = %q, want the provided one", msg)
+	}
+	// A clean tree commits nothing.
+	again, _ := NewGit().CommitAll(context.Background(), work, "noop")
+	if again {
+		t.Fatal("CommitAll on a clean tree should not commit")
+	}
+}

@@ -134,7 +134,7 @@ func (o *Orchestrator) buildSpec(sess *model.Session, ws *model.Workspace, tgt *
 			spec.MCP = map[string]string{"orcha": o.cfg.ManagerMCPBaseURL + "/mcp/" + sess.ID}
 			spec.AllowedTools = []string{"mcp__orcha"}
 		}
-		spec.PermissionMode = "acceptEdits" // edit files; git ops go through tools
+		spec.PermissionMode = o.cfg.WorkerPermissionMode // shell so it can commit
 		if spec.Prompt != "" {
 			spec.Prompt = followupSystemPreamble + "\n\n" + spec.Prompt
 		}
@@ -153,21 +153,26 @@ func (o *Orchestrator) buildSpec(sess *model.Session, ws *model.Workspace, tgt *
 const followupSystemPreamble = `You are a PR follow-up agent, running in a checkout of
 the PR's branch. Read the feedback and DECIDE how to respond, then act using your
 orcha tools (mcp__orcha__*):
-- If a code change is warranted: edit the files here, then call update_pr (with
-  session_id set to your own session) to commit and push to the PR branch.
+- If a code change is warranted: edit the files here, then COMMIT it yourself
+  with a clear, descriptive commit message (conventional-commits style) using
+  "git add -A && git commit", and then call update_pr to push to the PR branch.
 - To reply to the reviewer: call comment_pr with a clear, specific message.
 - If the feedback is a question: answer it with comment_pr.
 - If it is non-actionable or you disagree: explain why with comment_pr.
 - If you are blocked or need a decision: call ask_user.
-Always leave at least a comment so the reviewer knows the outcome. Do not use raw
-git push or the gh CLI — use the tools.`
+Always leave at least a comment so the reviewer knows the outcome. Commit with
+git, but do not "git push" or use the gh CLI directly and do not change the git
+author/identity — push and comment through the tools.`
 
 // workerSystemPreamble orients a one-shot worker.
 const workerSystemPreamble = `You are a worker on an engineering team, running in an
 isolated checkout of the repository. Do the assigned task directly: read the
-relevant code, make the changes, and keep them small and correct. Do NOT push,
-open a PR, or use git remote operations — the orchestrator handles publishing.
-When done, briefly summarize what you changed.`
+relevant code, make the changes, and keep them small and correct. When the work
+is complete, COMMIT it yourself with a clear, descriptive commit message
+(conventional-commits style, e.g. "feat: ..."/"fix: ..."/"docs: ...") that
+explains what changed and why — run "git add -A && git commit". Do NOT push or
+open a PR and do NOT amend the git author/identity — the orchestrator publishes
+your commit. Finish with a brief summary of what you changed.`
 
 // managerSystemPreamble orients the manager agent toward the tool surface and
 // the operating rules from the spec.

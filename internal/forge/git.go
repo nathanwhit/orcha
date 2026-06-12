@@ -116,23 +116,22 @@ func (g *GitForge) resolveBase(ctx context.Context, dir string) (string, error) 
 	return "", nil
 }
 
-// CommitAll stages everything and commits if the tree is dirty. It sets an
-// author/committer so commits work on a freshly-prepared checkout without
-// per-machine git identity config.
+// CommitAll is a fallback that stages and commits any changes the agent left
+// uncommitted. It uses the checkout's inherited git identity (the user's normal
+// author), not a synthetic one. Agents are expected to commit their own work
+// with their own message; this only catches leftovers.
 func (g *GitForge) CommitAll(ctx context.Context, workspacePath, message string) (bool, error) {
 	if _, err := g.git(ctx, workspacePath, "add", "-A"); err != nil {
 		return false, err
 	}
 	// `diff --cached --quiet` exits non-zero when there is something staged.
 	if _, err := g.git(ctx, workspacePath, "diff", "--cached", "--quiet"); err == nil {
-		return false, nil // nothing to commit
+		return false, nil // nothing to commit (the agent already committed)
 	}
 	if message == "" {
-		message = "orcha: apply changes"
+		message = "Apply changes"
 	}
-	if _, err := g.git(ctx, workspacePath,
-		"-c", "user.name=orcha", "-c", "user.email=orcha@local",
-		"commit", "-m", message); err != nil {
+	if _, err := g.git(ctx, workspacePath, "commit", "-m", message); err != nil {
 		return false, err
 	}
 	return true, nil
