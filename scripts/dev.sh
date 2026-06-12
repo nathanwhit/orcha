@@ -42,8 +42,26 @@ update_source() {
   fi
 }
 
+# The dashboard is embedded into the binary from internal/webui/dist (build
+# output, not committed) — rebuild it so the served UI matches the source. A
+# box without npm still gets a working server: the binary falls back to a
+# "UI not built" page and the API is unaffected.
+build_ui() {
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "dev.sh: npm not found; serving the previously built UI (if any)" >&2
+    return 0
+  fi
+  [ -d ui/node_modules ] || (cd ui && npm install) || return 1
+  (cd ui && npm run build) || return 1
+}
+
 while :; do
   update_source
+  if ! build_ui; then
+    echo "dev.sh: UI build failed; fix the code — retrying in 3s" >&2
+    sleep 3
+    continue
+  fi
   if ! go build -o bin/orcha ./cmd/orcha; then
     echo "dev.sh: build failed; fix the code — retrying in 3s" >&2
     sleep 3
