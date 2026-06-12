@@ -1448,6 +1448,56 @@ func TestConflictingPR_SpawnsRebaseFollowup(t *testing.T) {
 	}
 }
 
+func TestFailingChecksPR_SpawnsCIFollowup(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	f := forge.NewFake()
+	o.SetForge(f)
+
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "octo/repo", Number: 9, Branch: "orcha/impl-x",
+		BaseBranch: "main", HeadSHA: "sha0", Status: model.PROpen}
+	_ = st.CreatePR(pr)
+
+	// GitHub reports the open PR's checks as failing.
+	f.SetPRState("octo/repo", 9, forge.PRState{Number: 9, Status: "open", HeadSHA: "sha1", ChecksState: "failing"})
+
+	if _, err := o.RefreshPR(context.Background(), pr.ID); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	spawned, err := o.ProcessFeedback(context.Background(), pr.ID)
+	if err != nil {
+		t.Fatalf("process feedback: %v", err)
+	}
+	if len(spawned) != 1 {
+		t.Fatalf("a failing-CI PR should spawn one CI follow-up, got %d", len(spawned))
+	}
+	if spawned[0].Role != model.RoleCIFollowup || !strings.Contains(spawned[0].Goal, "checks are failing") {
+		t.Fatalf("follow-up should be a CI follow-up tasked to fix checks, got role=%s goal=%q", spawned[0].Role, spawned[0].Goal)
+	}
+
+	// While that follow-up is still active, re-observing the failure does NOT
+	// dispatch a duplicate.
+	_, _ = o.RefreshPR(context.Background(), pr.ID)
+	again, _ := o.ProcessFeedback(context.Background(), pr.ID)
+	if len(again) != 0 {
+		t.Fatalf("a duplicate follow-up must not spawn while one is active, got %d", len(again))
+	}
+
+	// The follow-up pushes a new head that is still red -> a fresh failure
+	// (new head SHA) re-dispatches.
+	for _, s := range []model.SessionStatus{model.SessionStarting, model.SessionRunning, model.SessionSucceeded} {
+		_, _ = st.UpdateSessionStatus(spawned[0].ID, s)
+	}
+	f.SetPRState("octo/repo", 9, forge.PRState{Number: 9, Status: "open", HeadSHA: "sha2", ChecksState: "failing"})
+	_, _ = o.RefreshPR(context.Background(), pr.ID)
+	retry, _ := o.ProcessFeedback(context.Background(), pr.ID)
+	if len(retry) != 1 {
+		t.Fatalf("a new failing head should re-dispatch a CI follow-up, got %d", len(retry))
+	}
+}
+
 func TestUpdatePR_ForcePushViaMCP(t *testing.T) {
 	o, st := newTestOrch(t)
 	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))

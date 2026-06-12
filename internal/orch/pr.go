@@ -277,7 +277,9 @@ func (o *Orchestrator) UpdatePR(ctx context.Context, prID string, spec UpdateSpe
 		o.audit(pr.ObjectiveID, spec.SessionID, "force_push", spec.ForceReason, model.JSONMap{"pr_id": prID})
 	}
 	if spec.Comment != "" {
-		_ = f.Comment(ctx, pr.Repo, pr.Number, spec.Comment)
+		// Tag it as orcha's own so the PR monitor doesn't re-ingest our comment as
+		// actionable feedback and spawn a follow-up reacting to ourselves.
+		_ = f.Comment(ctx, pr.Repo, pr.Number, spec.Comment+"\n\n"+orchaBotMarker)
 		o.audit(pr.ObjectiveID, spec.SessionID, "pr_comment", "left comment", model.JSONMap{"pr_id": prID})
 	}
 	o.audit(pr.ObjectiveID, spec.SessionID, "pr_updated",
@@ -331,6 +333,25 @@ func (o *Orchestrator) RefreshPR(ctx context.Context, prID string) (*model.PullR
 				"(inspect `git remote -v`; the upstream base is " + updated.BaseBranch + "), resolve every " +
 				"conflict, re-run the build/tests, commit, then call update_pr with force=true and a short " +
 				"reason — a rebase rewrites history so a normal push is rejected.",
+			Actionable: true,
+		}})
+	}
+	// Failing CI on an open PR needs a fix. Record it as actionable feedback
+	// (deduped by head SHA, so it fires once per failing head and again only if a
+	// new push is still red) — ProcessFeedback then spawns a ci_followup that
+	// inspects the failing checks and pushes a fix. Same active-follow-up guard as
+	// the conflict path so we don't dispatch a duplicate while one is in flight.
+	if err == nil && (updated.Status == model.PROpen || updated.Status == model.PRDraft) &&
+		updated.ChecksState == model.ChecksFailing && !o.hasActivePRFollowup(updated.ObjectiveID, prID) {
+		_ = o.IngestFeedback(ctx, prID, []model.PRFeedback{{
+			Kind:       model.FeedbackCheckFailure,
+			ExternalID: "check_failure@" + updated.HeadSHA,
+			Body: fmt.Sprintf("CI checks are failing on this PR (head %s). In this PR-branch checkout "+
+				"(origin points at the PR repo and gh is authenticated), inspect the failing checks — "+
+				"`gh pr checks %d` to list them, then `gh run view <run-id> --log-failed` for the failing "+
+				"job logs — reproduce the failure, fix the root cause, re-run the relevant build/tests to "+
+				"confirm they pass, commit, then call update_pr to push the fix.",
+				updated.HeadSHA, updated.Number),
 			Actionable: true,
 		}})
 	}
