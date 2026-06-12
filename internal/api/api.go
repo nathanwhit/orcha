@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"time"
 
@@ -80,14 +81,47 @@ func (s *Server) Handler() http.Handler {
 
 // health is a lightweight liveness/version probe for monitoring and the
 // dashboard. It also reports the current server time (RFC3339) so callers can
-// detect clock skew and confirm the response is fresh.
+// detect clock skew, plus the VCS revision and process start time — so "which
+// build is actually running?" is answerable from the endpoint instead of
+// guessed (a stale process looks exactly like a broken fix otherwise).
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status":  "ok",
 		"version": version.Version,
+		"build":   buildRevision,
+		"started": processStart.UTC().Format(time.RFC3339),
 		"time":    time.Now().UTC().Format(time.RFC3339),
 	})
 }
+
+var processStart = time.Now()
+
+// buildRevision is the VCS revision stamped into the binary by `go build`.
+// `go run` does not stamp VCS info, so it reports "unstamped".
+var buildRevision = func() string {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	rev, dirty := "", ""
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			if s.Value == "true" {
+				dirty = "+dirty"
+			}
+		}
+	}
+	if rev == "" {
+		return "unstamped"
+	}
+	if len(rev) > 12 {
+		rev = rev[:12]
+	}
+	return rev + dirty
+}()
 
 // ---- helpers ----
 
