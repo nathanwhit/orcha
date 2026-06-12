@@ -53,7 +53,13 @@ const (
 	EventToolCall   EventKind = "tool_call"
 	EventToolResult EventKind = "tool_result"
 	EventStatus     EventKind = "status"
-	EventStdout     EventKind = "stdout"
+	// EventProgress is a live progress signal scraped from an interactive TUI
+	// pane: a newly-settled line of the agent's output (Content) and/or the
+	// current activity (Activity). It both feeds the transcript/live view and
+	// counts as forward progress, but is best-effort and may be dropped under
+	// backpressure — never use it for control decisions.
+	EventProgress EventKind = "progress"
+	EventStdout   EventKind = "stdout"
 	EventStderr     EventKind = "stderr"
 	EventUsage      EventKind = "usage"
 	EventError      EventKind = "error"

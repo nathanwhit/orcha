@@ -211,6 +211,8 @@ func (p *TmuxProvider) arm(runCtx context.Context, cancel context.CancelFunc, ct
 		var finalScreen string
 		var lastScreen string
 		var quietSince time.Time
+		streamer := newPaneStreamer()
+		var lastActivity string
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 	wait:
@@ -223,11 +225,26 @@ func (p *TmuxProvider) arm(runCtx context.Context, cancel context.CancelFunc, ct
 				if alive, _ := ctrl.HasSession(context.Background(), name); !alive {
 					break wait // TUI exited on its own
 				}
-				if !spec.OneShot {
-					continue
-				}
 				screen, err := ctrl.CapturePane(context.Background(), name)
 				if err != nil {
+					continue
+				}
+
+				// Stream the pane's settled output and current activity into the
+				// transcript/live view so a worker's progress is visible without
+				// attaching. Best-effort: drop under backpressure so a slow consumer
+				// never stalls the watcher (and never blocks completion detection).
+				newLines, activity := streamer.next(screen)
+				for _, ln := range newLines {
+					trySend(out, Event{Kind: EventProgress, Source: model.MsgAgent,
+						Content: ln, Metadata: model.JSONMap{"stream": true}})
+				}
+				if activity != "" && activity != lastActivity {
+					lastActivity = activity
+					trySend(out, Event{Kind: EventProgress, Source: model.MsgAgent, Activity: activity})
+				}
+
+				if !spec.OneShot {
 					continue
 				}
 				if paneSignalsDone(screen) {
@@ -235,8 +252,10 @@ func (p *TmuxProvider) arm(runCtx context.Context, cancel context.CancelFunc, ct
 					break wait
 				}
 				// Quiescence fallback: a one-shot agent that has stopped redrawing
-				// the pane for a sustained window has finished its turn (a working
-				// TUI animates a ticking spinner every second).
+				// the WHOLE pane (spinner/elapsed timer included) for a sustained
+				// window has finished its turn. Compared on the full screen on
+				// purpose — a long-running build still ticks its timer, so it never
+				// looks quiescent and is never mistaken for done.
 				if screen == lastScreen {
 					if quietSince.IsZero() {
 						quietSince = time.Now()
@@ -274,6 +293,124 @@ func (p *TmuxProvider) arm(runCtx context.Context, cancel context.CancelFunc, ct
 // on purpose: it is a safety net, not the primary signal, and a working TUI
 // never stays static this long (its spinner/elapsed timer ticks every second).
 const tmuxIdleComplete = 120 * time.Second
+
+// trySend delivers a best-effort event without blocking: if the channel buffer
+// is full (a slow consumer), the event is dropped rather than stalling the
+// caller. Only for progress/stream events, never for terminal ones.
+func trySend(out chan Event, ev Event) {
+	select {
+	case out <- ev:
+	default:
+	}
+}
+
+// paneStreamer turns successive pane snapshots into a low-noise stream of the
+// agent's settled output. A line is emitted only once it is "settled" — present
+// in two consecutive snapshots (so a half-rendered line is not streamed as a
+// fragment) — and only once ever (a rolling memory de-dupes redraws and the
+// static lines a TUI keeps on screen). This is what makes streaming readable
+// rather than the per-redraw noise that made raw pane streaming useless.
+type paneStreamer struct {
+	prev   []string        // content lines from the previous snapshot
+	recent map[string]bool // lines already emitted (de-dupe)
+	order  []string        // FIFO of recent keys, to bound the memory
+}
+
+func newPaneStreamer() *paneStreamer {
+	return &paneStreamer{recent: map[string]bool{}}
+}
+
+// next returns the newly-settled content lines since the last snapshot and the
+// current activity line (the bottom-most settled content line).
+func (s *paneStreamer) next(screen string) (newLines []string, activity string) {
+	cur := paneContentLines(screen)
+	prevSet := make(map[string]bool, len(s.prev))
+	for _, l := range s.prev {
+		prevSet[l] = true
+	}
+	for _, l := range cur {
+		if prevSet[l] && !s.recent[l] { // settled (in both snapshots) and unseen
+			newLines = append(newLines, l)
+			s.recent[l] = true
+			s.order = append(s.order, l)
+			if len(s.order) > 240 { // bound memory; old lines may re-emit, acceptably rare
+				delete(s.recent, s.order[0])
+				s.order = s.order[1:]
+			}
+		}
+	}
+	s.prev = cur
+	for i := len(cur) - 1; i >= 0; i-- {
+		if t := strings.TrimSpace(cur[i]); t != "" {
+			activity = t
+			break
+		}
+	}
+	return newLines, activity
+}
+
+// paneContentLines extracts the agent's actual output from a TUI pane: it strips
+// the trailing live region (input box, footer, spinner/elapsed timer) and any
+// chrome (separators, the input prompt, footer hints) so what remains is the
+// scrollback content — tool calls, messages, command output.
+func paneContentLines(screen string) []string {
+	raw := strings.Split(screen, "\n")
+	// Strip the trailing live block (footer + input box + separators).
+	cut := 0
+	for i := len(raw) - 1; i >= 0; i-- {
+		t := strings.TrimSpace(raw[i])
+		if t == "" || isPaneChrome(t) {
+			continue
+		}
+		cut = i + 1
+		break
+	}
+	var out []string
+	for _, ln := range raw[:cut] {
+		t := strings.TrimSpace(ln)
+		if t == "" || isPaneChrome(t) {
+			continue
+		}
+		out = append(out, strings.TrimRight(ln, " "))
+	}
+	return out
+}
+
+// isPaneChrome reports whether a trimmed pane line is interface chrome rather
+// than agent output: the input prompt, the footer/hints, the working spinner, or
+// a separator rule. Agent message/tool lines (claude's "● ", codex's "• "/"└ ")
+// are deliberately NOT matched.
+func isPaneChrome(t string) bool {
+	if t == "" {
+		return true
+	}
+	// Input prompt / box borders.
+	if strings.HasPrefix(t, "❯") || strings.HasPrefix(t, "›") || strings.HasPrefix(t, "│ >") {
+		return true
+	}
+	// Working spinner / elapsed-time glyphs (codex "◦"/"✻", claude shows these too).
+	if strings.HasPrefix(t, "◦") || strings.HasPrefix(t, "✻") {
+		return true
+	}
+	// Footer hints and status strings.
+	for _, marker := range []string{
+		"esc to interrupt", "bypass permissions", "for agents", "default · ~",
+		"/ps to view", "to view transcript", "shift+tab", "ctrl+o to",
+	} {
+		if strings.Contains(t, marker) {
+			return true
+		}
+	}
+	// A horizontal rule / separator (mostly box-drawing or dashes).
+	rule := true
+	for _, r := range t {
+		if r != '─' && r != '-' && r != '═' && r != ' ' {
+			rule = false
+			break
+		}
+	}
+	return rule && len(t) >= 3
+}
 
 // paneSignalsDone reports whether the captured pane shows the completion
 // sentinel near the bottom. It scans only the last handful of non-empty lines

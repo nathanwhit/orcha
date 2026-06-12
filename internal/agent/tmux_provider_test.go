@@ -293,6 +293,104 @@ func TestTmuxProvider_OneShotCompletesOnSentinel(t *testing.T) {
 	}
 }
 
+// TestTmuxProvider_StreamsPaneOutput proves the live path: output that appears
+// in the pane is streamed to the orchestrator as EventProgress, so a worker's
+// progress is visible without attaching.
+func TestTmuxProvider_StreamsPaneOutput(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	p := NewTmux(TmuxConfig{Kind: model.AgentOther})
+	h, events, err := p.StartSession(context.Background(), Spec{SessionID: "tmux-stream-1"})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer p.CancelSession(h)
+	streamed := make(chan string, 128)
+	go func() {
+		for ev := range events {
+			if ev.Kind == EventProgress && ev.Content != "" {
+				select {
+				case streamed <- ev.Content:
+				default:
+				}
+			}
+		}
+	}()
+
+	time.Sleep(500 * time.Millisecond)
+	if err := p.SendInput(h, "echo STREAM-LINE-XYZ"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	// A line streams once it has settled across two snapshots (~2 ticks).
+	deadline := time.After(14 * time.Second)
+	for {
+		select {
+		case line := <-streamed:
+			if strings.Contains(line, "STREAM-LINE-XYZ") {
+				return
+			}
+		case <-deadline:
+			t.Fatal("pane output was never streamed as a progress event")
+		}
+	}
+}
+
+func TestPaneContentLines_StripsChrome(t *testing.T) {
+	// A realistic codex/claude pane: agent output, then a separator, spinner,
+	// input box, and footer. Only the agent output should survive.
+	screen := strings.Join([]string{
+		"● Read App.tsx",
+		"● Bash(go test ./...)",
+		"  └ ok  internal/store",
+		"────────────────────────────────────",
+		"◦ Working (2m 3s • esc to interrupt) · /ps to view",
+		"",
+		"› Improve documentation in @filename",
+		"",
+		"  gpt-5.5 default · ~/work/abc",
+	}, "\n")
+	got := paneContentLines(screen)
+	want := []string{"● Read App.tsx", "● Bash(go test ./...)", "  └ ok  internal/store"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("content =\n %#v\nwant\n %#v", got, want)
+	}
+}
+
+func TestPaneStreamer_SettlesAndDedupes(t *testing.T) {
+	s := newPaneStreamer()
+	body := func(lines ...string) string {
+		// Append a stable input box so paneContentLines has chrome to strip.
+		return strings.Join(append(append([]string{}, lines...), "❯ "), "\n")
+	}
+
+	// First sight of a line: not yet settled (present in only one snapshot).
+	if n, _ := s.next(body("● step one")); len(n) != 0 {
+		t.Fatalf("a line should not stream on first sight, got %v", n)
+	}
+	// Second consecutive snapshot: it settles and streams once.
+	n, act := s.next(body("● step one"))
+	if strings.Join(n, "|") != "● step one" {
+		t.Fatalf("settled line should stream once, got %v", n)
+	}
+	if act != "● step one" {
+		t.Fatalf("activity = %q", act)
+	}
+	// Same screen again: already emitted, nothing new.
+	if n, _ := s.next(body("● step one")); len(n) != 0 {
+		t.Fatalf("an already-streamed line must not repeat, got %v", n)
+	}
+	// A new line appears — settles on its second snapshot, and only it streams.
+	_, _ = s.next(body("● step one", "● step two"))
+	n, act = s.next(body("● step one", "● step two"))
+	if strings.Join(n, "|") != "● step two" {
+		t.Fatalf("only the new line should stream, got %v", n)
+	}
+	if act != "● step two" {
+		t.Fatalf("activity should track the latest line, got %q", act)
+	}
+}
+
 func TestPaneSignalsDone(t *testing.T) {
 	cases := []struct {
 		name   string

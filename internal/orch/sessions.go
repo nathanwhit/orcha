@@ -245,6 +245,23 @@ func (o *Orchestrator) consume(r *run, events <-chan agent.Event) {
 			_ = o.emit(r.sessionID, model.MsgStdout, model.KindText, ev.Content, ev.Metadata)
 		case agent.EventStderr:
 			_ = o.emit(r.sessionID, model.MsgStderr, model.KindText, ev.Content, ev.Metadata)
+		case agent.EventProgress:
+			// Live progress scraped from an interactive TUI pane: a settled output
+			// line and/or the current activity. Record it as forward progress (so a
+			// busy worker is known-alive and the no-progress guard isn't tripped),
+			// stream the line into the transcript for a live view, and reflect the
+			// activity — but do NOT touch LatestSummary (that is the agent's own
+			// final message, set on EventText).
+			if strings.TrimSpace(ev.Content) != "" {
+				_ = o.emit(r.sessionID, ev.Source, model.KindText, ev.Content, ev.Metadata)
+				o.RecordProgress(r.sessionID)
+			}
+			if ev.Activity != "" {
+				o.RecordProgress(r.sessionID)
+				_, _ = o.st.UpdateSessionRuntime(r.sessionID, func(s *model.Session) {
+					s.CurrentActivity = ev.Activity
+				})
+			}
 		case agent.EventStatus:
 			if ev.Activity != "" {
 				_, _ = o.st.UpdateSessionRuntime(r.sessionID, func(s *model.Session) {
