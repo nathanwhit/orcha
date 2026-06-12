@@ -52,6 +52,10 @@ func (s *Scheduler) Run(ctx context.Context) {
 	defer t.Stop()
 	for {
 		_, _ = s.Tick(ctx)
+		// Re-engage any active objective that has gone idle (no worker making
+		// progress) so a paused manager continues instead of stalling forever.
+		// The poke's own cooldown keeps this from firing every tick.
+		s.o.SuperviseIdleObjectives(ctx)
 		select {
 		case <-ctx.Done():
 			return

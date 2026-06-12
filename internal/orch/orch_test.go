@@ -1448,6 +1448,52 @@ func TestConflictingPR_SpawnsRebaseFollowup(t *testing.T) {
 	}
 }
 
+func TestSupervisor_RepokesIdleManagerOnlyWhenNoWorkers(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+
+	obj, mgr, err := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	if err != nil {
+		t.Fatalf("create objective: %v", err)
+	}
+
+	// A freshly-active manager (UpdatedAt just now) is NOT yet considered stalled.
+	if pokes := o.idleManagersToPoke(st.Now()); len(pokes) != 0 {
+		t.Fatalf("a just-active manager should not be poked, got %d", len(pokes))
+	}
+
+	// Once it has been quiet past the idle threshold and no worker is running,
+	// the idle manager is poked.
+	future := st.Now().Add(superviseIdleAfter + time.Minute)
+	pokes := o.idleManagersToPoke(future)
+	if len(pokes) != 1 || pokes[0].ID != mgr.ID {
+		t.Fatalf("expected idle manager %s to be poked, got %v", mgr.ID, pokes)
+	}
+
+	// Cooldown: an immediate re-check does not poke again.
+	if again := o.idleManagersToPoke(future); len(again) != 0 {
+		t.Fatalf("cooldown should suppress a second poke, got %d", len(again))
+	}
+	// After the cooldown elapses, an objective still idle is poked again.
+	later := future.Add(supervisePokeCooldown + time.Second)
+	if again := o.idleManagersToPoke(later); len(again) != 1 {
+		t.Fatalf("after cooldown, a still-idle manager should be poked again, got %d", len(again))
+	}
+
+	// With an active worker, the objective is making progress -> never poked,
+	// even long after the manager went quiet.
+	w := &model.Session{ObjectiveID: obj.ID, Role: model.RoleImplementer,
+		Agent: model.AgentClaude, Status: model.SessionRunning}
+	if err := st.CreateSession(w); err != nil {
+		t.Fatalf("create worker: %v", err)
+	}
+	evenLater := later.Add(supervisePokeCooldown + time.Second)
+	if again := o.idleManagersToPoke(evenLater); len(again) != 0 {
+		t.Fatalf("an objective with an active worker must not be poked, got %d", len(again))
+	}
+}
+
 func TestFailingChecksPR_SpawnsCIFollowup(t *testing.T) {
 	o, st := newTestOrch(t)
 	addTarget(t, st, "local", model.TargetLocal, 4)
