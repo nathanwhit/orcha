@@ -13,11 +13,16 @@ import (
 
 func git(t *testing.T, dir string, args ...string) string {
 	t.Helper()
+	hermeticGit(t)
 	cmd := osexec.Command("git", args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
 		"GIT_AUTHOR_NAME=orcha", "GIT_AUTHOR_EMAIL=orcha@test",
 		"GIT_COMMITTER_NAME=orcha", "GIT_COMMITTER_EMAIL=orcha@test",
+		// Hermetic: ignore the developer's global/system git config. Commit
+		// signing in particular (e.g. via the 1Password SSH agent) makes tests
+		// hang on an authorization prompt or fail when the agent is locked.
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1",
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -188,4 +193,15 @@ func TestPrepare_ForkWorkflow(t *testing.T) {
 	if head := git(t, prDir, "log", "-1", "--format=%s"); !strings.Contains(head, "fork test") {
 		t.Fatalf("PR checkout head = %q, want the fork commit", head)
 	}
+}
+
+// hermeticGit makes git invocations during this test — including ones made by
+// the code under test, which inherits the process env — ignore the developer's
+// global/system git config. Commit signing in particular (e.g. via the
+// 1Password SSH agent) hangs tests on an authorization prompt or fails them
+// when the agent is locked.
+func hermeticGit(t *testing.T) {
+	t.Helper()
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 }
