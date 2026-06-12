@@ -150,10 +150,23 @@ func (o *Orchestrator) ensureWorkspace(ctx context.Context, sess *model.Session,
 	if sess.WorkspaceID != "" || o.preparer == nil || target == nil {
 		return nil
 	}
+	repo, pushRepo, cloneURL, base := o.resolveRepo(sess)
+
+	// The manager gets a checkout too, when there is one to give: grounded in
+	// the actual code it scopes work precisely (real file references) instead
+	// of asking the user things the repo answers. Unlike coding workers, no
+	// repo is not an error — it runs from a scratch dir and can ask_user.
+	if sess.Role == model.RoleManager {
+		if repo == "" && cloneURL == "" {
+			return nil
+		}
+		_, err := o.prepareIsolatedOn(ctx, sess, target, repo, pushRepo, cloneURL, base)
+		return err
+	}
+
 	if !needsIsolatedWorkspace(sess.Role) {
 		return nil
 	}
-	repo, pushRepo, cloneURL, base := o.resolveRepo(sess)
 	if repo == "" && cloneURL == "" {
 		// A coding worker with nothing to clone must fail loudly here: the
 		// fallback would be an empty scratch dir it can't do its task in (and

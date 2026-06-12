@@ -1094,3 +1094,88 @@ func TestQuestionsCloseWithTheirSession(t *testing.T) {
 		t.Fatalf("stale question after sweep = %s, want canceled", got2.Status)
 	}
 }
+
+// The manager's prompt must carry the objective's repo facts: the repo lives
+// in objective metadata for workspace prep, and a manager that can't see it
+// asks the user for a repo the objective already names.
+func TestManagerPromptCarriesObjectiveRepo(t *testing.T) {
+	o, st := newTestOrch(t)
+	o.cfg.ManagerMCPBaseURL = "http://127.0.0.1:0"
+
+	obj, mgr, err := o.CreateObjective(NewObjectiveSpec{
+		Title: "t", Prompt: "upgrade the ui", Agent: model.AgentClaude,
+		Repo: "nathanwhit/orcha", PushRepo: "fork/orcha", BaseBranch: "main",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	_ = obj
+	sess, _ := st.GetSession(mgr.ID)
+	spec := o.buildSpec(sess, nil, nil)
+	for _, want := range []string{"Objective repo: nathanwhit/orcha", "base main", "fork/orcha"} {
+		if !strings.Contains(spec.Prompt, want) {
+			t.Fatalf("manager prompt missing %q:\n%s", want, spec.Prompt)
+		}
+	}
+
+	// Repo-less objective: registered projects are offered instead.
+	_ = st.UpsertProject(&model.Project{Name: "orcha", Repo: "nathanwhit/orcha", BaseBranch: "main"})
+	_, mgr2, err := o.CreateObjective(NewObjectiveSpec{Title: "t2", Prompt: "p", Agent: model.AgentClaude})
+	if err != nil {
+		t.Fatalf("create2: %v", err)
+	}
+	sess2, _ := st.GetSession(mgr2.ID)
+	spec2 := o.buildSpec(sess2, nil, nil)
+	if !strings.Contains(spec2.Prompt, "Registered projects:") ||
+		!strings.Contains(spec2.Prompt, "nathanwhit/orcha") {
+		t.Fatalf("repo-less manager prompt missing project hints:\n%s", spec2.Prompt)
+	}
+}
+
+// A manager whose objective names a repo runs in its own fresh checkout —
+// grounded managers scope work from the code instead of asking about it.
+func TestManagerGetsCheckout(t *testing.T) {
+	o, st := newTestOrch(t)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	o.SetWorkspacePreparer(workspace.New())
+
+	root := t.TempDir()
+	bare := filepath.Join(root, "remote.git")
+	tgit(t, root, "init", "--bare", "-b", "main", bare)
+	seed := filepath.Join(root, "seed")
+	tgit(t, root, "init", "-b", "main", seed)
+	if err := os.WriteFile(filepath.Join(seed, "code.go"), []byte("package x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tgit(t, seed, "add", ".")
+	tgit(t, seed, "commit", "-m", "initial")
+	tgit(t, seed, "remote", "add", "origin", bare)
+	tgit(t, seed, "push", "-u", "origin", "main")
+
+	tgt := &model.Target{Name: "local", Kind: model.TargetLocal, Status: model.TargetOnline,
+		WorkRoot: filepath.Join(root, "work"), CapacitySessions: 2}
+	if err := st.CreateTarget(tgt); err != nil {
+		t.Fatalf("target: %v", err)
+	}
+
+	_, mgr, err := o.CreateObjective(NewObjectiveSpec{
+		Title: "t", Prompt: "p", Agent: model.AgentClaude, Repo: "owner/x", CloneURL: bare,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := o.StartRun(context.Background(), mgr.ID); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	sess, _ := st.GetSession(mgr.ID)
+	if sess.WorkspaceID == "" {
+		t.Fatal("manager has no workspace")
+	}
+	ws, err := st.GetWorkspace(sess.WorkspaceID)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(ws.Path, "code.go")); err != nil {
+		t.Fatalf("manager checkout missing repo content: %v", err)
+	}
+}

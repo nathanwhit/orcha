@@ -3,6 +3,7 @@ package orch
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/nathanwhit/orcha/internal/agent"
 	"github.com/nathanwhit/orcha/internal/model"
@@ -128,7 +129,7 @@ func (o *Orchestrator) buildSpec(sess *model.Session, ws *model.Workspace, tgt *
 		spec.AllowedTools = []string{"mcp__orcha"}
 		spec.PermissionMode = "default"
 		if spec.Prompt != "" {
-			spec.Prompt = managerSystemPreamble + "\n\n" + spec.Prompt
+			spec.Prompt = managerSystemPreamble + o.managerContext(sess) + "\n\n" + spec.Prompt
 		}
 	// PR/CI follow-up: the agent itself decides how to respond, using its tools
 	// (update_pr to push a fix, comment_pr to reply, ask_user, create_note).
@@ -185,8 +186,52 @@ scoped work, ask_user when direction/credentials are unclear, publish_pr to ship
 coherent slices, comment_pr/update_pr for follow-ups, create_note for shared
 memory, and mark_objective_done when finished. Prefer several clean PR-sized
 slices over one giant PR. Keep working after publishing intermediate PRs unless
-truly blocked. You work from summaries; spawn workers to do the actual coding.
-Coding workers run in fresh isolated checkouts: if the objective does not
-already name a repo, you MUST pass repo (owner/repo) in spawn_session — a
-coding worker without a repo fails to start. If you don't know the repo,
-ask_user. Keep your messages concise and operational.`
+truly blocked.
+When the objective names a repo, you are running in a fresh checkout of it:
+explore the code first and scope workers' goals precisely, with verified file
+references. Do NOT code, commit, or push yourself — workers do the coding in
+their own isolated checkouts; you read, plan, and coordinate.
+Coding workers need a repo: if the objective does not already name one, you
+MUST pass repo (owner/repo) in spawn_session — a coding worker without a repo
+fails to start. If you don't know the repo, ask_user. Keep your messages
+concise and operational.`
+
+// managerContext renders objective-level repo facts into the manager's prompt.
+// The repo lives in objective metadata for workspace prep, but the manager
+// cannot read the database — without this it asks the user for a repo the
+// objective already names.
+func (o *Orchestrator) managerContext(sess *model.Session) string {
+	repo, pushRepo, cloneURL, base := o.resolveRepo(sess)
+	var b strings.Builder
+	if repo != "" || cloneURL != "" {
+		name := repo
+		if name == "" {
+			name = cloneURL
+		}
+		fmt.Fprintf(&b, "\n\nObjective repo: %s", name)
+		if base != "" {
+			fmt.Fprintf(&b, " (base %s)", base)
+		}
+		if pushRepo != "" {
+			fmt.Fprintf(&b, "; branches push to the fork %s", pushRepo)
+		}
+		b.WriteString(". Workers inherit this repo automatically — spawn_session's repo field is only for overriding it.")
+		return b.String()
+	}
+	projs, err := o.st.ListProjects()
+	if err != nil || len(projs) == 0 {
+		return ""
+	}
+	b.WriteString("\n\nThe objective names no repo. Registered projects:")
+	for _, p := range projs {
+		fmt.Fprintf(&b, "\n- %s: %s", p.Name, p.Repo)
+		if p.BaseBranch != "" {
+			fmt.Fprintf(&b, " (base %s)", p.BaseBranch)
+		}
+		if p.PushRepo != "" {
+			fmt.Fprintf(&b, " (push via fork %s)", p.PushRepo)
+		}
+	}
+	b.WriteString("\nIf one clearly matches the objective, use its repo in spawn_session; otherwise ask_user.")
+	return b.String()
+}
