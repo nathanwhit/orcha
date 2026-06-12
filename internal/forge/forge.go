@@ -8,6 +8,8 @@ import (
 	"context"
 	"errors"
 	"sync"
+
+	"github.com/nathanwhit/orcha/internal/exec"
 )
 
 // Comment is an issue or review comment observed on a PR.
@@ -65,6 +67,18 @@ type Forge interface {
 
 // ErrRepoMissing indicates the target repo is unreachable.
 var ErrRepoMissing = errors.New("forge: repository not found")
+
+// Retargetable is an optional Forge capability: return a Forge that runs its
+// external commands on a specific executor (e.g. a worker's SSH target, where
+// its checkout and gh auth live). The orchestrator uses this so PR operations
+// run on the machine that holds the checkout, not on the orchestrator host.
+type Retargetable interface {
+	OnExecutor(ex exec.Executor) Forge
+}
+
+// OnExecutor lets the Fake satisfy Retargetable; it ignores the executor (the
+// Fake has no real commands to run) and returns itself.
+func (f *Fake) OnExecutor(exec.Executor) Forge { return f }
 
 // ---------------------------------------------------------------------------
 // Fake

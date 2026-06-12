@@ -194,3 +194,22 @@ func TestSSH_Live(t *testing.T) {
 		t.Fatalf("remote stdout=%q", out)
 	}
 }
+
+func TestLocalCleanCapture_SeparatesStreams(t *testing.T) {
+	// stdout must come back clean — stderr (e.g. a noisy remote .bashrc) must not
+	// leak into it, or gh --json parsing would break.
+	out, err := NewLocal().CleanCapture(context.Background(),
+		Command{Name: "sh", Args: []string{"-c", "echo OUT; echo NOISE >&2"}})
+	if err != nil {
+		t.Fatalf("clean capture: %v", err)
+	}
+	if out != "OUT" {
+		t.Fatalf("stdout = %q, want just OUT (stderr leaked)", out)
+	}
+	// On failure, stderr is folded into the error for diagnosis.
+	_, err = NewLocal().CleanCapture(context.Background(),
+		Command{Name: "sh", Args: []string{"-c", "echo BOOM >&2; exit 3"}})
+	if err == nil || !strings.Contains(err.Error(), "BOOM") {
+		t.Fatalf("expected error carrying stderr, got %v", err)
+	}
+}

@@ -103,6 +103,24 @@ func (s *SSHExecutor) Start(ctx context.Context, cmd Command) (Process, error) {
 	return s.local.Start(ctx, Command{Name: "ssh", Args: args, Stdin: cmd.Stdin})
 }
 
+// CleanCapture runs cmd on the remote host WITHOUT allocating a tty, so its
+// stdout is free of interactive-shell noise (e.g. a .bashrc that prints
+// warnings) and safe to parse — `gh --json`, git plumbing. stderr is folded into
+// the error on failure. Implements Capturer.
+//
+// The non-tty path is fine here because these are short command-and-wait calls
+// that exit on their own; the tty in Start exists only so long-lived interactive
+// sessions get SIGHUP on disconnect.
+func (s *SSHExecutor) CleanCapture(ctx context.Context, cmd Command) (string, error) {
+	remote := remoteCommand(cmd)
+	args := append(s.sshArgs(false), remote)
+	proc, err := s.local.Start(ctx, Command{Name: "ssh", Args: args, Stdin: cmd.Stdin})
+	if err != nil {
+		return "", err
+	}
+	return captureStreams(proc, cmd.Name)
+}
+
 // HealthCheck runs `true` on the remote host.
 func (s *SSHExecutor) HealthCheck(ctx context.Context) error {
 	args := append(s.sshArgs(false), "true")

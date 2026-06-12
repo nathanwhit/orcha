@@ -1,28 +1,50 @@
 package forge
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
-	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/nathanwhit/orcha/internal/exec"
 )
 
-// GitForge is a real Forge backed by the local `git` and `gh` CLIs. Git handles
-// branch pushes and diff detection in a workspace checkout; gh handles
-// repo/PR/comment operations against GitHub. Every method shells out — these are
-// the external calls the orchestrator deliberately keeps outside DB
-// transactions.
+// GitForge is a real Forge backed by the `git` and `gh` CLIs. Git handles branch
+// pushes and diff detection in a workspace checkout; gh handles repo/PR/comment
+// operations against GitHub. Every method shells out — these are the external
+// calls the orchestrator deliberately keeps outside DB transactions.
+//
+// Commands run through Exec, which is the crux for remote targets: a worker's
+// checkout lives on its target, and gh is authenticated there, so the forge must
+// run git/gh ON THAT TARGET — not on the orchestrator host, where the checkout
+// path does not exist. Exec defaults to the local host; OnExecutor rebinds it to
+// a workspace's target.
 type GitForge struct {
 	// GitBin / GHBin allow overriding the executables (default "git"/"gh").
 	GitBin string
 	GHBin  string
+	// Exec runs the commands; nil means the local host.
+	Exec exec.Executor
 }
 
-// NewGit returns a GitForge using the default git/gh executables.
+// NewGit returns a GitForge using the default git/gh executables on the local
+// host.
 func NewGit() *GitForge { return &GitForge{GitBin: "git", GHBin: "gh"} }
+
+// OnExecutor returns a copy of the forge that runs its commands on ex (e.g. a
+// worker's SSH target). Implements the orchestrator's retargetable forge.
+func (g *GitForge) OnExecutor(ex exec.Executor) Forge {
+	cp := *g
+	cp.Exec = ex
+	return &cp
+}
+
+func (g *GitForge) executor() exec.Executor {
+	if g.Exec != nil {
+		return g.Exec
+	}
+	return exec.NewLocal()
+}
 
 func (g *GitForge) gitBin() string {
 	if g.GitBin == "" {
@@ -38,27 +60,12 @@ func (g *GitForge) ghBin() string {
 	return g.GHBin
 }
 
-// run executes a command in dir and returns trimmed stdout, or an error that
-// includes stderr for diagnosis.
-func run(ctx context.Context, dir, name string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Dir = dir
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return strings.TrimSpace(stdout.String()),
-			fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
-	}
-	return strings.TrimSpace(stdout.String()), nil
-}
-
 func (g *GitForge) git(ctx context.Context, dir string, args ...string) (string, error) {
-	return run(ctx, dir, g.gitBin(), args...)
+	return exec.Capture(ctx, g.executor(), exec.Command{Name: g.gitBin(), Args: args, Dir: dir})
 }
 
 func (g *GitForge) gh(ctx context.Context, args ...string) (string, error) {
-	return run(ctx, "", g.ghBin(), args...)
+	return exec.Capture(ctx, g.executor(), exec.Command{Name: g.ghBin(), Args: args})
 }
 
 // RepoExists checks reachability via `gh repo view`.

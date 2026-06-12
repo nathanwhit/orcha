@@ -35,6 +35,16 @@ func (l *LocalExecutor) HealthCheck(ctx context.Context) error {
 	return p.Wait()
 }
 
+// CleanCapture runs cmd to completion and returns its stdout, separated from
+// stderr (folded into the error on failure). Implements Capturer.
+func (l *LocalExecutor) CleanCapture(ctx context.Context, cmd Command) (string, error) {
+	proc, err := l.Start(ctx, cmd)
+	if err != nil {
+		return "", err
+	}
+	return captureStreams(proc, cmd.Name)
+}
+
 // Start launches a local process in its own process group.
 func (l *LocalExecutor) Start(ctx context.Context, cmd Command) (Process, error) {
 	c := osexec.Command(cmd.Name, cmd.Args...)

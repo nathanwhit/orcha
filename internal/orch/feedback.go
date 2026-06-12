@@ -300,7 +300,7 @@ func (o *Orchestrator) AdoptUntrackedPRs(ctx context.Context, objectiveID string
 		if r, ok := ws.Metadata["repo"].(string); ok && r != "" {
 			repo = r
 		}
-		st, err := o.forge.FindOpenPR(ctx, repo, ws.BranchName)
+		st, err := o.forgeForWorkspace(ws).FindOpenPR(ctx, repo, ws.BranchName)
 		if err != nil || st == nil {
 			continue
 		}

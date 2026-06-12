@@ -6,9 +6,36 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/nathanwhit/orcha/internal/agent"
+	"github.com/nathanwhit/orcha/internal/forge"
 	"github.com/nathanwhit/orcha/internal/model"
 	"github.com/nathanwhit/orcha/internal/store"
 )
+
+// forgeFor returns the forge bound to run its git/gh commands on target's
+// machine, when the configured forge supports retargeting. A worker's checkout
+// and gh auth live on its target, so PR operations must run THERE — running them
+// on the orchestrator host fails ("chdir <workspace>: no such file or directory"
+// for a remote checkout). A nil target or non-retargetable forge (the Fake) is
+// returned unchanged.
+func (o *Orchestrator) forgeFor(target *model.Target) forge.Forge {
+	if rt, ok := o.forge.(forge.Retargetable); ok && target != nil {
+		return rt.OnExecutor(agent.NewExecutor(target))
+	}
+	return o.forge
+}
+
+// forgeForWorkspace binds the forge to the target a workspace lives on.
+func (o *Orchestrator) forgeForWorkspace(ws *model.Workspace) forge.Forge {
+	if ws == nil || ws.TargetID == "" {
+		return o.forge
+	}
+	tgt, err := o.st.GetTarget(ws.TargetID)
+	if err != nil {
+		return o.forge
+	}
+	return o.forgeFor(tgt)
+}
 
 // PublishSpec carries the agent-supplied PR content.
 type PublishSpec struct {
@@ -48,9 +75,12 @@ func (o *Orchestrator) PublishPR(ctx context.Context, sessionID string, spec Pub
 	if r, ok := ws.Metadata["repo"].(string); ok && r != "" {
 		repo = r
 	}
+	// Run git/gh on the machine that holds the checkout (the workspace's target),
+	// not the orchestrator host — otherwise the checkout path does not exist.
+	f := o.forgeForWorkspace(ws)
 
 	// --- Mechanical safety checks (no DB transaction held across these) ---
-	if ok, err := o.forge.RepoExists(ctx, repo); err != nil {
+	if ok, err := f.RepoExists(ctx, repo); err != nil {
 		return nil, err
 	} else if !ok {
 		return nil, fmt.Errorf("%w: repo %s not found", ErrUnsafePublish, repo)
@@ -61,10 +91,10 @@ func (o *Orchestrator) PublishPR(ctx context.Context, sessionID string, spec Pub
 	if commitMsg == "" {
 		commitMsg = "orcha: " + spec.Title
 	}
-	if _, err := o.forge.CommitAll(ctx, ws.Path, commitMsg); err != nil {
+	if _, err := f.CommitAll(ctx, ws.Path, commitMsg); err != nil {
 		return nil, err
 	}
-	if ok, err := o.forge.HasDiff(ctx, ws.Path); err != nil {
+	if ok, err := f.HasDiff(ctx, ws.Path); err != nil {
 		return nil, err
 	} else if !ok {
 		return nil, fmt.Errorf("%w: no diff in workspace", ErrUnsafePublish)
@@ -92,7 +122,7 @@ func (o *Orchestrator) PublishPR(ctx context.Context, sessionID string, spec Pub
 	// (set during workspace prep). The PR opens against the upstream repo, with
 	// the head qualified as fork-owner:branch when the branch lives on a fork.
 	pushRepo, _ := ws.Metadata["push_repo"].(string)
-	headSHA, err := o.forge.PushBranch(ctx, repo, ws.Path, ws.BranchName, false)
+	headSHA, err := f.PushBranch(ctx, repo, ws.Path, ws.BranchName, false)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +130,7 @@ func (o *Orchestrator) PublishPR(ctx context.Context, sessionID string, spec Pub
 	if pushRepo != "" && pushRepo != repo {
 		head = repoOwner(pushRepo) + ":" + ws.BranchName
 	}
-	res, err := o.forge.OpenPR(ctx, repo, head, base, spec.Title, spec.Body)
+	res, err := f.OpenPR(ctx, repo, head, base, spec.Title, spec.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -165,9 +195,16 @@ func (o *Orchestrator) UpdatePR(ctx context.Context, prID string, spec UpdateSpe
 	if err != nil {
 		return nil, err
 	}
+	// Run git/gh on the machine holding the PR-branch checkout (the follow-up
+	// workspace's target), not the orchestrator host.
+	var fws *model.Workspace
+	if spec.WorkspaceID != "" {
+		fws, _ = o.st.GetWorkspace(spec.WorkspaceID)
+	}
+	f := o.forgeForWorkspace(fws)
 
 	// Refresh host state before deciding anything.
-	if st, err := o.forge.GetPRState(ctx, pr.Repo, pr.Number); err == nil {
+	if st, err := f.GetPRState(ctx, pr.Repo, pr.Number); err == nil {
 		pr, _ = o.st.UpdatePR(prID, func(p *model.PullRequest) {
 			p.Status = model.PRStatus(st.Status)
 			p.ChecksState = model.ChecksState(st.ChecksState)
@@ -209,10 +246,8 @@ func (o *Orchestrator) UpdatePR(ctx context.Context, prID string, spec UpdateSpe
 	defer o.st.ReleaseLock(lockKey, spec.SessionID)
 
 	wsPath := ""
-	if spec.WorkspaceID != "" {
-		if ws, err := o.st.GetWorkspace(spec.WorkspaceID); err == nil {
-			wsPath = ws.Path
-		}
+	if fws != nil {
+		wsPath = fws.Path
 	}
 	// Fallback: commit any edits the agent left uncommitted (normally the agent
 	// commits its own work with its own message, so this is a no-op).
@@ -221,11 +256,11 @@ func (o *Orchestrator) UpdatePR(ctx context.Context, prID string, spec UpdateSpe
 		if msg == "" {
 			msg = "Address PR feedback"
 		}
-		if _, err := o.forge.CommitAll(ctx, wsPath, msg); err != nil {
+		if _, err := f.CommitAll(ctx, wsPath, msg); err != nil {
 			return nil, err
 		}
 	}
-	headSHA, err := o.forge.PushBranch(ctx, pr.Repo, wsPath, pr.Branch, spec.Force)
+	headSHA, err := f.PushBranch(ctx, pr.Repo, wsPath, pr.Branch, spec.Force)
 	if err != nil {
 		return nil, err
 	}
@@ -242,7 +277,7 @@ func (o *Orchestrator) UpdatePR(ctx context.Context, prID string, spec UpdateSpe
 		o.audit(pr.ObjectiveID, spec.SessionID, "force_push", spec.ForceReason, model.JSONMap{"pr_id": prID})
 	}
 	if spec.Comment != "" {
-		_ = o.forge.Comment(ctx, pr.Repo, pr.Number, spec.Comment)
+		_ = f.Comment(ctx, pr.Repo, pr.Number, spec.Comment)
 		o.audit(pr.ObjectiveID, spec.SessionID, "pr_comment", "left comment", model.JSONMap{"pr_id": prID})
 	}
 	o.audit(pr.ObjectiveID, spec.SessionID, "pr_updated",

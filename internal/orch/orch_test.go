@@ -1306,3 +1306,22 @@ func TestManagerGetsCheckout(t *testing.T) {
 		t.Fatalf("manager checkout missing repo content: %v", err)
 	}
 }
+
+func TestForgeFor_BindsToTargetExecutor(t *testing.T) {
+	o, st := newTestOrch(t)
+	o.SetForge(forge.NewGit())
+	// A retargetable forge runs its git/gh on the workspace's machine.
+	ssh := addTarget(t, st, "vultr", model.TargetSSH, 4)
+	gf, ok := o.forgeFor(ssh).(*forge.GitForge)
+	if !ok || gf.Exec == nil {
+		t.Fatalf("forgeFor(ssh) should bind an executor, got %T", o.forgeFor(ssh))
+	}
+	if d := gf.Exec.Describe(); !strings.Contains(d, "ssh") {
+		t.Fatalf("ssh target should bind an ssh executor, got %q", d)
+	}
+	// The Fake forge is not retargetable — returned unchanged.
+	o.SetForge(forge.NewFake())
+	if _, isGit := o.forgeFor(ssh).(*forge.GitForge); isGit {
+		t.Fatal("fake forge should not become a GitForge")
+	}
+}
