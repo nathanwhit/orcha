@@ -147,15 +147,45 @@ func (o *Orchestrator) CommentPR(ctx context.Context, prID, body string) error {
 	return nil
 }
 
-// MarkObjectiveDone is the manager's mark_objective_done tool.
+// MarkObjectiveDone is the manager's mark_objective_done tool. Marking the
+// objective succeeded also finalizes the manager session itself — its TUI is a
+// long-lived conversation that never exits on its own, so without this the
+// manager would sit running forever after declaring the work complete.
 func (o *Orchestrator) MarkObjectiveDone(managerSessionID, summary string) error {
 	mgr, err := o.st.GetSession(managerSessionID)
 	if err != nil {
 		return err
 	}
-	return o.withManagerLock(mgr.ObjectiveID, managerSessionID, func() error {
+	if err := o.withManagerLock(mgr.ObjectiveID, managerSessionID, func() error {
 		return o.st.UpdateObjectiveStatus(mgr.ObjectiveID, model.ObjectiveSucceeded, summary)
-	})
+	}); err != nil {
+		return err
+	}
+	o.finalizeSession(managerSessionID, model.SessionSucceeded)
+	return nil
+}
+
+// finalizeSession drives a session to a terminal status and tears down its live
+// run (killing the agent process / tmux session). Used for sessions that do not
+// end by a provider-emitted done event — e.g. a manager declaring the objective
+// complete. Safe when there is no live run.
+func (o *Orchestrator) finalizeSession(sessionID string, status model.SessionStatus) {
+	o.mu.Lock()
+	r := o.runs[sessionID]
+	o.mu.Unlock()
+	_, _ = o.st.UpdateSessionStatus(sessionID, status)
+	if r != nil {
+		// The run's consume loop sees the canceled context and unwinds (releasing
+		// locks/slot via cleanupRun); the already-terminal status it set above is
+		// preserved because a canceled run does not force its own terminal state.
+		_ = r.provider.CancelSession(r.handle)
+		r.cancel()
+	} else if sess, err := o.st.GetSession(sessionID); err == nil {
+		o.releaseSessionLocks(sess)
+		o.releaseTargetSlot(sess)
+		o.notifyChange()
+	}
+	_ = o.st.CancelOpenQuestionsBySession(sessionID)
 }
 
 // EnsureSharedScratch returns the objective's shared scratch workspace on a

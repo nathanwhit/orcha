@@ -29,7 +29,21 @@ type Spec struct {
 	AllowedTools []string
 	// PermissionMode overrides the agent's permission mode (e.g. "acceptEdits").
 	PermissionMode string
+	// OneShot marks a session that completes when its turn ends (a coding worker
+	// or PR/CI follow-up), as opposed to a long-lived conversational session (a
+	// manager) that only ends on an explicit signal. An interactive TUI never
+	// exits on its own, so tmux providers use this to know they may treat a
+	// finished turn — the completion sentinel, or a long-quiescent pane — as the
+	// session being done.
+	OneShot bool
 }
+
+// TurnDoneSentinel is the exact line a one-shot tmux agent is asked to print as
+// the very last thing it outputs, to mark its turn complete. An interactive TUI
+// (claude/codex run like a human runs them) never exits, so this printed marker
+// is the protocol-level completion signal a tmux provider watches for in the
+// pane — not an arbitrary timer.
+const TurnDoneSentinel = "===ORCHA-SESSION-COMPLETE==="
 
 // EventKind classifies a runtime event emitted by a provider.
 type EventKind string

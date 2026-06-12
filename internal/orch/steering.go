@@ -142,18 +142,29 @@ func (o *Orchestrator) buildSpec(sess *model.Session, ws *model.Workspace, tgt *
 			spec.AllowedTools = []string{"mcp__orcha"}
 		}
 		spec.PermissionMode = o.cfg.WorkerPermissionMode // shell so it can commit
+		spec.OneShot = true
 		if spec.Prompt != "" {
-			spec.Prompt = followupSystemPreamble + "\n\n" + spec.Prompt
+			spec.Prompt = followupSystemPreamble + completionInstruction + "\n\n" + spec.Prompt
 		}
 	// Other coding workers run one-shot in a checkout and do not publish.
 	case isCodingWorker(sess.Role):
 		spec.PermissionMode = o.cfg.WorkerPermissionMode
+		spec.OneShot = true
 		if spec.Prompt != "" {
-			spec.Prompt = workerSystemPreamble + "\n\n" + spec.Prompt
+			spec.Prompt = workerSystemPreamble + completionInstruction + "\n\n" + spec.Prompt
 		}
 	}
 	return spec
 }
+
+// completionInstruction is appended to one-shot worker preambles. A worker runs
+// as an interactive TUI that never exits, so it must announce it is finished:
+// printing the sentinel is how the orchestrator learns the turn is done and the
+// manager gets notified. It is phrased inline (sentinel mid-sentence) so the
+// rendered prompt never contains a standalone sentinel line that the pane
+// watcher could mistake for the agent actually emitting it.
+var completionInstruction = "\n\nIMPORTANT — when you are completely finished (after committing), print this exact marker, " +
+	agent.TurnDoneSentinel + ", on a line by itself as the very last thing you output, with nothing after it. That marker is how the team learns your work is done."
 
 // followupSystemPreamble orients a PR follow-up agent. It must decide and act —
 // the orchestrator does not respond on its behalf.

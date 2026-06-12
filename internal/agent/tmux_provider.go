@@ -197,9 +197,20 @@ func (p *TmuxProvider) arm(runCtx context.Context, cancel context.CancelFunc, ct
 
 	// Watch for the session to end, then emit the single terminal event and
 	// close the channel.
+	//
+	// A long-lived conversational session (a manager) ends only when its tmux
+	// session goes away (cancel/shutdown). A one-shot session (a worker) runs an
+	// interactive TUI that never exits when its task is done — so we additionally
+	// watch the pane: the completion sentinel the agent prints, or (as a safety
+	// net against a non-compliant agent) a pane that has gone quiescent, both
+	// count as the turn being complete.
 	go func() {
 		defer close(out)
 		success := true
+		completed := false // turn finished on its own (sentinel/quiescent), vs canceled/external
+		var finalScreen string
+		var lastScreen string
+		var quietSince time.Time
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 	wait:
@@ -210,9 +221,42 @@ func (p *TmuxProvider) arm(runCtx context.Context, cancel context.CancelFunc, ct
 				break wait
 			case <-ticker.C:
 				if alive, _ := ctrl.HasSession(context.Background(), name); !alive {
+					break wait // TUI exited on its own
+				}
+				if !spec.OneShot {
+					continue
+				}
+				screen, err := ctrl.CapturePane(context.Background(), name)
+				if err != nil {
+					continue
+				}
+				if paneSignalsDone(screen) {
+					success, completed, finalScreen = true, true, screen
 					break wait
 				}
+				// Quiescence fallback: a one-shot agent that has stopped redrawing
+				// the pane for a sustained window has finished its turn (a working
+				// TUI animates a ticking spinner every second).
+				if screen == lastScreen {
+					if quietSince.IsZero() {
+						quietSince = time.Now()
+					} else if time.Since(quietSince) >= tmuxIdleComplete {
+						success, completed, finalScreen = true, true, screen
+						break wait
+					}
+				} else {
+					lastScreen, quietSince = screen, time.Time{}
+				}
 			}
+		}
+		// On a real completion, surface the agent's final message into the
+		// transcript (the manager's notification summary draws from it) and tear
+		// the TUI down so it doesn't linger holding the slot.
+		if completed {
+			if msg := finalPaneMessage(finalScreen); msg != "" {
+				out <- Event{Kind: EventText, Source: model.MsgAgent, Content: msg}
+			}
+			_ = ctrl.KillSession(context.Background(), name)
 		}
 		p.teardown(spec.SessionID)
 		msg := "tmux session ended"
@@ -223,6 +267,65 @@ func (p *TmuxProvider) arm(runCtx context.Context, cancel context.CancelFunc, ct
 	}()
 
 	return out
+}
+
+// tmuxIdleComplete is how long a one-shot agent's pane must stay byte-identical
+// before the provider concludes the turn is done without a sentinel. Generous
+// on purpose: it is a safety net, not the primary signal, and a working TUI
+// never stays static this long (its spinner/elapsed timer ticks every second).
+const tmuxIdleComplete = 120 * time.Second
+
+// paneSignalsDone reports whether the captured pane shows the completion
+// sentinel near the bottom. It scans only the last handful of non-empty lines
+// (the agent's final output sits just above the input box) and requires the
+// line to be essentially just the sentinel — so the instruction that asks for
+// it (a long prose line, higher up and scrolled off once output grows) is not
+// mistaken for the agent actually emitting it.
+func paneSignalsDone(screen string) bool {
+	lines := strings.Split(screen, "\n")
+	seen := 0
+	for i := len(lines) - 1; i >= 0 && seen < 12; i-- {
+		t := strings.TrimSpace(lines[i])
+		if t == "" {
+			continue
+		}
+		seen++
+		// Allow a short prefix the TUI may add (e.g. a "● " bullet or box edge)
+		// but reject the long prose instruction line that merely mentions it.
+		if strings.Contains(t, TurnDoneSentinel) && len(t) <= len(TurnDoneSentinel)+6 {
+			return true
+		}
+	}
+	return false
+}
+
+// finalPaneMessage extracts a best-effort summary of the agent's final output
+// from a captured pane: the trailing content lines, with the input box, the
+// bottom chrome, and the completion sentinel stripped. It is heuristic — a TUI
+// capture is not structured — but gives the manager real context instead of
+// "interactive tmux session ...".
+func finalPaneMessage(screen string) string {
+	lines := strings.Split(screen, "\n")
+	// Drop everything from the input prompt down (the box + footer chrome).
+	for i, ln := range lines {
+		t := strings.TrimSpace(ln)
+		if strings.HasPrefix(t, "❯") || strings.HasPrefix(t, "│ >") || strings.Contains(t, "bypass permissions on") {
+			lines = lines[:i]
+			break
+		}
+	}
+	var kept []string
+	for _, ln := range lines {
+		t := strings.TrimSpace(ln)
+		if t == "" || strings.Contains(t, TurnDoneSentinel) {
+			continue
+		}
+		kept = append(kept, strings.TrimRight(ln, " "))
+	}
+	if len(kept) > 25 {
+		kept = kept[len(kept)-25:]
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
 }
 
 // SendInput types a steering message into the live pane.

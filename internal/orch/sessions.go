@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/nathanwhit/orcha/internal/agent"
@@ -220,6 +221,18 @@ func (o *Orchestrator) consume(r *run, events <-chan agent.Event) {
 		case agent.EventText, agent.EventToolCall, agent.EventToolResult:
 			_ = o.emit(r.sessionID, ev.Source, msgKind(ev.Kind), ev.Content, ev.Metadata)
 			o.RecordProgress(r.sessionID)
+			// Keep the latest agent prose as the session's summary — it is what a
+			// parent manager is handed when this session finishes. Without this
+			// LatestSummary is never written and the handoff says nothing useful.
+			if ev.Kind == agent.EventText && ev.Source == model.MsgAgent && strings.TrimSpace(ev.Content) != "" {
+				summary := ev.Content
+				if len(summary) > 2000 {
+					summary = summary[:2000]
+				}
+				_, _ = o.st.UpdateSessionRuntime(r.sessionID, func(s *model.Session) {
+					s.LatestSummary = summary
+				})
+			}
 		case agent.EventStdout:
 			_ = o.emit(r.sessionID, model.MsgStdout, model.KindText, ev.Content, ev.Metadata)
 		case agent.EventStderr:

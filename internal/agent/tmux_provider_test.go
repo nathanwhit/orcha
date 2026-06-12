@@ -231,6 +231,110 @@ func TestTmuxProvider_AcceptsStartupDialog(t *testing.T) {
 	waitForScreenT(t, p, h, "DIALOG-ACCEPTED", 8*time.Second)
 }
 
+// TestTmuxProvider_OneShotCompletesOnSentinel proves the core fix: a one-shot
+// interactive session that never exits is still driven to completion when the
+// agent prints the done sentinel. Without this a finished worker's TUI sits at
+// its prompt forever and the manager is never notified.
+func TestTmuxProvider_OneShotCompletesOnSentinel(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	// A stand-in worker TUI: an idle shell that never exits on its own.
+	p := NewTmux(TmuxConfig{Kind: model.AgentOther})
+	h, events, err := p.StartSession(context.Background(), Spec{SessionID: "tmux-oneshot-1", OneShot: true})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	var (
+		done      = make(chan bool, 1)
+		finalText = make(chan string, 1)
+	)
+	go func() {
+		for ev := range events {
+			switch ev.Kind {
+			case EventText:
+				select {
+				case finalText <- ev.Content:
+				default:
+				}
+			case EventDone:
+				select {
+				case done <- ev.Success:
+				default:
+				}
+			}
+		}
+	}()
+
+	// Let the shell settle, then "finish" by printing the sentinel as output —
+	// printf so the (long) command line itself can't match, only the output line.
+	time.Sleep(500 * time.Millisecond)
+	if err := p.SendInput(h, "printf '%s\\n' "+TurnDoneSentinel); err != nil {
+		t.Fatalf("send input: %v", err)
+	}
+
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("one-shot session reported failure, want success")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("one-shot session never completed after printing the sentinel")
+	}
+	// The pane content is surfaced as a final agent message for the handoff.
+	select {
+	case <-finalText:
+	default:
+		t.Fatal("no final message captured for the manager handoff")
+	}
+	// And the tmux session is torn down, not left lingering.
+	if alive, _ := tmuxHasSession("orcha-tmux-oneshot-1"); alive {
+		t.Fatal("tmux session still alive after completion")
+	}
+}
+
+func TestPaneSignalsDone(t *testing.T) {
+	cases := []struct {
+		name   string
+		screen string
+		want   bool
+	}{
+		{"plain sentinel line", "doing work\n" + TurnDoneSentinel + "\n\n❯ ", true},
+		{"bulleted sentinel", "● " + TurnDoneSentinel + "\n❯ ", true},
+		{"prose instruction only", "print " + TurnDoneSentinel + " as the very last line when finished\n❯ ", false},
+		{"absent", "still working...\n❯ ", false},
+		{"too far up", TurnDoneSentinel + strings.Repeat("\nfiller line that pushes it out of the tail window", 20) + "\n❯ ", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := paneSignalsDone(c.screen); got != c.want {
+				t.Fatalf("paneSignalsDone = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestFinalPaneMessage(t *testing.T) {
+	screen := "● Done. Upgraded vite to ^8.\n" +
+		"  Committed as dd46176.\n" +
+		TurnDoneSentinel + "\n" +
+		"\n" +
+		"❯ \n" +
+		"  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+	got := finalPaneMessage(screen)
+	if !strings.Contains(got, "Committed as dd46176") {
+		t.Fatalf("expected the agent summary, got %q", got)
+	}
+	if strings.Contains(got, TurnDoneSentinel) || strings.Contains(got, "bypass permissions") || strings.Contains(got, "❯") {
+		t.Fatalf("chrome/sentinel leaked into summary: %q", got)
+	}
+}
+
+func tmuxHasSession(name string) (bool, error) {
+	err := exec.Command("tmux", "has-session", "-t", name).Run()
+	return err == nil, err
+}
+
 func waitForScreenT(t *testing.T, p *TmuxProvider, h Handle, want string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
