@@ -53,6 +53,10 @@ type Config struct {
 	// "bypassPermissions" also lets them build/test/commit). Managers always run
 	// with "default".
 	WorkerPermissionMode string
+	// MCPTunnelPort is the loopback port on SSH targets where the orchestrator's
+	// HTTP port is exposed via a managed reverse tunnel, so remote agents can
+	// reach their MCP tools (default 18080).
+	MCPTunnelPort int
 }
 
 // Orchestrator coordinates sessions across targets and providers.
@@ -67,6 +71,9 @@ type Orchestrator struct {
 	mu     sync.Mutex
 	guards map[string]*guardState // keyed by session id
 	runs   map[string]*run        // active runs keyed by session id
+
+	tunnelMu sync.Mutex
+	tunnels  map[string]*mcpTunnel // reverse MCP tunnels keyed by target id
 }
 
 // SetNotify installs a hook called whenever schedulable state changes (a
@@ -97,12 +104,16 @@ func New(st *store.Store, cfg Config) *Orchestrator {
 	if cfg.WorkerPermissionMode == "" {
 		cfg.WorkerPermissionMode = "acceptEdits"
 	}
+	if cfg.MCPTunnelPort == 0 {
+		cfg.MCPTunnelPort = 18080
+	}
 	return &Orchestrator{
 		st:        st,
 		cfg:       cfg,
 		providers: map[model.AgentKind]agent.Provider{},
 		guards:    map[string]*guardState{},
 		runs:      map[string]*run{},
+		tunnels:   map[string]*mcpTunnel{},
 	}
 }
 

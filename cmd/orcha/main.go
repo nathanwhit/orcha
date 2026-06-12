@@ -152,6 +152,7 @@ func main() {
 	<-ctx.Done()
 	log.Println("shutting down")
 	_ = httpSrv.Shutdown(context.Background())
+	o.CloseTunnels() // ssh -N children don't exit on their own
 }
 
 func ensureLocalTarget(st *store.Store) {

@@ -119,9 +119,11 @@ func (o *Orchestrator) buildSpec(sess *model.Session, ws *model.Workspace, tgt *
 		Metadata:       sess.Metadata,
 	}
 	switch {
-	// Manager: full tool surface.
+	// Manager: full tool surface. The MCP base is per-target: remote sessions
+	// reach the orchestrator through a managed reverse tunnel on their own
+	// loopback (the configured base points at the wrong machine from there).
 	case sess.Role == model.RoleManager && o.cfg.ManagerMCPBaseURL != "":
-		spec.MCP = map[string]string{"orcha": o.cfg.ManagerMCPBaseURL + "/mcp/" + sess.ID}
+		spec.MCP = map[string]string{"orcha": o.mcpBaseFor(tgt) + "/mcp/" + sess.ID}
 		spec.AllowedTools = []string{"mcp__orcha"}
 		spec.PermissionMode = "default"
 		if spec.Prompt != "" {
@@ -131,7 +133,7 @@ func (o *Orchestrator) buildSpec(sess *model.Session, ws *model.Workspace, tgt *
 	// (update_pr to push a fix, comment_pr to reply, ask_user, create_note).
 	case sess.Role == model.RolePRFollowup || sess.Role == model.RoleCIFollowup:
 		if o.cfg.ManagerMCPBaseURL != "" {
-			spec.MCP = map[string]string{"orcha": o.cfg.ManagerMCPBaseURL + "/mcp/" + sess.ID}
+			spec.MCP = map[string]string{"orcha": o.mcpBaseFor(tgt) + "/mcp/" + sess.ID}
 			spec.AllowedTools = []string{"mcp__orcha"}
 		}
 		spec.PermissionMode = o.cfg.WorkerPermissionMode // shell so it can commit

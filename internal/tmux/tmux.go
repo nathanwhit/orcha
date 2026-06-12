@@ -10,7 +10,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
+	"sync/atomic"
 
 	"github.com/nathanwhit/orcha/internal/exec"
 )
@@ -81,23 +81,29 @@ func (c *Controller) HasSession(ctx context.Context, name string) (bool, error) 
 	return true, nil
 }
 
-// SendKeys types text into the session followed by Enter (literal, so special
-// characters are not interpreted as key names). The Enter is sent after a
-// short pause: TUIs with paste detection (e.g. the claude CLI) treat an Enter
-// arriving in the same input burst as part of the paste — a newline in the
-// input box instead of a submit — so the prompt would sit there unsent.
+// SendKeys delivers text to the session as a bracketed paste followed by an
+// explicit Enter keypress. Bracketed paste (paste-buffer -p) gives the
+// receiving program an unambiguous paste boundary, so the Enter that follows
+// is a real keystroke — a TUI with paste detection (e.g. the claude CLI)
+// submits instead of treating it as a newline glued to the paste. This is a
+// protocol-level boundary, not a timing heuristic.
+//
+// The staging buffer name is unique per call: the tmux server is shared, so a
+// fixed name would let concurrent senders paste or delete each other's text.
 func (c *Controller) SendKeys(ctx context.Context, name, text string) error {
-	if _, err := c.run(ctx, "send-keys", "-t", name, "-l", text); err != nil {
+	buf := fmt.Sprintf("orcha-in-%s-%d", name, bufSeq.Add(1))
+	if _, err := c.run(ctx, "set-buffer", "-b", buf, "--", text); err != nil {
 		return err
 	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(500 * time.Millisecond):
+	if _, err := c.run(ctx, "paste-buffer", "-d", "-p", "-b", buf, "-t", name); err != nil {
+		return err
 	}
 	_, err := c.run(ctx, "send-keys", "-t", name, "Enter")
 	return err
 }
+
+// bufSeq disambiguates concurrent SendKeys staging buffers.
+var bufSeq atomic.Int64
 
 // SendRaw sends key names verbatim (e.g. "C-c", "Escape", "Up"), not literal
 // text. Use for control sequences.
@@ -107,9 +113,28 @@ func (c *Controller) SendRaw(ctx context.Context, name string, keys ...string) e
 	return err
 }
 
-// CapturePane returns the current visible pane text (a screen snapshot).
+// CapturePane returns the current visible pane text (a screen snapshot). When
+// the controller runs over ssh -tt, the local ssh client's "Connection to ...
+// closed." notice lands in the captured output (stderr is merged); strip it.
 func (c *Controller) CapturePane(ctx context.Context, name string) (string, error) {
-	return c.run(ctx, "capture-pane", "-p", "-t", name)
+	out, err := c.run(ctx, "capture-pane", "-p", "-t", name)
+	if err != nil {
+		return out, err
+	}
+	return stripSSHNoise(out), nil
+}
+
+func stripSSHNoise(s string) string {
+	lines := strings.Split(s, "\n")
+	kept := lines[:0]
+	for _, l := range lines {
+		t := strings.TrimSpace(l)
+		if strings.HasPrefix(t, "Connection to ") && strings.HasSuffix(t, " closed.") {
+			continue
+		}
+		kept = append(kept, l)
+	}
+	return strings.Join(kept, "\n")
 }
 
 // PipePane streams the pane's raw output to a shell command on the target

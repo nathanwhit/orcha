@@ -17,10 +17,9 @@ type TmuxConfig struct {
 	// Command builds the interactive argv run inside the tmux pane. An empty
 	// result launches the target's default shell — a real interactive shell.
 	Command func(spec Spec) []string
-	// SendInitialPrompt types the session prompt into the TUI after StartDelay
-	// (give a TUI time to come up before typing).
+	// SendInitialPrompt delivers the session prompt to the TUI once its pane
+	// has rendered (readiness is observed, not timed).
 	SendInitialPrompt bool
-	StartDelay        time.Duration
 	// ResumeCommand builds the argv used when a logical session must be
 	// recreated because its tmux session died (e.g. claude --continue picks the
 	// conversation back up in the same checkout). Nil falls back to Command
@@ -49,9 +48,6 @@ type TmuxProvider struct {
 func NewTmux(cfg TmuxConfig) *TmuxProvider {
 	if cfg.ExecutorFor == nil {
 		cfg.ExecutorFor = ExecutorForTarget
-	}
-	if cfg.StartDelay == 0 {
-		cfg.StartDelay = 1500 * time.Millisecond
 	}
 	return &TmuxProvider{cfg: cfg, sessions: map[string]*tmuxSession{}}
 }
@@ -108,14 +104,15 @@ func (p *TmuxProvider) StartSession(ctx context.Context, spec Spec) (Handle, <-c
 	out := p.arm(runCtx, cancel, ctrl, name, spec,
 		"tmux session "+name+" — attach: "+attachCommand(spec.Target, name))
 
-	// Type the opening prompt once the program has had time to start.
+	// Deliver the opening prompt once the program is observably up. Input sent
+	// before a TUI attaches its stdin reader is dropped (a remote cold start
+	// takes several seconds), so wait for the pane to paint — a readiness
+	// signal, not a guessed delay.
 	if p.cfg.SendInitialPrompt && spec.Prompt != "" {
 		prompt := spec.Prompt
 		go func() {
-			select {
-			case <-runCtx.Done():
-				return
-			case <-time.After(p.cfg.StartDelay):
+			if !waitForPaint(runCtx, ctrl, name) {
+				return // canceled before the program ever rendered
 			}
 			_ = ctrl.SendKeys(runCtx, name, prompt)
 		}()
@@ -288,4 +285,20 @@ func attachCommand(t *model.Target, name string) string {
 
 func sanitizeID(s string) string {
 	return strings.NewReplacer(".", "-", ":", "-", "/", "-").Replace(s)
+}
+
+// waitForPaint blocks until the pane has rendered content — the observable
+// signal that the program inside is up and reading input. Returns false if the
+// context ended first. The 200ms is a poll interval, not a readiness guess.
+func waitForPaint(ctx context.Context, ctrl *tmux.Controller, name string) bool {
+	for {
+		if screen, err := ctrl.CapturePane(ctx, name); err == nil && strings.TrimSpace(screen) != "" {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }

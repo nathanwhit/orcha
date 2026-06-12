@@ -161,3 +161,18 @@ func itoa(n int) string {
 	}
 	return string(buf[i:])
 }
+
+// OpenReverseTunnel starts a persistent `ssh -N -R` exposing localAddr (e.g.
+// the orchestrator's HTTP port) on the target's loopback at remotePort.
+// Killing the returned process closes the tunnel. ExitOnForwardFailure makes a
+// failed bind fatal instead of a silent no-op tunnel.
+func (s *SSHExecutor) OpenReverseTunnel(ctx context.Context, remotePort int, localAddr string) (Process, error) {
+	args := []string{
+		"-N",
+		"-o", "ExitOnForwardFailure=yes",
+		"-o", "ServerAliveInterval=15",
+		"-R", fmt.Sprintf("127.0.0.1:%d:%s", remotePort, localAddr),
+	}
+	args = append(args, s.sshArgs(false)...)
+	return s.local.Start(ctx, Command{Name: "ssh", Args: args})
+}
