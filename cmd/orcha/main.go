@@ -42,7 +42,7 @@ func main() {
 		schedEvery  = flag.Duration("schedule-interval", 2*time.Second, "scheduler idle tick interval")
 		mcpBase     = flag.String("mcp-base-url", "http://127.0.0.1:8080", "base URL where the manager MCP tool surface is reachable by agent CLIs")
 		showVersion = flag.Bool("version", false, "print version and exit")
-		workerPerm  = flag.String("worker-permissions", "acceptEdits", "agent permission mode for coding workers: acceptEdits (edits only) or bypassPermissions (also build/test/commit)")
+		workerPerm  = flag.String("agent-permissions", "bypassPermissions", "permission/sandbox mode for all agents: bypassPermissions (no prompts/sandbox — safe in a VM) or acceptEdits (edits only, prompts for shell)")
 		prMonitor   = flag.Duration("pr-monitor", 0, "poll open PRs for new comments/checks this often and spawn follow-ups (0 = off; needs -real-forge)")
 	)
 	flag.Parse()
@@ -75,7 +75,7 @@ func main() {
 		// session. Watch or take over any session with `tmux attach -t orcha-<id>`
 		// (the attach command is recorded on each session).
 		o.RegisterProvider(agent.NewTmuxClaude(agent.ClaudeConfig{Binary: *claudeBin}))
-		o.RegisterProvider(agent.NewTmuxAgent(model.AgentCodex, *codexBin))
+		o.RegisterProvider(agent.NewTmuxCodex(agent.CodexConfig{Binary: *codexBin}))
 		log.Println("using tmux interactive TUIs (attach: tmux attach -t orcha-<sessionID>)")
 	default:
 		// Real CLIs, headless. Claude runs as a persistent interactive stream-json

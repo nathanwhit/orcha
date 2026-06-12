@@ -58,23 +58,6 @@ func NewTmux(cfg TmuxConfig) *TmuxProvider {
 // Kind implements Provider.
 func (p *TmuxProvider) Kind() model.AgentKind { return p.cfg.Kind }
 
-// NewTmuxAgent builds a tmux provider that runs an agent's interactive TUI
-// (e.g. ["codex"] or ["claude"]) in an attachable session. The opening prompt
-// is passed as a positional argument — both CLIs accept one and submit it
-// themselves once the TUI is up, so delivery never depends on typing into a
-// possibly-not-ready (or dialog-blocked) screen.
-func NewTmuxAgent(kind model.AgentKind, binArgs ...string) *TmuxProvider {
-	return NewTmux(TmuxConfig{
-		Kind: kind,
-		Command: func(spec Spec) []string {
-			if spec.Prompt != "" {
-				return append(append([]string{}, binArgs...), spec.Prompt)
-			}
-			return binArgs
-		},
-	})
-}
-
 // NewTmuxShell builds a tmux provider whose sessions are the target's default
 // interactive shell — steered entirely via send-keys.
 func NewTmuxShell(kind model.AgentKind) *TmuxProvider {

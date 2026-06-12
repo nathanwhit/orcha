@@ -11,15 +11,25 @@ import (
 )
 
 func TestCodexArgs_FreshVsResume(t *testing.T) {
-	fresh := codexArgs("", nil, "")
-	if strings.Join(fresh, " ") != "exec --json --skip-git-repo-check" {
+	fresh := codexArgs("", nil, "", "acceptEdits")
+	if strings.Join(fresh, " ") != "exec --json --skip-git-repo-check --sandbox workspace-write" {
 		t.Fatalf("fresh args = %v", fresh)
 	}
-	resume := codexArgs("o3", nil, "thread-123")
+	resume := codexArgs("o3", nil, "thread-123", "acceptEdits")
 	got := strings.Join(resume, " ")
-	want := "exec resume --json --skip-git-repo-check --model o3 thread-123 -"
+	want := "exec resume --json --skip-git-repo-check --sandbox workspace-write --model o3 thread-123 -"
 	if got != want {
 		t.Fatalf("resume args =\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestCodexArgs_BypassPermissions(t *testing.T) {
+	args := strings.Join(codexArgs("", nil, "", "bypassPermissions"), " ")
+	if !strings.Contains(args, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Fatalf("bypass mode missing the dangerous flag: %q", args)
+	}
+	if strings.Contains(args, "--sandbox workspace-write") {
+		t.Fatalf("bypass mode should not also set a sandbox: %q", args)
 	}
 }
 
@@ -61,7 +71,7 @@ func TestCodex_LiveResumePreservesContext(t *testing.T) {
 	defer cancel()
 
 	// Turn 1: establish context and capture the thread id.
-	c1 := osexec.CommandContext(ctx, "codex", codexArgs("", nil, "")...)
+	c1 := osexec.CommandContext(ctx, "codex", codexArgs("", nil, "", "bypassPermissions")...)
 	c1.Stdin = strings.NewReader("Remember the secret number 42. Just acknowledge.")
 	out1, err := c1.CombinedOutput()
 	if err != nil {
@@ -81,7 +91,7 @@ func TestCodex_LiveResumePreservesContext(t *testing.T) {
 	t.Logf("thread id: %s", threadID)
 
 	// Turn 2: resume and ask for the remembered value.
-	c2 := osexec.CommandContext(ctx, "codex", codexArgs("", nil, threadID)...)
+	c2 := osexec.CommandContext(ctx, "codex", codexArgs("", nil, threadID, "bypassPermissions")...)
 	c2.Stdin = bytes.NewBufferString("What was the secret number? Reply with just the number.")
 	out2, err := c2.CombinedOutput()
 	if err != nil {

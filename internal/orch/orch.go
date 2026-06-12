@@ -102,7 +102,7 @@ func New(st *store.Store, cfg Config) *Orchestrator {
 		cfg.Guards = DefaultGuards()
 	}
 	if cfg.WorkerPermissionMode == "" {
-		cfg.WorkerPermissionMode = "acceptEdits"
+		cfg.WorkerPermissionMode = "bypassPermissions"
 	}
 	if cfg.MCPTunnelPort == 0 {
 		cfg.MCPTunnelPort = 18080

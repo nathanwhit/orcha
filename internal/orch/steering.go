@@ -127,7 +127,10 @@ func (o *Orchestrator) buildSpec(sess *model.Session, ws *model.Workspace, tgt *
 	case sess.Role == model.RoleManager && o.cfg.ManagerMCPBaseURL != "":
 		spec.MCP = map[string]string{"orcha": o.mcpBaseFor(tgt) + "/mcp/" + sess.ID}
 		spec.AllowedTools = []string{"mcp__orcha"}
-		spec.PermissionMode = "default"
+		// The manager runs in a checkout and explores it (grep, build, read);
+		// under prompting permission modes every such tool use blocks a headless
+		// run, so it gets the same freedom as workers.
+		spec.PermissionMode = o.cfg.WorkerPermissionMode
 		if spec.Prompt != "" {
 			spec.Prompt = managerSystemPreamble + o.managerContext(sess) + "\n\n" + spec.Prompt
 		}

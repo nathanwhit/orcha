@@ -34,7 +34,7 @@ func NewCodex(cfg CodexConfig) *ProcessProvider {
 	build := func(spec Spec) exec.Command {
 		dir := workDirFor(spec)
 		threadID, _ := spec.Metadata["provider_session_id"].(string)
-		return exec.Command{Name: bin, Args: codexArgs(cfg.Model, cfg.ExtraArgs, threadID), Dir: dir}
+		return exec.Command{Name: bin, Args: codexArgs(cfg.Model, cfg.ExtraArgs, threadID, spec.PermissionMode), Dir: dir}
 	}
 	return NewProcessProvider(ProcessConfig{
 		Kind:        model.AgentCodex,
@@ -45,16 +45,43 @@ func NewCodex(cfg CodexConfig) *ProcessProvider {
 	})
 }
 
+// NewTmuxCodex runs Codex's interactive TUI inside an attachable tmux session,
+// with the same sandbox/approval policy as the headless launcher. The opening
+// prompt is a positional argument.
+func NewTmuxCodex(cfg CodexConfig) *TmuxProvider {
+	bin := cfg.Binary
+	if bin == "" {
+		bin = "codex"
+	}
+	return NewTmux(TmuxConfig{
+		Kind:        model.AgentCodex,
+		ExecutorFor: cfg.ExecutorFor,
+		Command: func(spec Spec) []string {
+			args := []string{bin}
+			args = append(args, codexSandboxArgs(spec.PermissionMode)...)
+			if cfg.Model != "" {
+				args = append(args, "--model", cfg.Model)
+			}
+			args = append(args, cfg.ExtraArgs...)
+			if spec.Prompt != "" {
+				args = append(args, spec.Prompt)
+			}
+			return args
+		},
+	})
+}
+
 // codexArgs builds the `codex` argv. With a threadID it resumes that thread
 // (preserving context), reading the new turn from stdin; otherwise it starts a
 // fresh one-shot exec reading instructions from stdin.
-func codexArgs(modelName string, extra []string, threadID string) []string {
+func codexArgs(modelName string, extra []string, threadID, permMode string) []string {
 	var args []string
 	if threadID != "" {
 		args = []string{"exec", "resume", "--json", "--skip-git-repo-check"}
 	} else {
 		args = []string{"exec", "--json", "--skip-git-repo-check"}
 	}
+	args = append(args, codexSandboxArgs(permMode)...)
 	if modelName != "" {
 		args = append(args, "--model", modelName)
 	}
@@ -63,6 +90,22 @@ func codexArgs(modelName string, extra []string, threadID string) []string {
 		args = append(args, threadID, "-") // SESSION_ID then PROMPT ("-" = stdin)
 	}
 	return args
+}
+
+// codexSandboxArgs maps a permission mode to codex's sandbox/approval flags.
+// Codex defaults to a read-only sandbox with approval prompts, so without this
+// a worker cannot write and a headless run hangs on the first prompt.
+//
+//   - bypassPermissions -> --dangerously-bypass-approvals-and-sandbox (no
+//     sandbox, no prompts; only safe when the host is itself sandboxed, e.g. a
+//     VM — exactly orcha's deployment).
+//   - anything else      -> --sandbox workspace-write (can write its checkout,
+//     no network; the auto approval policy never blocks headless on edits).
+func codexSandboxArgs(permMode string) []string {
+	if permMode == "bypassPermissions" {
+		return []string{"--dangerously-bypass-approvals-and-sandbox"}
+	}
+	return []string{"--sandbox", "workspace-write"}
 }
 
 // codexParser maps Codex exec JSONL events into orchestrator events. The shape
