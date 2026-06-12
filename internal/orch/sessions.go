@@ -277,6 +277,7 @@ func (o *Orchestrator) finishRun(r *run, success bool) {
 	if !success {
 		next = model.SessionFailed
 	}
+	defer func() { _ = o.st.CancelOpenQuestionsBySession(r.sessionID) }()
 	if _, err := o.st.UpdateSessionStatus(r.sessionID, next); err != nil {
 		// Terminal already (likely canceled): record and ignore.
 		_ = o.emit(r.sessionID, model.MsgSystem, model.KindStatus,
@@ -380,6 +381,7 @@ func (o *Orchestrator) Cancel(sessionID string, cancelChildren bool) error {
 		o.releaseTargetSlot(sess)
 		o.notifyChange()
 	}
+	_ = o.st.CancelOpenQuestionsBySession(sessionID) // nobody can act on answers now
 	_ = o.emit(sessionID, model.MsgSystem, model.KindStatus, "session canceled", nil)
 	o.audit(sess.ObjectiveID, sessionID, "session_canceled", "canceled by request", nil)
 
@@ -469,6 +471,11 @@ func msgKind(k agent.EventKind) model.MessageKind {
 // captured during the prior run, StartRun resumes that conversation instead of
 // starting cold.
 func (o *Orchestrator) RecoverInterrupted() int {
+	// Heal questions stranded by earlier versions (or crashes): open ones whose
+	// asking session or objective is already terminal can never be acted on.
+	if n, err := o.st.SweepStaleQuestions(); err == nil && n > 0 {
+		o.audit("", "", "questions_swept", fmt.Sprintf("closed %d stale open question(s)", n), nil)
+	}
 	sessions, err := o.st.RequeueInterruptedSessions()
 	if err != nil || len(sessions) == 0 {
 		return 0

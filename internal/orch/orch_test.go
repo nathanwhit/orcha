@@ -1056,3 +1056,41 @@ func hermeticGit(t *testing.T) {
 	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 }
+
+// A question is open only while its asking session can receive the answer:
+// terminal transitions close the session's open questions, and the startup
+// sweep heals rows written before that invariant existed.
+func TestQuestionsCloseWithTheirSession(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+
+	obj := &model.Objective{Title: "o", Prompt: "p", Status: model.ObjectiveActive}
+	_ = st.CreateObjective(obj)
+	s := &model.Session{ObjectiveID: obj.ID, Role: model.RoleManager, Agent: model.AgentClaude, Status: model.SessionQueued, Goal: "g"}
+	_ = st.CreateSession(s)
+	q := &model.Question{ObjectiveID: obj.ID, SessionID: s.ID, Question: "which repo?"}
+	_ = st.CreateQuestion(q)
+
+	if err := o.Cancel(s.ID, false); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	got, _ := st.GetQuestion(q.ID)
+	if got.Status != model.QuestionCanceled {
+		t.Fatalf("question after session cancel = %s, want canceled", got.Status)
+	}
+
+	// Historical stale row: open question on an already-terminal objective.
+	obj2 := &model.Objective{Title: "o2", Prompt: "p", Status: model.ObjectiveActive}
+	_ = st.CreateObjective(obj2)
+	q2 := &model.Question{ObjectiveID: obj2.ID, Question: "stale?"}
+	_ = st.CreateQuestion(q2)
+	_ = st.UpdateObjectiveStatus(obj2.ID, model.ObjectiveCanceled, "")
+	if n, err := st.SweepStaleQuestions(); err != nil || n != 1 {
+		t.Fatalf("sweep = %d, %v; want 1 closed", n, err)
+	}
+	got2, _ := st.GetQuestion(q2.ID)
+	if got2.Status != model.QuestionCanceled {
+		t.Fatalf("stale question after sweep = %s, want canceled", got2.Status)
+	}
+}

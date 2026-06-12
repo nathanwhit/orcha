@@ -176,3 +176,34 @@ func (s *Store) CancelOpenQuestionsByObjective(objectiveID string) error {
 		string(model.QuestionCanceled), objectiveID, string(model.QuestionOpen))
 	return err
 }
+
+// CancelOpenQuestionsBySession closes a session's open questions: an answer is
+// delivered to the asking session, so once that session is terminal nobody can
+// ever act on one.
+func (s *Store) CancelOpenQuestionsBySession(sessionID string) error {
+	_, err := s.db.Exec(
+		`UPDATE questions SET status = ? WHERE session_id = ? AND status = ?`,
+		string(model.QuestionCanceled), sessionID, string(model.QuestionOpen))
+	return err
+}
+
+// SweepStaleQuestions closes every open question whose asking session or
+// objective is already terminal — healing rows written before the terminal
+// transitions started closing questions. Returns how many were closed.
+func (s *Store) SweepStaleQuestions() (int, error) {
+	terminal := []any{
+		string(model.QuestionCanceled), string(model.QuestionOpen),
+		"succeeded", "failed", "canceled",
+		"succeeded", "failed", "canceled",
+	}
+	res, err := s.db.Exec(
+		`UPDATE questions SET status = ? WHERE status = ? AND (
+		   session_id IN (SELECT id FROM sessions WHERE status IN (?,?,?))
+		   OR objective_id IN (SELECT id FROM objectives WHERE status IN (?,?,?)))`,
+		terminal...)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
