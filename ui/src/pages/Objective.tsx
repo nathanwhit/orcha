@@ -6,6 +6,7 @@ import {
   Button,
   Card,
   Chip,
+  Collapsible,
   EmptyState,
   Pill,
   SectionTitle,
@@ -37,6 +38,8 @@ export function ObjectivePage({
   // Defend against null lists from older servers (Go nil slices encode as null).
   const obj = detail.data.objective;
   const sessions = detail.data.sessions ?? [];
+  const activeSessions = sessions.filter((s) => s.status !== "canceled");
+  const canceledSessions = sessions.filter((s) => s.status === "canceled");
   const pull_requests = detail.data.pull_requests ?? [];
   const questions = detail.data.questions ?? [];
   const artifacts = detail.data.artifacts ?? [];
@@ -147,10 +150,24 @@ export function ObjectivePage({
         <Card className="overflow-x-auto">
           {sessions.length === 0 ? (
             <EmptyState>No sessions yet.</EmptyState>
+          ) : activeSessions.length === 0 ? (
+            <EmptyState>No active sessions.</EmptyState>
           ) : (
-            <SessionTable sessions={sessions} nav={nav} />
+            <SessionTable sessions={activeSessions} nav={nav} />
           )}
         </Card>
+        {canceledSessions.length > 0 && (
+          <div className="mt-3">
+            <Collapsible
+              title="Canceled sessions"
+              count={canceledSessions.length}
+            >
+              <Card className="overflow-x-auto">
+                <SessionTable sessions={canceledSessions} nav={nav} />
+              </Card>
+            </Collapsible>
+          </div>
+        )}
       </section>
 
       <div className="grid gap-6 lg:grid-cols-2">

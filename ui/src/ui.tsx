@@ -110,6 +110,41 @@ export function EmptyState({ children }: { children: ReactNode }) {
   );
 }
 
+// Collapsible is a section that hides its contents behind a clickable header,
+// collapsed by default. Used for low-priority groups (e.g. canceled items).
+export function Collapsible({
+  title,
+  count,
+  defaultOpen = false,
+  children,
+}: {
+  title: ReactNode;
+  count?: number;
+  defaultOpen?: boolean;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="mb-3 flex w-full items-center gap-2 text-left text-[11px] font-semibold tracking-[0.14em] text-faint uppercase transition-colors hover:text-mute"
+      >
+        <Icon
+          name="chevron"
+          className={`size-3.5 transition-transform ${open ? "" : "-rotate-90"}`}
+        />
+        {title}
+        {count !== undefined && (
+          <span className="tabular-nums text-faint/70">{count}</span>
+        )}
+      </button>
+      {open && children}
+    </div>
+  );
+}
+
 // ---- buttons ----
 
 const BUTTON_VARIANTS = {

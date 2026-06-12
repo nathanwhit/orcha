@@ -1,7 +1,7 @@
 import { useState } from "react";
 import * as api from "../api";
 import { usePoll } from "../hooks";
-import { Card, EmptyState } from "../ui";
+import { Card, Collapsible, EmptyState } from "../ui";
 import { SessionTable } from "./Objective";
 
 const FILTERS = [
@@ -22,7 +22,7 @@ function matches(filter: FilterKey, status: string): boolean {
     case "waiting":
       return ["waiting_user", "waiting_capacity"].includes(status);
     case "done":
-      return ["succeeded", "failed", "canceled"].includes(status);
+      return ["succeeded", "failed"].includes(status);
   }
 }
 
@@ -33,7 +33,10 @@ export function SessionsPage({ nav }: { nav: (to: string) => void }) {
   );
   const [filter, setFilter] = useState<FilterKey>("all");
 
-  const all = sessions.data ?? [];
+  // Canceled sessions are kept out of the main table and filter counts; they
+  // live in their own collapsed section below.
+  const all = (sessions.data ?? []).filter((s) => s.status !== "canceled");
+  const canceled = (sessions.data ?? []).filter((s) => s.status === "canceled");
   const shown = all.filter((s) => matches(filter, s.status));
 
   return (
@@ -73,6 +76,15 @@ export function SessionsPage({ nav }: { nav: (to: string) => void }) {
           <SessionTable sessions={shown} nav={nav} />
         )}
       </Card>
+
+      {canceled.length > 0 && (
+        <Collapsible title="Canceled sessions" count={canceled.length}>
+          <Card className="overflow-x-auto">
+            <SessionTable sessions={canceled} nav={nav} />
+          </Card>
+        </Collapsible>
+      )}
+
       {sessions.error && (
         <p className="text-xs text-rose-400">{sessions.error}</p>
       )}
