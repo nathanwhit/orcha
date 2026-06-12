@@ -499,6 +499,57 @@ func TestPRFeedback_SpawnsFollowupWhileWorkerRuns(t *testing.T) {
 	}
 }
 
+func TestPRMerge_NotifiesManagerToWrapUp(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	o.SetForge(forge.NewFake())
+
+	obj, mgr, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	_, _ = st.UpdateSessionStatus(mgr.ID, model.SessionRunning)
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "octo/repo", Number: 7, Branch: "feature",
+		BaseBranch: "main", HeadSHA: "sha1", Status: model.PROpen, Title: "do the thing"}
+	_ = st.CreatePR(pr)
+
+	// The PR merges (observed as a feedback event).
+	if err := o.IngestFeedback(context.Background(), pr.ID, []model.PRFeedback{
+		{Kind: model.FeedbackMerged, ExternalID: "merge-1"},
+	}); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+
+	// The manager was steered: a merge nudge is in its transcript, and since this
+	// was the only PR and there are no workers, it must point at mark_objective_done.
+	msgs, _ := st.MessagesAfter(mgr.ID, 0, 50)
+	var steer string
+	for _, m := range msgs {
+		if m.Source == model.MsgUser && strings.Contains(m.Content, "was merged") {
+			steer = m.Content
+		}
+	}
+	if steer == "" {
+		t.Fatal("manager was not notified that the PR merged")
+	}
+	if !strings.Contains(steer, "mark_objective_done") {
+		t.Fatalf("with all PRs merged and no workers, the nudge should mention mark_objective_done; got %q", steer)
+	}
+
+	// Re-observing the same merge does not re-notify (no transition).
+	_ = o.IngestFeedback(context.Background(), pr.ID, []model.PRFeedback{
+		{Kind: model.FeedbackMerged, ExternalID: "merge-2"},
+	})
+	msgs2, _ := st.MessagesAfter(mgr.ID, 0, 50)
+	count := 0
+	for _, m := range msgs2 {
+		if strings.Contains(m.Content, "was merged") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("merge should notify exactly once, got %d", count)
+	}
+}
+
 // ---- real workspace preparation ----
 
 func tgit(t *testing.T, dir string, args ...string) string {

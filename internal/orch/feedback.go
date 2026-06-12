@@ -24,8 +24,12 @@ func (o *Orchestrator) IngestFeedback(ctx context.Context, prID string, items []
 		f.PRID = prID
 		switch f.Kind {
 		case model.FeedbackMerged:
-			_, _ = o.st.UpdatePR(prID, func(p *model.PullRequest) { p.Status = model.PRMerged })
+			wasMerged := pr.Status == model.PRMerged
+			updated, _ := o.st.UpdatePR(prID, func(p *model.PullRequest) { p.Status = model.PRMerged })
 			f.Actionable = false
+			if !wasMerged && updated != nil {
+				o.notifyManagerOfMerge(updated)
+			}
 		case model.FeedbackClosed:
 			_, _ = o.st.UpdatePR(prID, func(p *model.PullRequest) { p.Status = model.PRClosed })
 			f.Actionable = false
@@ -146,6 +150,69 @@ func (o *Orchestrator) ProcessFeedback(ctx context.Context, prID string) ([]*mod
 // orchaBotMarker tags orcha's own PR comments so the monitor doesn't react to
 // them as if they were user feedback.
 const orchaBotMarker = "<!-- orcha-bot -->"
+
+// notifyManagerOfMerge re-prompts the objective's manager when one of its PRs is
+// merged (detected by the PR monitor or an explicit feedback ingest). A merged
+// PR is the signal a slice has actually landed — without this nudge the manager
+// sits idle after publishing and the objective never reaches mark_objective_done,
+// so merging a PR appears to do nothing. When every PR is merged and no workers
+// remain, the message tells the manager to finish; otherwise to keep going.
+func (o *Orchestrator) notifyManagerOfMerge(pr *model.PullRequest) {
+	mgr := o.activeManagerFor(pr.ObjectiveID)
+	if mgr == nil {
+		return
+	}
+	prs, _ := o.st.ListPRsByObjective(pr.ObjectiveID)
+	openPRs := 0
+	for _, p := range prs {
+		if p.Status == model.PROpen || p.Status == model.PRDraft {
+			openPRs++
+		}
+	}
+	msg := fmt.Sprintf("PR #%d (%q) was merged.", pr.Number, pr.Title)
+	if openPRs == 0 && !o.objectiveHasActiveWorkers(pr.ObjectiveID, mgr.ID) {
+		msg += " All PRs for this objective are now merged and no workers are running. " +
+			"If the objective is complete, call mark_objective_done now. If more work remains, spawn it."
+	} else {
+		msg += " Keep going with the remaining work; call mark_objective_done once everything is shipped."
+	}
+	o.audit(pr.ObjectiveID, mgr.ID, "manager_notified_merge",
+		fmt.Sprintf("PR #%d merged", pr.Number), model.JSONMap{"pr_id": pr.ID})
+	_ = o.Steer(context.Background(), mgr.ID, msg)
+}
+
+// activeManagerFor returns the objective's live (non-terminal) manager session,
+// or nil if there isn't one.
+func (o *Orchestrator) activeManagerFor(objectiveID string) *model.Session {
+	sessions, err := o.st.ListSessionsByObjective(objectiveID)
+	if err != nil {
+		return nil
+	}
+	for _, s := range sessions {
+		if s.Role == model.RoleManager && !s.Status.IsTerminal() {
+			return s
+		}
+	}
+	return nil
+}
+
+// objectiveHasActiveWorkers reports whether any non-manager session for the
+// objective is still active (excluding the given manager).
+func (o *Orchestrator) objectiveHasActiveWorkers(objectiveID, managerID string) bool {
+	sessions, err := o.st.ListSessionsByObjective(objectiveID)
+	if err != nil {
+		return false
+	}
+	for _, s := range sessions {
+		if s.ID == managerID || s.Role == model.RoleManager {
+			continue
+		}
+		if !s.Status.IsTerminal() {
+			return true
+		}
+	}
+	return false
+}
 
 // SyncPRFeedback polls the host for new comments on a PR, ingests actionable
 // ones (deduped), refreshes PR state, and spawns follow-up sessions. This is

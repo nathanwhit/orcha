@@ -43,9 +43,16 @@ func main() {
 		mcpBase     = flag.String("mcp-base-url", "http://127.0.0.1:8080", "base URL where the manager MCP tool surface is reachable by agent CLIs")
 		showVersion = flag.Bool("version", false, "print version and exit")
 		workerPerm  = flag.String("agent-permissions", "bypassPermissions", "permission/sandbox mode for all agents: bypassPermissions (no prompts/sandbox — safe in a VM) or acceptEdits (edits only, prompts for shell)")
-		prMonitor   = flag.Duration("pr-monitor", 0, "poll open PRs for new comments/checks this often and spawn follow-ups (0 = off; needs -real-forge)")
+		prMonitor   = flag.Duration("pr-monitor", 0, "poll open PRs for new comments/checks/merges this often and spawn follow-ups / notify the manager (0 = auto: on at 60s with -real-forge, off otherwise)")
 	)
 	flag.Parse()
+
+	// With a real forge, watching GitHub is the default: without it, merges and
+	// review comments are never observed, so a merged PR is silent and its
+	// objective never wraps up. An explicit -pr-monitor still wins.
+	if *prMonitor == 0 && *realForge {
+		*prMonitor = 60 * time.Second
+	}
 
 	if *showVersion {
 		fmt.Println(Version)

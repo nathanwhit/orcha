@@ -29,6 +29,7 @@ func (o *Orchestrator) PublishPR(ctx context.Context, sessionID string, spec Pub
 	if o.forge == nil {
 		return nil, errors.New("orch: no forge configured")
 	}
+	spec.Title = normalizePRTitle(spec.Title)
 	sess, err := o.st.GetSession(sessionID)
 	if err != nil {
 		return nil, err
@@ -230,8 +231,8 @@ func (o *Orchestrator) UpdatePR(ctx context.Context, prID string, spec UpdateSpe
 	}
 	pr, _ = o.st.UpdatePR(prID, func(p *model.PullRequest) {
 		p.HeadSHA = headSHA
-		if spec.Title != "" {
-			p.Title = spec.Title
+		if t := normalizePRTitle(spec.Title); t != "" {
+			p.Title = t
 		}
 		if spec.Body != "" {
 			p.Summary = spec.Body
@@ -262,7 +263,8 @@ func (o *Orchestrator) RefreshPR(ctx context.Context, prID string) (*model.PullR
 	if err != nil {
 		return nil, err
 	}
-	return o.st.UpdatePR(prID, func(p *model.PullRequest) {
+	wasMerged := pr.Status == model.PRMerged
+	updated, err := o.st.UpdatePR(prID, func(p *model.PullRequest) {
 		p.Status = model.PRStatus(st.Status)
 		p.ChecksState = model.ChecksState(st.ChecksState)
 		if st.HeadSHA != "" {
@@ -271,6 +273,12 @@ func (o *Orchestrator) RefreshPR(ctx context.Context, prID string) (*model.PullR
 		now := o.st.Now()
 		p.LastSyncedAt = &now
 	})
+	// First time we observe the merge, nudge the manager to wrap up — otherwise
+	// a merged PR is silent and the objective never reaches mark_objective_done.
+	if err == nil && !wasMerged && updated.Status == model.PRMerged {
+		o.notifyManagerOfMerge(updated)
+	}
+	return updated, err
 }
 
 func firstNonEmpty(a, b string) string {
@@ -286,4 +294,40 @@ func repoOwner(repo string) string {
 		return repo[:i]
 	}
 	return repo
+}
+
+// agentTitleTags are the leading "[tag]" prefixes stripped from agent-supplied
+// PR titles: agents (notably codex) like to brand a title with their own name.
+// A PR title should describe the change, not which model wrote it.
+var agentTitleTags = map[string]bool{
+	"codex": true, "claude": true, "orcha": true, "agent": true,
+	"bot": true, "ai": true, "assistant": true,
+}
+
+// normalizePRTitle strips leading agent self-branding tags ("[codex] ...",
+// "[claude]: ...") and surrounding whitespace, leaving the descriptive title.
+// It only removes a known agent-name tag, so legitimate prefixes like "[WIP]"
+// or a conventional-commit "feat:" are preserved. Applied to every published or
+// updated PR title regardless of what the agent passed.
+func normalizePRTitle(title string) string {
+	for {
+		t := strings.TrimSpace(title)
+		if !strings.HasPrefix(t, "[") {
+			return t
+		}
+		end := strings.IndexByte(t, ']')
+		if end < 0 {
+			return t
+		}
+		tag := strings.ToLower(strings.TrimSpace(t[1:end]))
+		if !agentTitleTags[tag] {
+			return t
+		}
+		// Drop the tag and any following separator (": ", "- ", spaces).
+		rest := strings.TrimLeft(t[end+1:], " :-\t")
+		if rest == "" {
+			return t // tag-only title: keep it rather than emptying the title
+		}
+		title = rest
+	}
 }
