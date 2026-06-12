@@ -2,6 +2,8 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/nathanwhit/orcha/internal/exec"
@@ -34,7 +36,7 @@ func NewCodex(cfg CodexConfig) *ProcessProvider {
 	build := func(spec Spec) exec.Command {
 		dir := workDirFor(spec)
 		threadID, _ := spec.Metadata["provider_session_id"].(string)
-		return exec.Command{Name: bin, Args: codexArgs(cfg.Model, cfg.ExtraArgs, threadID, spec.PermissionMode), Dir: dir}
+		return exec.Command{Name: bin, Args: codexArgs(cfg.Model, cfg.ExtraArgs, threadID, spec.PermissionMode, spec.MCP), Dir: dir}
 	}
 	return NewProcessProvider(ProcessConfig{
 		Kind:        model.AgentCodex,
@@ -58,6 +60,7 @@ func NewTmuxCodex(cfg CodexConfig) *TmuxProvider {
 	base := func(spec Spec, sub ...string) []string {
 		args := append([]string{bin}, sub...)
 		args = append(args, codexSandboxArgs(spec.PermissionMode)...)
+		args = append(args, codexMCPArgs(spec.MCP)...)
 		if cfg.Model != "" {
 			args = append(args, "--model", cfg.Model)
 		}
@@ -89,8 +92,9 @@ func NewTmuxCodex(cfg CodexConfig) *TmuxProvider {
 
 // codexArgs builds the `codex` argv. With a threadID it resumes that thread
 // (preserving context), reading the new turn from stdin; otherwise it starts a
-// fresh one-shot exec reading instructions from stdin.
-func codexArgs(modelName string, extra []string, threadID, permMode string) []string {
+// fresh one-shot exec reading instructions from stdin. MCP flags go before the
+// trailing positional SESSION_ID/PROMPT so they parse as options, not prompts.
+func codexArgs(modelName string, extra []string, threadID, permMode string, mcp map[string]string) []string {
 	var args []string
 	if threadID != "" {
 		args = []string{"exec", "resume", "--json", "--skip-git-repo-check"}
@@ -98,12 +102,36 @@ func codexArgs(modelName string, extra []string, threadID, permMode string) []st
 		args = []string{"exec", "--json", "--skip-git-repo-check"}
 	}
 	args = append(args, codexSandboxArgs(permMode)...)
+	args = append(args, codexMCPArgs(mcp)...)
 	if modelName != "" {
 		args = append(args, "--model", modelName)
 	}
 	args = append(args, extra...)
 	if threadID != "" {
 		args = append(args, threadID, "-") // SESSION_ID then PROMPT ("-" = stdin)
+	}
+	return args
+}
+
+// codexMCPArgs renders the spec's MCP servers as codex `-c` config overrides,
+// e.g. -c 'mcp_servers.orcha.url="http://..."'. Codex speaks the Streamable
+// HTTP MCP transport natively (no experimental flag), so this is all that is
+// needed to hand a codex session the orcha manager tool surface — the same
+// tools a claude manager gets via --mcp-config. Tools then appear to the agent
+// as mcp__<server>.<tool>. The value after `=` is parsed as TOML, so the URL is
+// emitted as a quoted TOML basic string. Servers are sorted for a stable argv.
+func codexMCPArgs(mcp map[string]string) []string {
+	if len(mcp) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(mcp))
+	for name := range mcp {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var args []string
+	for _, name := range names {
+		args = append(args, "-c", fmt.Sprintf("mcp_servers.%s.url=%q", name, mcp[name]))
 	}
 	return args
 }

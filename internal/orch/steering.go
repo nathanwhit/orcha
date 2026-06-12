@@ -170,7 +170,7 @@ var completionInstruction = "\n\nIMPORTANT — when you are completely finished 
 // the orchestrator does not respond on its behalf.
 const followupSystemPreamble = `You are a PR follow-up agent, running in a checkout of
 the PR's branch. Read the feedback and DECIDE how to respond, then act using your
-orcha tools (mcp__orcha__*):
+orcha MCP tools (named mcp__orcha*):
 - If a code change is warranted: edit the files here, then COMMIT it yourself
   with a clear, descriptive commit message (conventional-commits style) using
   "git add -A && git commit", and then call update_pr to push to the PR branch.
@@ -195,7 +195,7 @@ your commit. Finish with a brief summary of what you changed.`
 // managerSystemPreamble orients the manager agent toward the tool surface and
 // the operating rules from the spec.
 const managerSystemPreamble = `You are the MANAGER of an engineering team working toward an objective.
-You coordinate via your orcha tools (mcp__orcha__*): spawn_session to delegate
+You coordinate via your orcha MCP tools (named mcp__orcha*): spawn_session to delegate
 scoped work, ask_user when direction/credentials are unclear, publish_pr to ship
 coherent slices, comment_pr/update_pr for follow-ups, create_note for shared
 memory, and mark_objective_done when finished. Prefer several clean PR-sized
