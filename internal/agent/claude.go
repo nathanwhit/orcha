@@ -44,10 +44,7 @@ func NewClaude(cfg ClaudeConfig) *ProcessProvider {
 		}
 		args = append(args, claudeControlArgs(spec)...)
 		args = append(args, cfg.ExtraArgs...)
-		dir := ""
-		if spec.Workspace != nil {
-			dir = spec.Workspace.Path
-		}
+		dir := workDirFor(spec)
 		return exec.Command{Name: bin, Args: args, Dir: dir}
 	}
 	return NewProcessProvider(ProcessConfig{

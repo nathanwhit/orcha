@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 
+	"github.com/nathanwhit/orcha/internal/exec"
 	"github.com/nathanwhit/orcha/internal/model"
 )
 
@@ -85,4 +86,26 @@ type Provider interface {
 // terminal panel.
 type Snapshotter interface {
 	Snapshot(h Handle) (string, error)
+}
+
+// workDirFor returns the directory a session's process runs in: its workspace
+// checkout when one exists, else a per-session scratch dir under the target's
+// work root. An agent must never default to the orchestrator's own cwd — a
+// stray coding worker there edits (and commits to) the operator's live repo.
+func workDirFor(spec Spec) string {
+	if spec.Workspace != nil && spec.Workspace.Path != "" {
+		return spec.Workspace.Path
+	}
+	if spec.Target != nil && spec.Target.WorkRoot != "" {
+		return spec.Target.WorkRoot + "/scratch-" + sanitizeID(spec.SessionID)
+	}
+	return ""
+}
+
+// ensureDir creates dir on the target (mkdir -p semantics, best effort).
+func ensureDir(ctx context.Context, ex exec.Executor, dir string) {
+	if dir == "" {
+		return
+	}
+	_, _ = exec.RunCapture(ctx, ex, exec.Command{Name: "mkdir", Args: []string{"-p", dir}})
 }

@@ -93,10 +93,8 @@ func (p *TmuxProvider) StartSession(ctx context.Context, spec Spec) (Handle, <-c
 	ctrl := tmux.New(ex).WithBinary(p.cfg.TmuxBin).WithSize(p.cfg.Cols, p.cfg.Rows)
 	name := tmux.SessionName(spec.SessionID)
 
-	dir := ""
-	if spec.Workspace != nil {
-		dir = spec.Workspace.Path
-	}
+	dir := workDirFor(spec)
+	ensureDir(ctx, ex, dir)
 	var command []string
 	if p.cfg.Command != nil {
 		command = p.cfg.Command(spec)
@@ -146,10 +144,8 @@ func (p *TmuxProvider) ResumeSession(ctx context.Context, sessionID string, spec
 	}
 
 	if p.cfg.ResumeCommand != nil {
-		dir := ""
-		if spec.Workspace != nil {
-			dir = spec.Workspace.Path
-		}
+		dir := workDirFor(spec)
+		ensureDir(ctx, ex, dir)
 		runCtx, cancel := context.WithCancel(ctx)
 		if err := ctrl.NewSession(runCtx, name, dir, p.cfg.ResumeCommand(spec)); err != nil {
 			cancel()

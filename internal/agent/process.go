@@ -116,6 +116,7 @@ func (p *ProcessProvider) ResumeSession(ctx context.Context, sessionID string, s
 func (p *ProcessProvider) launch(ctx context.Context, spec Spec) (Handle, <-chan Event, error) {
 	ex := p.executorFor(spec)
 	cmd := p.build(spec)
+	ensureDir(ctx, ex, cmd.Dir) // scratch dirs may not exist yet
 	proc, err := ex.Start(ctx, cmd)
 	if err != nil {
 		return nil, nil, err

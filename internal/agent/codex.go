@@ -32,10 +32,7 @@ func NewCodex(cfg CodexConfig) *ProcessProvider {
 		bin = "codex"
 	}
 	build := func(spec Spec) exec.Command {
-		dir := ""
-		if spec.Workspace != nil {
-			dir = spec.Workspace.Path
-		}
+		dir := workDirFor(spec)
 		threadID, _ := spec.Metadata["provider_session_id"].(string)
 		return exec.Command{Name: bin, Args: codexArgs(cfg.Model, cfg.ExtraArgs, threadID), Dir: dir}
 	}

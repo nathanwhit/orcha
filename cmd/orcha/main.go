@@ -84,16 +84,17 @@ func main() {
 		o.RegisterProvider(agent.NewCodex(agent.CodexConfig{Binary: *codexBin}))
 		log.Println("using real claude + codex CLIs (headless)")
 	}
+	// Workspace preparation is always real: any coding worker whose objective
+	// names a repo gets a fresh isolated checkout. Without it, agents would run
+	// in the orchestrator's own cwd and edit the operator's live repo.
+	o.SetWorkspacePreparer(workspace.New())
 	if *realForge {
-		// Real git push + gh PR operations, paired with real workspace
-		// preparation so sessions run in fresh git checkouts branched off the
-		// latest upstream.
+		// Real git push + gh PR operations on top of the real checkouts.
 		o.SetForge(forge.NewGit())
-		o.SetWorkspacePreparer(workspace.New())
-		log.Println("using real git+gh forge with real workspace checkouts")
+		log.Println("using real git+gh forge")
 	} else {
 		o.SetForge(forge.NewFake())
-		log.Println("using fake forge")
+		log.Println("using fake forge (no real PR operations)")
 	}
 
 	// Ensure a local target exists so sessions can be scheduled out of the box.
