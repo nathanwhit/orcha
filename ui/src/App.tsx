@@ -213,10 +213,10 @@ function HealthFooter() {
         </p>
         <IconButton
           name="refresh"
-          title="Rebuild & restart orcha (needs scripts/dev.sh supervising)"
+          title="Pull latest, rebuild & restart orcha (needs scripts/dev.sh supervising)"
           disabled={restarting}
           onClick={() => {
-            if (!confirm("Rebuild and restart the orcha server? Live tmux sessions are re-adopted."))
+            if (!confirm("Pull latest, rebuild, and restart the orcha server? Live tmux sessions are re-adopted."))
               return;
             setRestarting(true);
             void api.post("/api/restart").catch(() => setRestarting(false));
