@@ -208,6 +208,44 @@ func (g *GitForge) GetPRState(ctx context.Context, repo string, number int) (PRS
 	}, nil
 }
 
+// FindOpenPR returns the open PR whose head ref is `branch` on `repo`, or nil if
+// none. gh pr list matches headRefName, so it finds PRs opened from a fork too.
+func (g *GitForge) FindOpenPR(ctx context.Context, repo, branch string) (*PRState, error) {
+	out, err := g.gh(ctx, "pr", "list", "--repo", repo, "--head", branch, "--state", "open",
+		"--limit", "1", "--json", "number,url,state,isDraft,headRefOid,title,statusCheckRollup")
+	if err != nil {
+		return nil, err
+	}
+	var raw []struct {
+		Number            int    `json:"number"`
+		URL               string `json:"url"`
+		State             string `json:"state"`
+		IsDraft           bool   `json:"isDraft"`
+		HeadRefOid        string `json:"headRefOid"`
+		Title             string `json:"title"`
+		StatusCheckRollup []struct {
+			Status     string `json:"status"`
+			Conclusion string `json:"conclusion"`
+			State      string `json:"state"`
+		} `json:"statusCheckRollup"`
+	}
+	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+		return nil, err
+	}
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	r := raw[0]
+	return &PRState{
+		Number:      r.Number,
+		URL:         r.URL,
+		Status:      ghStatus(r.State, r.IsDraft),
+		ChecksState: ghChecks(r.StatusCheckRollup),
+		HeadSHA:     r.HeadRefOid,
+		Title:       r.Title,
+	}, nil
+}
+
 // Comment posts a PR comment via gh.
 func (g *GitForge) Comment(ctx context.Context, repo string, number int, body string) error {
 	_, err := g.gh(ctx, "pr", "comment", strconv.Itoa(number), "--repo", repo, "--body", body)

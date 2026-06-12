@@ -156,6 +156,10 @@ func (o *Orchestrator) MarkObjectiveDone(managerSessionID, summary string) error
 	if err != nil {
 		return err
 	}
+	// Capture any PR the manager opened out-of-band (e.g. via the gh CLI rather
+	// than publish_pr) before the objective goes terminal, so it is still tracked
+	// and monitored to merge instead of becoming invisible.
+	o.AdoptUntrackedPRs(context.Background(), mgr.ObjectiveID)
 	if err := o.withManagerLock(mgr.ObjectiveID, managerSessionID, func() error {
 		return o.st.UpdateObjectiveStatus(mgr.ObjectiveID, model.ObjectiveSucceeded, summary)
 	}); err != nil {

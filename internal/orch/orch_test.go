@@ -499,6 +499,41 @@ func TestPRFeedback_SpawnsFollowupWhileWorkerRuns(t *testing.T) {
 	}
 }
 
+func TestAdoptUntrackedPR(t *testing.T) {
+	o, st := newTestOrch(t)
+	f := forge.NewFake()
+	o.SetForge(f)
+
+	obj, mgr, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p", Repo: "octo/repo"})
+	// The manager's checkout — where an agent could run gh out-of-band.
+	ws := &model.Workspace{ObjectiveID: obj.ID, SessionID: mgr.ID,
+		Kind: model.WorkspaceIsolated, ProjectPath: "octo/repo", VCS: model.VCSGit,
+		BranchName: "orcha/mana-abc", BaseRef: "main", Status: model.WorkspaceReady,
+		Metadata: model.JSONMap{"repo": "octo/repo"}}
+	_ = st.CreateWorkspace(ws)
+	_, _ = st.UpdateSessionRuntime(mgr.ID, func(s *model.Session) { s.WorkspaceID = ws.ID })
+
+	// An agent opened a PR out-of-band on that branch, with a [codex] title.
+	f.SetOpenPRByBranch("octo/repo", "orcha/mana-abc", forge.PRState{
+		Number: 55, URL: "https://forge.test/octo/repo/pull/55", Status: "open",
+		ChecksState: "pending", HeadSHA: "deadbeef", Title: "[codex] add ci"})
+
+	if n := o.AdoptUntrackedPRs(context.Background(), obj.ID); n != 1 {
+		t.Fatalf("expected to adopt 1 out-of-band PR, got %d", n)
+	}
+	prs, _ := st.ListPRsByObjective(obj.ID)
+	if len(prs) != 1 || prs[0].Number != 55 || prs[0].Branch != "orcha/mana-abc" {
+		t.Fatalf("adopted PR not tracked correctly: %+v", prs)
+	}
+	if prs[0].Title != "add ci" {
+		t.Fatalf("adopted PR title should be cleaned of the [codex] tag, got %q", prs[0].Title)
+	}
+	// Idempotent: a second scan adopts nothing (it is now tracked).
+	if n := o.AdoptUntrackedPRs(context.Background(), obj.ID); n != 0 {
+		t.Fatalf("re-scan should adopt 0, got %d", n)
+	}
+}
+
 func TestPRMerge_NotifiesManagerToWrapUp(t *testing.T) {
 	o, st := newTestOrch(t)
 	addTarget(t, st, "local", model.TargetLocal, 4)
