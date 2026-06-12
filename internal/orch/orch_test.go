@@ -1459,29 +1459,29 @@ func TestSupervisor_RepokesIdleManagerOnlyWhenNoWorkers(t *testing.T) {
 	}
 
 	// A freshly-active manager (UpdatedAt just now) is NOT yet considered stalled.
-	if pokes := o.idleManagersToPoke(st.Now()); len(pokes) != 0 {
-		t.Fatalf("a just-active manager should not be poked, got %d", len(pokes))
+	if acts := o.superviseDecisions(st.Now()); len(acts) != 0 {
+		t.Fatalf("a just-active manager should not be acted on, got %d", len(acts))
 	}
 
 	// Once it has been quiet past the idle threshold and no worker is running,
 	// the idle manager is poked.
 	future := st.Now().Add(superviseIdleAfter + time.Minute)
-	pokes := o.idleManagersToPoke(future)
-	if len(pokes) != 1 || pokes[0].ID != mgr.ID {
-		t.Fatalf("expected idle manager %s to be poked, got %v", mgr.ID, pokes)
+	acts := o.superviseDecisions(future)
+	if len(acts) != 1 || acts[0].kind != "poke" || acts[0].manager.ID != mgr.ID {
+		t.Fatalf("expected idle manager %s to be poked, got %+v", mgr.ID, acts)
 	}
 
-	// Cooldown: an immediate re-check does not poke again.
-	if again := o.idleManagersToPoke(future); len(again) != 0 {
+	// Cooldown: an immediate re-check does not act again.
+	if again := o.superviseDecisions(future); len(again) != 0 {
 		t.Fatalf("cooldown should suppress a second poke, got %d", len(again))
 	}
 	// After the cooldown elapses, an objective still idle is poked again.
 	later := future.Add(supervisePokeCooldown + time.Second)
-	if again := o.idleManagersToPoke(later); len(again) != 1 {
-		t.Fatalf("after cooldown, a still-idle manager should be poked again, got %d", len(again))
+	if again := o.superviseDecisions(later); len(again) != 1 || again[0].kind != "poke" {
+		t.Fatalf("after cooldown, a still-idle manager should be poked again, got %+v", again)
 	}
 
-	// With an active worker, the objective is making progress -> never poked,
+	// With an active worker, the objective is making progress -> never acted on,
 	// even long after the manager went quiet.
 	w := &model.Session{ObjectiveID: obj.ID, Role: model.RoleImplementer,
 		Agent: model.AgentClaude, Status: model.SessionRunning}
@@ -1489,8 +1489,72 @@ func TestSupervisor_RepokesIdleManagerOnlyWhenNoWorkers(t *testing.T) {
 		t.Fatalf("create worker: %v", err)
 	}
 	evenLater := later.Add(supervisePokeCooldown + time.Second)
-	if again := o.idleManagersToPoke(evenLater); len(again) != 0 {
-		t.Fatalf("an objective with an active worker must not be poked, got %d", len(again))
+	if again := o.superviseDecisions(evenLater); len(again) != 0 {
+		t.Fatalf("an objective with an active worker must not be acted on, got %d", len(again))
+	}
+}
+
+func TestSupervisor_RespawnsManagerThenEscalates(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+
+	obj, mgr, err := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "do the thing"})
+	if err != nil {
+		t.Fatalf("create objective: %v", err)
+	}
+
+	// The manager session terminated, the objective is still active, and no worker
+	// is running -> nothing can drive it. The supervisor decides to respawn.
+	terminateSession(t, st, mgr.ID, model.SessionSucceeded)
+	acts := o.superviseDecisions(st.Now())
+	if len(acts) != 1 || acts[0].kind != "respawn" {
+		t.Fatalf("a manager-less active objective should respawn, got %+v", acts)
+	}
+
+	// Executing it brings up a fresh live manager carrying the resume context.
+	o.respawnManager(acts[0])
+	live := o.activeManagerFor(obj.ID)
+	if live == nil {
+		t.Fatal("respawn should create a live manager")
+	}
+	if live.Title != "Manager (resumed)" || !strings.Contains(live.Goal, "do the thing") {
+		t.Fatalf("resumed manager missing prompt/title: title=%q", live.Title)
+	}
+
+	// Burn through the manager budget: terminate the respawn and add managers until
+	// the cap is reached, all terminal so none is live.
+	terminateSession(t, st, live.ID, model.SessionFailed)
+	for o.countManagers(obj.ID) < maxManagerSessions {
+		m, mErr := o.CreateSession(SpawnSpec{ObjectiveID: obj.ID, Role: model.RoleManager,
+			Agent: model.AgentClaude, Mode: model.ModeInteractive, Title: "Manager"})
+		if mErr != nil {
+			t.Fatalf("seed manager: %v", mErr)
+		}
+		terminateSession(t, st, m.ID, model.SessionFailed)
+	}
+
+	// Past the cooldown, with the budget exhausted, it escalates instead of
+	// respawning forever.
+	future := st.Now().Add(supervisePokeCooldown + time.Minute)
+	acts = o.superviseDecisions(future)
+	if len(acts) != 1 || acts[0].kind != "escalate" {
+		t.Fatalf("an exhausted manager budget should escalate, got %+v", acts)
+	}
+	o.escalateManagerDeaths(obj.ID)
+	if qs, _ := st.ListQuestionsByObjective(obj.ID); len(qs) == 0 {
+		t.Fatal("escalation should record an open question for the objective")
+	}
+}
+
+// terminateSession drives a (queued) session through the legal lifecycle to a
+// terminal state: queued -> starting -> running -> final.
+func terminateSession(t *testing.T, st *store.Store, id string, final model.SessionStatus) {
+	t.Helper()
+	for _, s := range []model.SessionStatus{model.SessionStarting, model.SessionRunning, final} {
+		if _, err := st.UpdateSessionStatus(id, s); err != nil {
+			t.Fatalf("transition %s -> %s: %v", id, s, err)
+		}
 	}
 }
 
