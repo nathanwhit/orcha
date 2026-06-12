@@ -25,6 +25,7 @@ type PRState struct {
 	Status      string // draft | open | merged | closed
 	ChecksState string // unknown | pending | passing | failing
 	HeadSHA     string
+	Title       string // populated by FindOpenPR (for adoption); may be empty elsewhere
 }
 
 // OpenResult is returned when a PR is opened.
@@ -52,6 +53,10 @@ type Forge interface {
 	OpenPR(ctx context.Context, repo, branch, base, title, body string) (OpenResult, error)
 	// GetPRState fetches the current PR state from the host.
 	GetPRState(ctx context.Context, repo string, number int) (PRState, error)
+	// FindOpenPR returns the open PR whose head is `branch` on `repo`, or nil if
+	// there is none. Used to adopt PRs opened outside orcha (e.g. an agent that
+	// ran the gh CLI) so they are tracked and monitored like any other.
+	FindOpenPR(ctx context.Context, repo, branch string) (*PRState, error)
 	// Comment posts an issue/PR comment.
 	Comment(ctx context.Context, repo string, number int, body string) error
 	// ListComments returns the PR's issue and review comments.
@@ -67,16 +72,17 @@ var ErrRepoMissing = errors.New("forge: repository not found")
 
 // Fake is an in-memory Forge for tests/dev.
 type Fake struct {
-	mu        sync.Mutex
-	repos     map[string]bool
-	diffs     map[string]bool     // workspacePath -> has diff
-	prs       map[string]*PRState // repo#number -> state
-	nextNum   int
-	Pushes    []PushRecord
-	ForcePush []PushRecord
-	Comments  []CommentRecord
-	Commits   []CommitRecord
-	incoming  []Comment
+	mu           sync.Mutex
+	repos        map[string]bool
+	diffs        map[string]bool     // workspacePath -> has diff
+	prs          map[string]*PRState // repo#number -> state
+	openByBranch map[string]*PRState // repo\x00branch -> open PR (for FindOpenPR)
+	nextNum      int
+	Pushes       []PushRecord
+	ForcePush    []PushRecord
+	Comments     []CommentRecord
+	Commits      []CommitRecord
+	incoming     []Comment
 }
 
 // PushRecord captures a push for assertions.
@@ -100,10 +106,11 @@ type CommentRecord struct {
 // NewFake creates a Fake forge with all repos/diffs present by default.
 func NewFake() *Fake {
 	return &Fake{
-		repos:   map[string]bool{},
-		diffs:   map[string]bool{},
-		prs:     map[string]*PRState{},
-		nextNum: 100,
+		repos:        map[string]bool{},
+		diffs:        map[string]bool{},
+		prs:          map[string]*PRState{},
+		openByBranch: map[string]*PRState{},
+		nextNum:      100,
 	}
 }
 
@@ -178,6 +185,25 @@ func (f *Fake) GetPRState(_ context.Context, repo string, number int) (PRState, 
 		return *st, nil
 	}
 	return PRState{Number: number, Status: "open", ChecksState: "unknown"}, nil
+}
+
+// SetOpenPRByBranch seeds an out-of-band open PR that FindOpenPR will return for
+// (repo, branch) — i.e. a PR orcha did not create.
+func (f *Fake) SetOpenPRByBranch(repo, branch string, st PRState) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := st
+	f.openByBranch[repo+"\x00"+branch] = &cp
+}
+
+func (f *Fake) FindOpenPR(_ context.Context, repo, branch string) (*PRState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if st, ok := f.openByBranch[repo+"\x00"+branch]; ok {
+		cp := *st
+		return &cp, nil
+	}
+	return nil, nil
 }
 
 func (f *Fake) Comment(_ context.Context, repo string, number int, body string) error {

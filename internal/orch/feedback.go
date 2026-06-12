@@ -250,8 +250,17 @@ func (o *Orchestrator) SyncPRFeedback(ctx context.Context, prID string) ([]*mode
 }
 
 // SyncOpenPRs runs a feedback sync for every open/draft PR. A PR monitor loop
-// calls this on a tick.
+// calls this on a tick. It first adopts any out-of-band PRs on active objectives
+// so a PR an agent opened with the gh CLI (instead of publish_pr) still gets
+// monitored, merge-detected, and followed up.
 func (o *Orchestrator) SyncOpenPRs(ctx context.Context) {
+	if objs, err := o.st.ListObjectives(); err == nil {
+		for _, obj := range objs {
+			if obj.Status == model.ObjectiveActive {
+				o.AdoptUntrackedPRs(ctx, obj.ID)
+			}
+		}
+	}
 	prs, err := o.st.ListPRs()
 	if err != nil {
 		return
@@ -261,6 +270,69 @@ func (o *Orchestrator) SyncOpenPRs(ctx context.Context) {
 			_, _ = o.SyncPRFeedback(ctx, pr.ID)
 		}
 	}
+}
+
+// AdoptUntrackedPRs scans an objective's workspace branches for open PRs orcha
+// did not create — ones an agent opened out-of-band (e.g. by running the gh CLI
+// instead of publish_pr) — and records them so they are tracked, monitored for
+// review/CI/merge, and followed up like any PR orcha opened itself. An agent
+// with a shell can always reach for git/gh, so rather than try to forbid that,
+// we make it not matter. Returns how many were adopted.
+func (o *Orchestrator) AdoptUntrackedPRs(ctx context.Context, objectiveID string) int {
+	if o.forge == nil {
+		return 0
+	}
+	wss, err := o.st.ListWorkspacesByObjective(objectiveID)
+	if err != nil {
+		return 0
+	}
+	tracked, _ := o.st.ListPRsByObjective(objectiveID)
+	knownBranch := map[string]bool{}
+	for _, pr := range tracked {
+		knownBranch[pr.Branch] = true
+	}
+	adopted := 0
+	for _, ws := range wss {
+		if ws.BranchName == "" || ws.VCS != model.VCSGit || knownBranch[ws.BranchName] {
+			continue
+		}
+		repo := ws.ProjectPath
+		if r, ok := ws.Metadata["repo"].(string); ok && r != "" {
+			repo = r
+		}
+		st, err := o.forge.FindOpenPR(ctx, repo, ws.BranchName)
+		if err != nil || st == nil {
+			continue
+		}
+		pr := &model.PullRequest{
+			ObjectiveID:        objectiveID,
+			CreatedBySessionID: ws.SessionID,
+			Repo:               repo,
+			Number:             st.Number,
+			URL:                st.URL,
+			Branch:             ws.BranchName,
+			BaseBranch:         ws.BaseRef,
+			HeadSHA:            st.HeadSHA,
+			Status:             model.PRStatus(st.Status),
+			ChecksState:        model.ChecksState(st.ChecksState),
+			Title:              normalizePRTitle(st.Title),
+		}
+		if pushRepo, _ := ws.Metadata["push_repo"].(string); pushRepo != "" {
+			pr.Metadata = model.JSONMap{"push_repo": pushRepo}
+		}
+		if err := o.st.CreatePR(pr); err != nil {
+			continue
+		}
+		knownBranch[ws.BranchName] = true
+		adopted++
+		o.audit(objectiveID, ws.SessionID, "pr_adopted",
+			fmt.Sprintf("adopted out-of-band PR #%d on %s", st.Number, ws.BranchName),
+			model.JSONMap{"pr_id": pr.ID, "url": st.URL})
+	}
+	if adopted > 0 {
+		o.notifyChange()
+	}
+	return adopted
 }
 
 // defaultAgent returns any registered provider kind (preferring claude) for
