@@ -23,10 +23,54 @@ const NAV: { to: string; label: string; icon: IconName }[] = [
   { to: "/activity", label: "Activity", icon: "activity" },
 ];
 
+type Theme = "dark" | "light";
+
+const THEME_KEY = "orcha.theme";
+
+function applyTheme(theme: Theme) {
+  if (theme === "light") {
+    document.documentElement.dataset.theme = "light";
+  } else {
+    delete document.documentElement.dataset.theme;
+  }
+}
+
+function readInitialTheme(): Theme {
+  let theme: Theme = "dark";
+  try {
+    theme = localStorage.getItem(THEME_KEY) === "light" ? "light" : "dark";
+  } catch {
+    // Keep the CSS default if storage is unavailable.
+  }
+  applyTheme(theme);
+  return theme;
+}
+
+function storeTheme(theme: Theme) {
+  try {
+    localStorage.setItem(THEME_KEY, theme);
+  } catch {
+    // Theme changes should still work for the current page.
+  }
+}
+
 export default function App() {
   const [path, nav] = useHashPath();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [theme, setTheme] = useState<Theme>(readInitialTheme);
   const seg = path.split("/").filter(Boolean);
+
+  useEffect(() => {
+    applyTheme(theme);
+  }, [theme]);
+
+  const toggleTheme = () => {
+    setTheme((current) => {
+      const next = current === "light" ? "dark" : "light";
+      storeTheme(next);
+      return next;
+    });
+  };
 
   let page: React.ReactNode;
   if (seg.length === 0) page = <Overview nav={nav} />;
@@ -52,13 +96,19 @@ export default function App() {
       {/* Mobile top bar */}
       <div className="sticky top-0 z-40 flex items-center justify-between border-b border-edge bg-bg/90 px-4 py-3 backdrop-blur md:hidden">
         <Logo />
-        <button
-          type="button"
-          onClick={() => setMenuOpen((v) => !v)}
-          className="rounded-md p-1.5 text-mute hover:text-ink"
-        >
-          <Icon name={menuOpen ? "x" : "menu"} className="size-5" />
-        </button>
+        <div className="flex items-center gap-1">
+          <ThemeToggle
+            theme={theme}
+            onToggle={toggleTheme}
+          />
+          <button
+            type="button"
+            onClick={() => setMenuOpen((v) => !v)}
+            className="rounded-md p-1.5 text-mute transition-colors hover:bg-raised hover:text-ink"
+          >
+            <Icon name={menuOpen ? "x" : "menu"} className="size-5" />
+          </button>
+        </div>
       </div>
       {menuOpen && (
         <div
@@ -91,6 +141,13 @@ export default function App() {
         <nav className="flex-1 space-y-0.5 px-3">
           <NavItems active={active} onPick={nav} />
         </nav>
+        <div className="border-t border-edge px-3 py-2">
+          <ThemeToggle
+            theme={theme}
+            showLabel
+            onToggle={toggleTheme}
+          />
+        </div>
         <HealthFooter />
       </aside>
 
@@ -99,6 +156,34 @@ export default function App() {
         <ErrorBoundary key={path}>{page}</ErrorBoundary>
       </main>
     </div>
+  );
+}
+
+function ThemeToggle({
+  theme,
+  onToggle,
+  showLabel = false,
+}: {
+  theme: Theme;
+  onToggle: () => void;
+  showLabel?: boolean;
+}) {
+  const next = theme === "light" ? "dark" : "light";
+  return (
+    <button
+      type="button"
+      title={`Switch to ${next} mode`}
+      aria-label={`Switch to ${next} mode`}
+      onClick={onToggle}
+      className={`rounded-md text-mute transition-colors hover:bg-raised hover:text-ink ${
+        showLabel
+          ? "flex w-full items-center gap-2.5 px-2.5 py-2 text-[13px]"
+          : "p-1.5"
+      }`}
+    >
+      <Icon name={theme === "light" ? "moon" : "sun"} className="size-4" />
+      {showLabel && <span>{theme === "light" ? "Dark mode" : "Light mode"}</span>}
+    </button>
   );
 }
 
