@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { FormEvent } from "react";
+import type { FormEvent, KeyboardEvent } from "react";
 import * as api from "../api";
 import { usePoll } from "../hooks";
 import { Icon } from "../icons";
@@ -250,7 +250,7 @@ function NewObjectiveModal({
   const ps = projects.data ?? [];
   const custom = projectID === "";
 
-  const submit = async (e: FormEvent) => {
+  const submit = async (e: FormEvent | KeyboardEvent) => {
     e.preventDefault();
     if (busy) return;
     setBusy(true);
@@ -284,6 +284,9 @@ function NewObjectiveModal({
           <TextArea
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
+            onKeyDown={(e) => {
+              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") submit(e);
+            }}
             placeholder="Describe the goal, constraints, and what done looks like…"
             rows={5}
             required
