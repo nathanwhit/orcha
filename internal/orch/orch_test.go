@@ -550,6 +550,47 @@ func TestPRMerge_NotifiesManagerToWrapUp(t *testing.T) {
 	}
 }
 
+func TestDependentWorker_InheritsPredecessorWorkspace(t *testing.T) {
+	o, st := newTestOrch(t)
+	tgt := addTarget(t, st, "local", model.TargetLocal, 4)
+	// A preparer must be installed for ensureWorkspace to act; the inheritance
+	// path never invokes it (no real clone happens here).
+	o.SetWorkspacePreparer(workspace.New())
+
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p", Repo: "octo/repo"})
+
+	// An implementer that already produced a ready isolated checkout.
+	impl := &model.Session{ObjectiveID: obj.ID, Role: model.RoleImplementer, Agent: model.AgentClaude,
+		Status: model.SessionSucceeded, TargetID: tgt.ID}
+	_ = st.CreateSession(impl)
+	ws := &model.Workspace{ObjectiveID: obj.ID, SessionID: impl.ID, TargetID: tgt.ID,
+		Kind: model.WorkspaceIsolated, ProjectPath: "octo/repo", VCS: model.VCSGit,
+		Path: tgt.WorkRoot + "/" + impl.ID, BranchName: "orcha/impl-x", BaseRef: "main", Status: model.WorkspaceReady}
+	_ = st.CreateWorkspace(ws)
+	_, _ = st.UpdateSessionRuntime(impl.ID, func(s *model.Session) { s.WorkspaceID = ws.ID })
+
+	// A validator that depends on the implementer.
+	val := &model.Session{ObjectiveID: obj.ID, Role: model.RoleValidator, Agent: model.AgentClaude,
+		Status: model.SessionQueued, Metadata: model.JSONMap{"depends_on": []any{impl.ID}}}
+	_ = st.CreateSession(val)
+
+	// Placement pins it to the predecessor's target so the checkout is local.
+	if req := o.targetRequestFor(val); req.PinnedTargetID != tgt.ID {
+		t.Fatalf("dependent should pin to the predecessor's target %s, got %q", tgt.ID, req.PinnedTargetID)
+	}
+
+	// And it inherits the implementer's workspace instead of cloning a clean tree.
+	_, _ = st.UpdateSessionRuntime(val.ID, func(s *model.Session) { s.TargetID = tgt.ID })
+	val, _ = st.GetSession(val.ID)
+	if err := o.ensureWorkspace(context.Background(), val, tgt); err != nil {
+		t.Fatalf("ensureWorkspace: %v", err)
+	}
+	got, _ := st.GetSession(val.ID)
+	if got.WorkspaceID != ws.ID {
+		t.Fatalf("validator should continue the implementer's branch (workspace %s), got %s", ws.ID, got.WorkspaceID)
+	}
+}
+
 // ---- real workspace preparation ----
 
 func tgit(t *testing.T, dir string, args ...string) string {

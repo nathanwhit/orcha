@@ -97,6 +97,14 @@ func (o *Orchestrator) targetRequestFor(sess *model.Session) TargetRequest {
 	if pin, _ := sess.Metadata["pinned_target"].(string); pin != "" {
 		req.PinnedTargetID = o.resolveTargetID(pin)
 	}
+	// A dependent worker must run where its predecessor's checkout lives so it can
+	// continue that work (see ensureWorkspace's inheritance). Pin it to the
+	// dependency's target unless the manager already pinned one explicitly.
+	if req.PinnedTargetID == "" {
+		if ws := o.dependencyWorkspace(sess); ws != nil && ws.TargetID != "" {
+			req.PinnedTargetID = ws.TargetID
+		}
+	}
 	return req
 }
 
