@@ -45,28 +45,44 @@ func NewCodex(cfg CodexConfig) *ProcessProvider {
 	})
 }
 
-// NewTmuxCodex runs Codex's interactive TUI inside an attachable tmux session,
-// with the same sandbox/approval policy as the headless launcher. The opening
-// prompt is a positional argument.
+// NewTmuxCodex runs Codex's interactive TUI inside an attachable tmux session —
+// the plain `codex` a human runs, in a pty, steered via send-keys — mirroring
+// NewTmuxClaude. The opening prompt is a positional argument; a fresh checkout's
+// folder-trust dialog is auto-accepted; a dead session resumes the most recent
+// codex conversation in the checkout.
 func NewTmuxCodex(cfg CodexConfig) *TmuxProvider {
 	bin := cfg.Binary
 	if bin == "" {
 		bin = "codex"
 	}
+	base := func(spec Spec, sub ...string) []string {
+		args := append([]string{bin}, sub...)
+		args = append(args, codexSandboxArgs(spec.PermissionMode)...)
+		if cfg.Model != "" {
+			args = append(args, "--model", cfg.Model)
+		}
+		return append(args, cfg.ExtraArgs...)
+	}
 	return NewTmux(TmuxConfig{
 		Kind:        model.AgentCodex,
 		ExecutorFor: cfg.ExecutorFor,
 		Command: func(spec Spec) []string {
-			args := []string{bin}
-			args = append(args, codexSandboxArgs(spec.PermissionMode)...)
-			if cfg.Model != "" {
-				args = append(args, "--model", cfg.Model)
-			}
-			args = append(args, cfg.ExtraArgs...)
+			args := base(spec)
 			if spec.Prompt != "" {
 				args = append(args, spec.Prompt)
 			}
 			return args
+		},
+		// If the tmux session died, resume the most recent conversation in the
+		// checkout instead of starting cold (the prompt is already in it).
+		ResumeCommand: func(spec Spec) []string {
+			return base(spec, "resume", "--last")
+		},
+		// Codex shows a folder-trust dialog on a fresh checkout, like claude.
+		// The accept option label is the stable marker (wording varies).
+		AcceptDialog: func(screen string) bool {
+			return strings.Contains(screen, "Yes, continue") ||
+				strings.Contains(screen, "Do you trust the contents of this directory?")
 		},
 	})
 }
