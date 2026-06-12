@@ -157,7 +157,18 @@ func (o *Orchestrator) StartRun(ctx context.Context, sessionID string) (*Run, er
 	spec := o.buildSpec(sess, ws, tgt)
 
 	runCtx, cancel := context.WithCancel(ctx)
-	handle, events, err := prov.StartSession(runCtx, spec)
+	// A session that already has a provider conversation (captured during a
+	// prior run, e.g. before an orchestrator restart) resumes it instead of
+	// starting cold.
+	var (
+		handle agent.Handle
+		events <-chan agent.Event
+	)
+	if pid, _ := sess.Metadata["provider_session_id"].(string); pid != "" {
+		handle, events, err = prov.ResumeSession(runCtx, sessionID, spec)
+	} else {
+		handle, events, err = prov.StartSession(runCtx, spec)
+	}
 	if err != nil {
 		cancel()
 		o.releaseSessionLocks(sess)
@@ -432,4 +443,25 @@ func msgKind(k agent.EventKind) model.MessageKind {
 	default:
 		return model.KindText
 	}
+}
+
+// RecoverInterrupted requeues sessions orphaned by a previous process — rows
+// still marked starting/running at boot, when no in-memory runs exist. Call it
+// once at startup, before the scheduler runs. Each requeued session restarts
+// through the normal scheduling path; if a provider conversation id was
+// captured during the prior run, StartRun resumes that conversation instead of
+// starting cold.
+func (o *Orchestrator) RecoverInterrupted() int {
+	sessions, err := o.st.RequeueInterruptedSessions()
+	if err != nil || len(sessions) == 0 {
+		return 0
+	}
+	for _, sess := range sessions {
+		_ = o.emit(sess.ID, model.MsgSystem, model.KindStatus,
+			"orchestrator restarted; session requeued", nil)
+		o.audit(sess.ObjectiveID, sess.ID, "session_recovered",
+			"requeued after orchestrator restart", nil)
+	}
+	o.notifyChange()
+	return len(sessions)
 }

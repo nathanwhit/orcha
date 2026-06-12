@@ -106,6 +106,11 @@ func main() {
 	// starts its manager, which spawns workers that the scheduler then runs.
 	sched := orch.NewScheduler(o, *schedEvery, *maxConc)
 	o.SetNotify(sched.Wake)
+	// Requeue sessions a previous process left mid-flight, so restarting orcha
+	// resumes in-progress objectives instead of stranding them.
+	if n := o.RecoverInterrupted(); n > 0 {
+		log.Printf("recovered %d interrupted session(s) from a previous run", n)
+	}
 	go sched.Run(ctx)
 
 	// PR monitor: poll open PRs for new comments/checks and spawn follow-ups.

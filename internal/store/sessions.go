@@ -223,3 +223,30 @@ func (s *Store) UpdateSessionRuntime(id string, fn func(*model.Session)) (*model
 	}
 	return sess, tx.Commit()
 }
+
+// RequeueInterruptedSessions force-requeues every session left in starting or
+// running by a previous process, returning the affected sessions. It runs once
+// at startup, before the scheduler: those rows claim a live run exists, but a
+// fresh process has none, so the sessions would otherwise be stranded forever.
+// This deliberately bypasses the session state machine — the running->queued
+// edge is illegal precisely because a live run normally exists, and at boot
+// that premise is void. Target slots and locks are intentionally untouched:
+// claims persist across restarts and re-acquisition by the same holder is
+// idempotent, so a requeued session restarts with the resources it held.
+func (s *Store) RequeueInterruptedSessions() ([]*model.Session, error) {
+	sessions, err := s.ListSessionsByStatuses(model.SessionStarting, model.SessionRunning)
+	if err != nil {
+		return nil, err
+	}
+	now := s.now()
+	for _, sess := range sessions {
+		if _, err := s.db.Exec(
+			`UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?`,
+			string(model.SessionQueued), now, sess.ID); err != nil {
+			return nil, err
+		}
+		sess.Status = model.SessionQueued
+		sess.UpdatedAt = now
+	}
+	return sessions, nil
+}

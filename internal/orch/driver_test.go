@@ -215,3 +215,52 @@ func TestScheduler_RunLoopSelfDrives(t *testing.T) {
 	cancel()
 	_ = o.Cancel(s.ID, false)
 }
+
+// A restart leaves sessions marked starting/running with no live run; recovery
+// requeues them and the scheduler restarts them — resuming the provider
+// conversation when one was captured.
+func TestRecoverInterruptedRequeuesAndRestarts(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+
+	obj := &model.Objective{Title: "obj", Prompt: "p", Status: model.ObjectiveActive}
+	if err := st.CreateObjective(obj); err != nil {
+		t.Fatalf("objective: %v", err)
+	}
+	// Simulate a session orphaned by a dead process: marked running, no run,
+	// with a provider conversation id captured during the prior run.
+	s := &model.Session{
+		ObjectiveID: obj.ID, Role: model.RoleImplementer, Agent: model.AgentClaude,
+		Status: model.SessionQueued, Goal: "do the thing",
+		Metadata: model.JSONMap{"provider_session_id": "prior-conversation"},
+	}
+	if err := st.CreateSession(s); err != nil {
+		t.Fatalf("session: %v", err)
+	}
+	if _, err := st.UpdateSessionStatus(s.ID, model.SessionStarting); err != nil {
+		t.Fatalf("starting: %v", err)
+	}
+	if _, err := st.UpdateSessionStatus(s.ID, model.SessionRunning); err != nil {
+		t.Fatalf("running: %v", err)
+	}
+
+	if n := o.RecoverInterrupted(); n != 1 {
+		t.Fatalf("recovered %d sessions, want 1", n)
+	}
+	got, _ := st.GetSession(s.ID)
+	if got.Status != model.SessionQueued {
+		t.Fatalf("status after recovery = %s, want queued", got.Status)
+	}
+
+	// The scheduler now restarts it like any queued session.
+	sched := NewScheduler(o, time.Second, 4)
+	started, err := sched.Tick(context.Background())
+	if err != nil || started != 1 {
+		t.Fatalf("tick started=%d err=%v, want 1 started", started, err)
+	}
+	waitFor(t, func() bool {
+		fresh, _ := st.GetSession(s.ID)
+		return fresh.Status == model.SessionRunning || fresh.Status.IsTerminal()
+	})
+}

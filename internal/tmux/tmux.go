@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/nathanwhit/orcha/internal/exec"
 )
@@ -81,10 +82,18 @@ func (c *Controller) HasSession(ctx context.Context, name string) (bool, error) 
 }
 
 // SendKeys types text into the session followed by Enter (literal, so special
-// characters are not interpreted as key names).
+// characters are not interpreted as key names). The Enter is sent after a
+// short pause: TUIs with paste detection (e.g. the claude CLI) treat an Enter
+// arriving in the same input burst as part of the paste — a newline in the
+// input box instead of a submit — so the prompt would sit there unsent.
 func (c *Controller) SendKeys(ctx context.Context, name, text string) error {
 	if _, err := c.run(ctx, "send-keys", "-t", name, "-l", text); err != nil {
 		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(500 * time.Millisecond):
 	}
 	_, err := c.run(ctx, "send-keys", "-t", name, "Enter")
 	return err
