@@ -75,8 +75,10 @@ func claudeControlArgs(spec Spec) []string {
 		args = append(args, "--permission-mode", spec.PermissionMode)
 	}
 	if len(spec.AllowedTools) > 0 {
-		args = append(args, "--allowedTools")
-		args = append(args, spec.AllowedTools...)
+		// One =-attached token. --allowedTools is variadic: as a bare flag it
+		// slurps every following non-flag argument — including a positional
+		// prompt, which silently became "tool rules" instead of the prompt.
+		args = append(args, "--allowedTools="+strings.Join(spec.AllowedTools, ","))
 	}
 	return args
 }

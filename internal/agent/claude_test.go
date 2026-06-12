@@ -146,3 +146,27 @@ func TestClaude_LiveSteering(t *testing.T) {
 	}
 	awaitText("TWO")
 }
+
+// --allowedTools must be a single =-attached token: the flag is variadic, so a
+// bare form slurps every following non-flag argument — including a positional
+// prompt, which then silently becomes "tool rules" instead of the prompt.
+func TestClaudeControlArgs_AllowedToolsCannotSlurpPrompt(t *testing.T) {
+	args := claudeControlArgs(Spec{
+		PermissionMode: "default",
+		AllowedTools:   []string{"mcp__orcha", "Read"},
+	})
+	for _, a := range args {
+		if a == "--allowedTools" {
+			t.Fatal("--allowedTools passed as a bare variadic flag; it would eat a positional prompt")
+		}
+	}
+	found := false
+	for _, a := range args {
+		if a == "--allowedTools=mcp__orcha,Read" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing =-attached allowedTools token in %q", args)
+	}
+}
