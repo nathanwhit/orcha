@@ -127,6 +127,9 @@ func (o *Orchestrator) StartRun(ctx context.Context, sessionID string) (*Run, er
 	// (e.g. workers the manager spawned), on the session's target.
 	if err := o.ensureWorkspace(ctx, sess, tgt); err != nil {
 		o.releaseTargetSlot(sess)
+		// Record WHY in the transcript before failing — the manager is
+		// re-prompted on child failure and needs the reason to react.
+		_ = o.emit(sessionID, model.MsgSystem, model.KindError, err.Error(), nil)
 		_, _ = o.st.UpdateSessionStatus(sessionID, model.SessionFailed)
 		return nil, err
 	}

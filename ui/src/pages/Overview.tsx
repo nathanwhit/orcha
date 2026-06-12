@@ -286,7 +286,7 @@ function NewObjectiveModal({
           />
         </Field>
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Repo" hint="optional">
+          <Field label="Repo" hint="required for coding work">
             <TextInput
               value={repo}
               onChange={(e) => setRepo(e.target.value)}

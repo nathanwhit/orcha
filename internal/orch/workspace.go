@@ -144,7 +144,10 @@ func (o *Orchestrator) ensureWorkspace(ctx context.Context, sess *model.Session,
 	}
 	repo, cloneURL, base := o.resolveRepo(sess)
 	if repo == "" && cloneURL == "" {
-		return nil // nothing to clone
+		// A coding worker with nothing to clone must fail loudly here: the
+		// fallback would be an empty scratch dir it can't do its task in (and
+		// historically, the orchestrator's own cwd — the operator's live repo).
+		return fmt.Errorf("orch: %s session has no repo to work on: set repo on the objective or pass repo in spawn_session", sess.Role)
 	}
 	_, err := o.prepareIsolatedOn(ctx, sess, target, repo, cloneURL, base)
 	return err
