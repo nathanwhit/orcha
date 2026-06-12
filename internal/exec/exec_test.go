@@ -12,12 +12,15 @@ import (
 	"time"
 )
 
-func readAll(t *testing.T, r io.Reader) string {
-	t.Helper()
-	b, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
+// readAll drains r to EOF. It deliberately ignores the read error and never
+// calls t.Fatalf: it runs inside reader goroutines, and t.Fatalf there calls
+// runtime.Goexit, which kills the goroutine without sending its result on the
+// result channel — turning a clean failure into a deadlock until the test
+// timeout. Callers assert on the returned content instead. Drain a process's
+// streams fully BEFORE calling Wait(): per the os/exec StdoutPipe contract,
+// Wait closes the pipes, so reading after Wait races against ErrClosed.
+func readAll(r io.Reader) string {
+	b, _ := io.ReadAll(r)
 	return string(b)
 }
 
@@ -31,16 +34,18 @@ func TestLocal_StreamsStdoutStderr(t *testing.T) {
 	}
 	out := make(chan string, 1)
 	errc := make(chan string, 1)
-	go func() { out <- readAll(t, p.Stdout()) }()
-	go func() { errc <- readAll(t, p.Stderr()) }()
+	go func() { out <- readAll(p.Stdout()) }()
+	go func() { errc <- readAll(p.Stderr()) }()
+	// Drain both streams to EOF before Wait (Wait closes the pipes).
+	gotOut, gotErr := <-out, <-errc
 	if err := p.Wait(); err != nil {
 		t.Fatalf("wait: %v", err)
 	}
-	if got := <-out; !strings.Contains(got, "out-line") {
-		t.Fatalf("stdout=%q", got)
+	if !strings.Contains(gotOut, "out-line") {
+		t.Fatalf("stdout=%q", gotOut)
 	}
-	if got := <-errc; !strings.Contains(got, "err-line") {
-		t.Fatalf("stderr=%q", got)
+	if !strings.Contains(gotErr, "err-line") {
+		t.Fatalf("stderr=%q", gotErr)
 	}
 }
 
@@ -129,15 +134,17 @@ func TestLocal_StdinSteering(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	outc := make(chan string, 1)
-	go func() { outc <- readAll(t, p.Stdout()) }()
+	go func() { outc <- readAll(p.Stdout()) }()
 	if _, err := io.WriteString(p.Stdin(), "refactor please\n"); err != nil {
 		t.Fatalf("write stdin: %v", err)
 	}
 	_ = p.Stdin().Close()
+	// Drain stdout to EOF before Wait (Wait closes the pipe).
+	got := <-outc
 	if err := p.Wait(); err != nil {
 		t.Fatalf("wait: %v", err)
 	}
-	if got := <-outc; !strings.Contains(got, "got:refactor please") {
+	if !strings.Contains(got, "got:refactor please") {
 		t.Fatalf("stdin not delivered, stdout=%q", got)
 	}
 }
@@ -185,8 +192,8 @@ func TestSSH_Live(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	out := readAll(t, p.Stdout())
 	go io.Copy(io.Discard, p.Stderr())
+	out := readAll(p.Stdout())
 	if err := p.Wait(); err != nil {
 		t.Fatalf("wait: %v", err)
 	}
