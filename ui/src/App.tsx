@@ -76,6 +76,9 @@ export default function App() {
                 setMenuOpen(false);
               }}
             />
+            <div className="mt-2">
+              <HealthFooter />
+            </div>
           </nav>
         </div>
       )}
