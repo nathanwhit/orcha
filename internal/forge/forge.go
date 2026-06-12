@@ -28,6 +28,7 @@ type PRState struct {
 	ChecksState string // unknown | pending | passing | failing
 	HeadSHA     string
 	Title       string // populated by FindOpenPR (for adoption); may be empty elsewhere
+	Mergeable   string // MERGEABLE | CONFLICTING | UNKNOWN (gh's mergeable)
 }
 
 // OpenResult is returned when a PR is opened.

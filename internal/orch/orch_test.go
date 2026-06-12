@@ -1397,3 +1397,40 @@ func TestMarkObjectiveDone_GatedOnOpenPRs(t *testing.T) {
 		t.Fatalf("objective should be succeeded once PRs merged, got %s", cur.Status)
 	}
 }
+
+func TestConflictingPR_SpawnsRebaseFollowup(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	f := forge.NewFake()
+	o.SetForge(f)
+
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "octo/repo", Number: 9, Branch: "orcha/impl-x",
+		BaseBranch: "main", HeadSHA: "sha0", Status: model.PROpen}
+	_ = st.CreatePR(pr)
+
+	// GitHub reports the open PR as conflicting.
+	f.SetPRState("octo/repo", 9, forge.PRState{Number: 9, Status: "open", HeadSHA: "sha1", Mergeable: "CONFLICTING"})
+
+	if _, err := o.RefreshPR(context.Background(), pr.ID); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	spawned, err := o.ProcessFeedback(context.Background(), pr.ID)
+	if err != nil {
+		t.Fatalf("process feedback: %v", err)
+	}
+	if len(spawned) != 1 {
+		t.Fatalf("a conflicting PR should spawn one rebase follow-up, got %d", len(spawned))
+	}
+	if spawned[0].Role != model.RolePRFollowup || !strings.Contains(spawned[0].Goal, "merge conflicts") {
+		t.Fatalf("follow-up should be a PR follow-up tasked to rebase, got role=%s goal=%q", spawned[0].Role, spawned[0].Goal)
+	}
+
+	// Re-observing the same conflicting head does not spawn a second follow-up.
+	_, _ = o.RefreshPR(context.Background(), pr.ID)
+	again, _ := o.ProcessFeedback(context.Background(), pr.ID)
+	if len(again) != 0 {
+		t.Fatalf("the same conflict must not re-spawn, got %d", len(again))
+	}
+}

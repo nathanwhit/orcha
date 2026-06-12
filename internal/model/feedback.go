@@ -10,6 +10,7 @@ const (
 	FeedbackReviewComment FeedbackKind = "review_comment"
 	FeedbackChangesReq    FeedbackKind = "changes_requested"
 	FeedbackCheckFailure  FeedbackKind = "check_failure"
+	FeedbackConflict      FeedbackKind = "merge_conflict"
 	FeedbackMerged        FeedbackKind = "merged"
 	FeedbackClosed        FeedbackKind = "closed"
 )

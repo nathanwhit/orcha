@@ -313,6 +313,23 @@ func (o *Orchestrator) RefreshPR(ctx context.Context, prID string) (*model.PullR
 	if err == nil && !wasMerged && updated.Status == model.PRMerged {
 		o.notifyManagerOfMerge(updated)
 	}
+	// An open PR that GitHub reports as CONFLICTING needs a rebase. Record it as
+	// actionable feedback (deduped by head SHA, so it fires once per conflicting
+	// head and again only if a new push is still conflicting) — ProcessFeedback
+	// then spawns a follow-up that rebases and force-updates the PR.
+	if err == nil && (updated.Status == model.PROpen || updated.Status == model.PRDraft) &&
+		st.Mergeable == "CONFLICTING" {
+		_ = o.IngestFeedback(ctx, prID, []model.PRFeedback{{
+			Kind:       model.FeedbackConflict,
+			ExternalID: "conflict@" + updated.HeadSHA,
+			Body: "This PR has merge conflicts with its base branch (" + updated.BaseBranch + "). " +
+				"In this PR-branch checkout, fetch the latest base and rebase the PR branch onto it " +
+				"(inspect `git remote -v`; the upstream base is " + updated.BaseBranch + "), resolve every " +
+				"conflict, re-run the build/tests, commit, then call update_pr with force=true and a short " +
+				"reason — a rebase rewrites history so a normal push is rejected.",
+			Actionable: true,
+		}})
+	}
 	return updated, err
 }
 

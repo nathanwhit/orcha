@@ -187,7 +187,7 @@ func (g *GitForge) OpenPR(ctx context.Context, repo, branch, base, title, body s
 // GetPRState fetches the PR's status and aggregate checks from gh.
 func (g *GitForge) GetPRState(ctx context.Context, repo string, number int) (PRState, error) {
 	out, err := g.gh(ctx, "pr", "view", strconv.Itoa(number), "--repo", repo,
-		"--json", "number,url,state,isDraft,headRefOid,statusCheckRollup")
+		"--json", "number,url,state,isDraft,headRefOid,mergeable,statusCheckRollup")
 	if err != nil {
 		return PRState{}, err
 	}
@@ -197,6 +197,7 @@ func (g *GitForge) GetPRState(ctx context.Context, repo string, number int) (PRS
 		State             string `json:"state"` // OPEN | CLOSED | MERGED
 		IsDraft           bool   `json:"isDraft"`
 		HeadRefOid        string `json:"headRefOid"`
+		Mergeable         string `json:"mergeable"` // MERGEABLE | CONFLICTING | UNKNOWN
 		StatusCheckRollup []struct {
 			Status     string `json:"status"`     // QUEUED|IN_PROGRESS|COMPLETED
 			Conclusion string `json:"conclusion"` // SUCCESS|FAILURE|...
@@ -212,6 +213,7 @@ func (g *GitForge) GetPRState(ctx context.Context, repo string, number int) (PRS
 		Status:      ghStatus(raw.State, raw.IsDraft),
 		ChecksState: ghChecks(raw.StatusCheckRollup),
 		HeadSHA:     raw.HeadRefOid,
+		Mergeable:   raw.Mergeable,
 	}, nil
 }
 
