@@ -1325,3 +1325,48 @@ func TestForgeFor_BindsToTargetExecutor(t *testing.T) {
 		t.Fatal("fake forge should not become a GitForge")
 	}
 }
+
+func TestManagerNotify_WaitsForPendingDependents(t *testing.T) {
+	o, st := newTestOrch(t)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	obj, mgr, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	_, _ = st.UpdateSessionStatus(mgr.ID, model.SessionRunning)
+
+	impl := &model.Session{ObjectiveID: obj.ID, ParentSessionID: mgr.ID, Role: model.RoleImplementer,
+		Agent: model.AgentClaude, Status: model.SessionSucceeded, Title: "impl"}
+	_ = st.CreateSession(impl)
+	val := &model.Session{ObjectiveID: obj.ID, ParentSessionID: mgr.ID, Role: model.RoleValidator,
+		Agent: model.AgentClaude, Status: model.SessionQueued, Title: "validate",
+		Metadata: model.JSONMap{"depends_on": []any{impl.ID}}}
+	_ = st.CreateSession(val)
+
+	lastMgrMsg := func() string {
+		msgs, _ := st.MessagesAfter(mgr.ID, 0, 100)
+		last := ""
+		for _, m := range msgs {
+			if m.Source == model.MsgUser {
+				last = m.Content
+			}
+		}
+		return last
+	}
+
+	// Implementer done but its dependent validator is still pending -> wait.
+	if !o.hasPendingDependents(obj.ID, impl.ID) {
+		t.Fatal("a queued validator depending on the implementer should count as pending")
+	}
+	o.notifyManagerOfChild(impl.ID, true)
+	if msg := lastMgrMsg(); !strings.Contains(msg, "do NOT publish") {
+		t.Fatalf("with a pending dependent, manager should be told to wait; got %q", msg)
+	}
+
+	// Validator finishes -> the slice is complete; the publish branch is taken.
+	for _, s := range []model.SessionStatus{model.SessionStarting, model.SessionRunning, model.SessionSucceeded} {
+		if _, err := st.UpdateSessionStatus(val.ID, s); err != nil {
+			t.Fatalf("advance validator to %s: %v", s, err)
+		}
+	}
+	if o.hasPendingDependents(obj.ID, impl.ID) {
+		t.Fatal("no dependents should be pending once the validator succeeded")
+	}
+}

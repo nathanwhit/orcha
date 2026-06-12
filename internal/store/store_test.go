@@ -224,3 +224,25 @@ func TestObjectiveTerminalIsFinal(t *testing.T) {
 		t.Fatal("succeeded objective should not reactivate")
 	}
 }
+
+func TestDeduplicatePRs(t *testing.T) {
+	st := newTestStore(t)
+	// Two rows for the same host PR (a prior adoption race), plus a distinct one.
+	_ = st.CreatePR(&model.PullRequest{Repo: "o/r", Number: 7, Branch: "b", Status: model.PROpen})
+	_ = st.CreatePR(&model.PullRequest{Repo: "o/r", Number: 7, Branch: "b", Status: model.PROpen})
+	_ = st.CreatePR(&model.PullRequest{Repo: "o/r", Number: 8, Branch: "c", Status: model.PROpen})
+	n, err := st.DeduplicatePRs()
+	if err != nil {
+		t.Fatalf("dedupe: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expected to remove 1 duplicate, removed %d", n)
+	}
+	all, _ := st.ListPRs()
+	if len(all) != 2 {
+		t.Fatalf("expected 2 PRs after dedupe, got %d", len(all))
+	}
+	if pr, err := st.GetPRByRepoNumber("o/r", 7); err != nil || pr == nil {
+		t.Fatalf("the surviving #7 should be findable, got %v %v", pr, err)
+	}
+}

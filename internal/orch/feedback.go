@@ -320,7 +320,18 @@ func (o *Orchestrator) AdoptUntrackedPRs(ctx context.Context, objectiveID string
 		if pushRepo, _ := ws.Metadata["push_repo"].(string); pushRepo != "" {
 			pr.Metadata = model.JSONMap{"push_repo": pushRepo}
 		}
-		if err := o.st.CreatePR(pr); err != nil {
+		// Serialize the check-then-create against other scans (and publish_pr) so a
+		// concurrent pass can't record the same host PR twice. The slow FindOpenPR
+		// above stays outside the lock.
+		o.adoptMu.Lock()
+		if existing, _ := o.st.GetPRByRepoNumber(repo, st.Number); existing != nil {
+			o.adoptMu.Unlock()
+			knownBranch[ws.BranchName] = true
+			continue
+		}
+		err = o.st.CreatePR(pr)
+		o.adoptMu.Unlock()
+		if err != nil {
 			continue
 		}
 		knownBranch[ws.BranchName] = true

@@ -74,6 +74,8 @@ type Orchestrator struct {
 
 	tunnelMu sync.Mutex
 	tunnels  map[string]*mcpTunnel // reverse MCP tunnels keyed by target id
+
+	adoptMu sync.Mutex // serializes PR adoption so concurrent scans can't double-record a PR
 }
 
 // SetNotify installs a hook called whenever schedulable state changes (a

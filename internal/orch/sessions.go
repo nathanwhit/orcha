@@ -345,22 +345,62 @@ func (o *Orchestrator) notifyManagerOfChild(childID string, success bool) {
 	if err != nil || mgr.Role != model.RoleManager || mgr.Status.IsTerminal() {
 		return
 	}
-	outcome := "succeeded"
-	if !success {
-		outcome = "failed"
-	}
 	summary := child.LatestSummary
 	if summary == "" {
 		summary = child.CurrentActivity
 	}
-	msg := fmt.Sprintf(
-		"Worker session %s (%q) %s. Summary: %s\n"+
-			"Its isolated checkout holds the changes. If they look right, publish a PR with "+
-			"publish_pr(session_id=%q, title=..., body=...). Then spawn any follow-on work or "+
-			"mark_objective_done when the objective is complete.",
-		child.ID, child.Title, outcome, summary, child.ID)
+	var msg string
+	switch {
+	case !success:
+		msg = fmt.Sprintf(
+			"Worker session %s (%q) FAILED. Summary: %s\n"+
+				"Do NOT publish. Decide how to proceed: inspect the failure, re-scope and "+
+				"re-spawn the work, or ask_user if you are blocked.",
+			child.ID, child.Title, summary)
+	case o.hasPendingDependents(child.ObjectiveID, child.ID):
+		// Another worker depends on this one (e.g. a validator/reviewer continuing
+		// its branch). The slice is not finished — publishing now would ship
+		// unvalidated work. Tell the manager to wait, not publish.
+		msg = fmt.Sprintf(
+			"Worker session %s (%q) succeeded. Summary: %s\n"+
+				"Dependent work (e.g. validation/review) is still running on top of this slice — "+
+				"do NOT publish it yet. Wait; you are notified when the dependents finish.",
+			child.ID, child.Title, summary)
+	default:
+		msg = fmt.Sprintf(
+			"Worker session %s (%q) succeeded. Summary: %s\n"+
+				"Its checkout holds the changes and any dependent work is done. If they look right, "+
+				"publish a PR with publish_pr(session_id=%q, title=..., body=...). Then spawn any "+
+				"follow-on work or mark_objective_done when the objective is complete.",
+			child.ID, child.Title, summary, child.ID)
+	}
+	outcome := "succeeded"
+	if !success {
+		outcome = "failed"
+	}
 	o.audit(child.ObjectiveID, mgr.ID, "manager_notified", "worker "+outcome, model.JSONMap{"child": child.ID})
 	_ = o.Steer(context.Background(), mgr.ID, msg)
+}
+
+// hasPendingDependents reports whether any non-terminal session for the
+// objective depends on sessionID — i.e. work that continues this one's branch is
+// still queued or running, so its slice is not finished.
+func (o *Orchestrator) hasPendingDependents(objectiveID, sessionID string) bool {
+	sessions, err := o.st.ListSessionsByObjective(objectiveID)
+	if err != nil {
+		return false
+	}
+	for _, s := range sessions {
+		if s.Status.IsTerminal() {
+			continue
+		}
+		for _, dep := range dependencyIDs(s) {
+			if dep == sessionID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // cleanupRun releases locks always and the target slot exactly once per run —
@@ -513,6 +553,10 @@ func (o *Orchestrator) RecoverInterrupted() int {
 	// asking session or objective is already terminal can never be acted on.
 	if n, err := o.st.SweepStaleQuestions(); err == nil && n > 0 {
 		o.audit("", "", "questions_swept", fmt.Sprintf("closed %d stale open question(s)", n), nil)
+	}
+	// Heal duplicate PR rows a prior adoption race may have recorded.
+	if n, err := o.st.DeduplicatePRs(); err == nil && n > 0 {
+		o.audit("", "", "prs_deduped", fmt.Sprintf("removed %d duplicate PR row(s)", n), nil)
 	}
 	sessions, err := o.st.RequeueInterruptedSessions()
 	if err != nil || len(sessions) == 0 {

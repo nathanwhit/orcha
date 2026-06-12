@@ -75,6 +75,35 @@ func (s *Store) ListPRsByObjective(objectiveID string) ([]*model.PullRequest, er
 	return s.queryPRs(`SELECT `+prCols+` FROM pull_requests WHERE objective_id = ? ORDER BY created_at ASC`, objectiveID)
 }
 
+// GetPRByRepoNumber returns the (earliest) PR row for a repo+number, or
+// ErrNotFound. Used to avoid recording the same host PR twice.
+func (s *Store) GetPRByRepoNumber(repo string, number int) (*model.PullRequest, error) {
+	row := s.db.QueryRow(`SELECT `+prCols+` FROM pull_requests WHERE repo = ? AND number = ? ORDER BY created_at ASC LIMIT 1`, repo, number)
+	return scanPR(row)
+}
+
+// DeduplicatePRs removes rows that duplicate an existing (repo, number),
+// keeping the earliest of each. Numbers <= 0 (not yet assigned) are left alone.
+// Returns how many rows were deleted. Run at startup to heal any duplicates an
+// earlier race recorded.
+func (s *Store) DeduplicatePRs() (int, error) {
+	res, err := s.db.Exec(`
+		DELETE FROM pull_requests
+		WHERE number > 0 AND id NOT IN (
+			SELECT id FROM (
+				SELECT id, ROW_NUMBER() OVER (
+					PARTITION BY repo, number ORDER BY created_at ASC, id ASC
+				) AS rn
+				FROM pull_requests WHERE number > 0
+			) WHERE rn = 1
+		)`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 func (s *Store) queryPRs(q string, args ...any) ([]*model.PullRequest, error) {
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
