@@ -54,6 +54,26 @@ func postJSON(t *testing.T, url string, body any) *http.Response {
 	return resp
 }
 
+func TestHealth_ReportsOK(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	var body struct {
+		Status  string `json:"status"`
+		Version string `json:"version"`
+		Time    string `json:"time"`
+	}
+	// getJSON fails the test unless the endpoint returns 200.
+	getJSON(t, srv.URL+"/api/health", &body)
+	if body.Status != "ok" {
+		t.Fatalf("health status=%q, want %q", body.Status, "ok")
+	}
+	if body.Version == "" {
+		t.Fatal("health should report a version")
+	}
+	if body.Time == "" {
+		t.Fatal("health should report the current server time")
+	}
+}
+
 // The dashboard endpoint must stay small even with large transcripts/logs.
 func TestDashboard_StaysSmallWithManyLogs(t *testing.T) {
 	srv, o, st := newTestServer(t)

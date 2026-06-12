@@ -13,6 +13,7 @@ import (
 	"github.com/nathanwhit/orcha/internal/model"
 	"github.com/nathanwhit/orcha/internal/orch"
 	"github.com/nathanwhit/orcha/internal/store"
+	"github.com/nathanwhit/orcha/internal/version"
 )
 
 // Server is the HTTP API.
@@ -65,7 +66,22 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/usage", s.listUsage)
 	mux.HandleFunc("GET /api/events", s.listEvents)
 
+	mux.HandleFunc("GET /api/health", s.health)
+
 	return mux
+}
+
+// ---- health ----
+
+// health is a lightweight liveness/version probe for monitoring and the
+// dashboard. It also reports the current server time (RFC3339) so callers can
+// detect clock skew and confirm the response is fresh.
+func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":  "ok",
+		"version": version.Version,
+		"time":    time.Now().UTC().Format(time.RFC3339),
+	})
 }
 
 // ---- helpers ----

@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -20,23 +21,33 @@ import (
 	"github.com/nathanwhit/orcha/internal/model"
 	"github.com/nathanwhit/orcha/internal/orch"
 	"github.com/nathanwhit/orcha/internal/store"
+	"github.com/nathanwhit/orcha/internal/version"
 	"github.com/nathanwhit/orcha/internal/workspace"
 )
 
+// Version is the orcha build version, surfaced by the -version flag.
+const Version = version.Version
+
 func main() {
 	var (
-		dbPath     = flag.String("db", "orcha.db", "path to SQLite database")
-		addr       = flag.String("addr", ":8080", "HTTP listen address")
-		fakeAgents = flag.Bool("fake-agents", false, "use in-process fake agents instead of the real claude/codex CLIs")
-		tmuxAgents = flag.Bool("tmux", false, "run agents as interactive TUIs inside attachable tmux sessions (tmux attach -t orcha-<id>)")
-		claudeBin  = flag.String("claude-bin", "claude", "path to the claude CLI")
-		codexBin   = flag.String("codex-bin", "codex", "path to the codex CLI")
-		realForge  = flag.Bool("real-forge", false, "use the real git+gh forge (needs real workspace checkouts) instead of the in-memory fake")
-		maxConc    = flag.Int("max-concurrent", 8, "max simultaneously active sessions across all targets")
-		schedEvery = flag.Duration("schedule-interval", 2*time.Second, "scheduler idle tick interval")
-		mcpBase    = flag.String("mcp-base-url", "http://127.0.0.1:8080", "base URL where the manager MCP tool surface is reachable by agent CLIs")
+		dbPath      = flag.String("db", "orcha.db", "path to SQLite database")
+		addr        = flag.String("addr", ":8080", "HTTP listen address")
+		fakeAgents  = flag.Bool("fake-agents", false, "use in-process fake agents instead of the real claude/codex CLIs")
+		tmuxAgents  = flag.Bool("tmux", false, "run agents as interactive TUIs inside attachable tmux sessions (tmux attach -t orcha-<id>)")
+		claudeBin   = flag.String("claude-bin", "claude", "path to the claude CLI")
+		codexBin    = flag.String("codex-bin", "codex", "path to the codex CLI")
+		realForge   = flag.Bool("real-forge", false, "use the real git+gh forge (needs real workspace checkouts) instead of the in-memory fake")
+		maxConc     = flag.Int("max-concurrent", 8, "max simultaneously active sessions across all targets")
+		schedEvery  = flag.Duration("schedule-interval", 2*time.Second, "scheduler idle tick interval")
+		mcpBase     = flag.String("mcp-base-url", "http://127.0.0.1:8080", "base URL where the manager MCP tool surface is reachable by agent CLIs")
+		showVersion = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(Version)
+		return
+	}
 
 	st, err := store.Open(*dbPath)
 	if err != nil {
