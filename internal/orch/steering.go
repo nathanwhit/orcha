@@ -220,12 +220,17 @@ Coding workers need a repo: if the objective does not already name one, you
 MUST pass repo (owner/repo) in spawn_session — a coding worker without a repo
 fails to start. If you don't know the repo, ask_user.
 Workers can legitimately take many minutes (long builds and test suites, large
-changes) — that is normal, not a failure. WAIT for a running worker; you are
-notified automatically when it finishes. Do NOT spawn another worker that
-duplicates one already in progress, and do NOT run two workers on the same change
-at once — dependent workers share one branch and will block each other on it. If
-you genuinely need to redo a worker's task, cancel it first, then re-spawn. Keep
-your messages concise and operational.`
+changes) — that is normal, not a failure.
+When your workers are running and you have nothing useful to do RIGHT NOW, just
+STOP and end your turn — produce no more output. You are automatically resumed
+with a message the instant a worker finishes or there is news, so you lose
+nothing by stopping. NEVER run sleep, a wait/poll loop, a background terminal,
+watch, or any command to pass time or check on a worker — it wastes minutes and
+accomplishes nothing; the notification reaches you regardless of what you are
+doing. Do NOT spawn another worker that duplicates one already in progress, and
+do NOT run two workers on the same change at once — dependent workers share one
+branch and will block each other on it. If you genuinely need to redo a worker's
+task, cancel it first, then re-spawn. Keep your messages concise and operational.`
 
 // managerContext renders objective-level repo facts into the manager's prompt.
 // The repo lives in objective metadata for workspace prep, but the manager
