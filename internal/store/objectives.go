@@ -89,6 +89,16 @@ func (s *Store) SetObjectiveManager(objectiveID, sessionID string) error {
 	return err
 }
 
+// UpdateObjectiveTitle replaces an objective's title. Used by asynchronous
+// title generation after an objective is created with a provisional title; the
+// polling dashboard picks the new value up on its next refresh.
+func (s *Store) UpdateObjectiveTitle(id, title string) error {
+	_, err := s.db.Exec(
+		`UPDATE objectives SET title = ?, updated_at = ? WHERE id = ?`,
+		title, s.now(), id)
+	return err
+}
+
 // UpdateObjectiveStatus transitions an objective, enforcing the state machine.
 func (s *Store) UpdateObjectiveStatus(id string, next model.ObjectiveStatus, summary string) error {
 	o, err := s.GetObjective(id)

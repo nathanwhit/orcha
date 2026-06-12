@@ -1,6 +1,8 @@
 package orch
 
 import (
+	"strings"
+
 	"github.com/nathanwhit/orcha/internal/model"
 )
 
@@ -30,8 +32,16 @@ func (o *Orchestrator) CreateObjective(spec NewObjectiveSpec) (*model.Objective,
 	if spec.BaseBranch != "" {
 		meta["base_branch"] = spec.BaseBranch
 	}
+	// Title is optional. When omitted we create the objective immediately with a
+	// provisional title derived from the prompt (so creation never blocks on LLM
+	// latency) and generate a polished one asynchronously below.
+	title := spec.Title
+	autoTitle := strings.TrimSpace(title) == ""
+	if autoTitle {
+		title = provisionalTitle(spec.Prompt)
+	}
 	obj := &model.Objective{
-		Title:    spec.Title,
+		Title:    title,
 		Prompt:   spec.Prompt,
 		Status:   model.ObjectiveActive,
 		Metadata: meta,
@@ -58,7 +68,10 @@ func (o *Orchestrator) CreateObjective(spec NewObjectiveSpec) (*model.Objective,
 		return nil, nil, err
 	}
 	obj.ManagerSessionID = mgr.ID
-	o.audit(obj.ID, mgr.ID, "objective_created", "created objective: "+spec.Title, nil)
+	o.audit(obj.ID, mgr.ID, "objective_created", "created objective: "+title, nil)
+	if autoTitle {
+		o.generateTitleAsync(obj.ID, agentKind, spec.Prompt)
+	}
 	return obj, mgr, nil
 }
 

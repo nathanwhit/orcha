@@ -268,12 +268,11 @@ function NewObjectiveModal({
   return (
     <Modal title="New objective" onClose={onClose}>
       <form onSubmit={submit} className="space-y-4">
-        <Field label="Title">
+        <Field label="Title" hint="optional">
           <TextInput
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            placeholder="Ship the health endpoint"
-            required
+            placeholder="Leave blank to auto-generate from the prompt"
             autoFocus
           />
         </Field>
