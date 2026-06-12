@@ -384,3 +384,21 @@ type Event struct {
 	Data        JSONMap   `json:"data,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 }
+
+// Project is a registered repository teams work on. Objectives pick one from
+// a list instead of retyping owner/repo; repos used once are remembered.
+//
+// Repo is the UPSTREAM (owner/repo): checkouts base off its branches and PRs
+// open against it. PushRepo, when set, is the fork branches are pushed to —
+// the standard fork workflow (base off upstream, push to fork, PR against
+// upstream). Empty PushRepo means pushes go to Repo itself.
+type Project struct {
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	Repo       string    `json:"repo"`
+	PushRepo   string    `json:"push_repo,omitempty"`
+	CloneURL   string    `json:"clone_url,omitempty"`
+	BaseBranch string    `json:"base_branch,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}

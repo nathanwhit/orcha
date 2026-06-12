@@ -49,6 +49,11 @@ type Spec struct {
 	Dir      string // target-local checkout directory
 	Base     string // base branch to branch from / update against (e.g. "main")
 	Branch   string // branch to create (isolated) or check out (PR follow-up)
+	// PushURL, when set, is where branch pushes go — the fork in a fork
+	// workflow. origin's FETCH url stays RepoURL (the upstream freshness
+	// guarantee), while its PUSH url becomes PushURL, so a plain
+	// `git push origin <branch>` lands on the fork.
+	PushURL string
 }
 
 // PrepareIsolated creates a fresh isolated checkout with a new Branch based on
@@ -70,11 +75,22 @@ func (p *Preparer) PrepareIsolated(ctx context.Context, ex exec.Executor, spec S
 	return nil
 }
 
-// PreparePRBranch creates a checkout tracking an existing PR branch at its fresh
-// head, so follow-up work updates the correct branch.
+// PreparePRBranch creates a checkout tracking an existing PR branch at its
+// fresh head, so follow-up work updates the correct branch. In a fork workflow
+// the PR branch lives on the fork (PushURL), not upstream, so it is fetched
+// from there.
 func (p *Preparer) PreparePRBranch(ctx context.Context, ex exec.Executor, spec Spec) error {
 	if err := p.base(ctx, ex, spec); err != nil {
 		return err
+	}
+	if spec.PushURL != "" {
+		if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "fetch", spec.PushURL, spec.Branch); err != nil {
+			return fmt.Errorf("workspace: fetch PR branch %s from fork: %w", spec.Branch, err)
+		}
+		if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "checkout", "-B", spec.Branch, "FETCH_HEAD"); err != nil {
+			return fmt.Errorf("workspace: checkout PR branch %s: %w", spec.Branch, err)
+		}
+		return nil
 	}
 	if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "checkout", "-B", spec.Branch, "origin/"+spec.Branch); err != nil {
 		return fmt.Errorf("workspace: checkout PR branch %s: %w", spec.Branch, err)
@@ -120,6 +136,12 @@ func (p *Preparer) base(ctx context.Context, ex exec.Executor, spec Spec) error 
 	// possibly-stale cache.
 	if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "remote", "set-url", "origin", spec.RepoURL); err != nil {
 		return fmt.Errorf("workspace: set origin: %w", err)
+	}
+	// Fork workflow: fetch from upstream, push to the fork.
+	if spec.PushURL != "" {
+		if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "remote", "set-url", "--push", "origin", spec.PushURL); err != nil {
+			return fmt.Errorf("workspace: set push url: %w", err)
+		}
 	}
 	if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "fetch", "--prune", "origin"); err != nil {
 		return fmt.Errorf("workspace: fetch upstream: %w", err)

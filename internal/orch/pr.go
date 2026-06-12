@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/nathanwhit/orcha/internal/model"
 	"github.com/nathanwhit/orcha/internal/store"
@@ -86,11 +87,19 @@ func (o *Orchestrator) PublishPR(ctx context.Context, sessionID string, spec Pub
 	}
 	defer o.st.ReleaseLock(lockKey, sessionID)
 
+	// The push goes to origin, whose push URL is the fork in a fork workflow
+	// (set during workspace prep). The PR opens against the upstream repo, with
+	// the head qualified as fork-owner:branch when the branch lives on a fork.
+	pushRepo, _ := ws.Metadata["push_repo"].(string)
 	headSHA, err := o.forge.PushBranch(ctx, repo, ws.Path, ws.BranchName, false)
 	if err != nil {
 		return nil, err
 	}
-	res, err := o.forge.OpenPR(ctx, repo, ws.BranchName, base, spec.Title, spec.Body)
+	head := ws.BranchName
+	if pushRepo != "" && pushRepo != repo {
+		head = repoOwner(pushRepo) + ":" + ws.BranchName
+	}
+	res, err := o.forge.OpenPR(ctx, repo, head, base, spec.Title, spec.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -108,6 +117,10 @@ func (o *Orchestrator) PublishPR(ctx context.Context, sessionID string, spec Pub
 		ChecksState:        model.ChecksPending,
 		Title:              spec.Title,
 		Summary:            spec.Body,
+	}
+	if pushRepo != "" {
+		// Follow-ups need to know the branch lives on the fork.
+		pr.Metadata = model.JSONMap{"push_repo": pushRepo}
 	}
 	if err := o.st.CreatePR(pr); err != nil {
 		return nil, err
@@ -265,4 +278,12 @@ func firstNonEmpty(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// repoOwner returns the owner part of an "owner/repo" identifier.
+func repoOwner(repo string) string {
+	if i := strings.IndexByte(repo, '/'); i > 0 {
+		return repo[:i]
+	}
+	return repo
 }

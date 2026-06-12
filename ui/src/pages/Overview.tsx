@@ -236,11 +236,19 @@ function NewObjectiveModal({
 }) {
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
+  const [projectID, setProjectID] = useState("");
   const [repo, setRepo] = useState("");
+  const [pushRepo, setPushRepo] = useState("");
   const [base, setBase] = useState("");
   const [agent, setAgent] = useState("claude");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const projects = usePoll(
+    () => api.get<api.Project[]>("/api/projects"),
+    60000,
+  );
+  const ps = projects.data ?? [];
+  const custom = projectID === "";
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -250,13 +258,9 @@ function NewObjectiveModal({
     try {
       const res = await api.post<{ objective: api.Objective }>(
         "/api/objectives",
-        {
-          title,
-          prompt,
-          agent,
-          repo,
-          base_branch: base,
-        },
+        custom
+          ? { title, prompt, agent, repo, push_repo: pushRepo, base_branch: base }
+          : { title, prompt, agent, project_id: projectID },
       );
       onCreated(res.objective.id);
     } catch (ex) {
@@ -285,22 +289,50 @@ function NewObjectiveModal({
             required
           />
         </Field>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Repo" hint="required for coding work">
-            <TextInput
-              value={repo}
-              onChange={(e) => setRepo(e.target.value)}
-              placeholder="owner/repo"
-            />
-          </Field>
-          <Field label="Base branch" hint="optional">
-            <TextInput
-              value={base}
-              onChange={(e) => setBase(e.target.value)}
-              placeholder="main"
-            />
-          </Field>
-        </div>
+        <Field label="Project" hint="required for coding work">
+          <Select
+            value={projectID}
+            onChange={(e) => setProjectID(e.target.value)}
+          >
+            <option value="">custom repo…</option>
+            {ps.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name === p.repo ? p.repo : `${p.name} (${p.repo})`}
+                {p.push_repo ? " — via fork" : ""}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        {custom && (
+          <>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Repo" hint="upstream owner/repo">
+                <TextInput
+                  value={repo}
+                  onChange={(e) => setRepo(e.target.value)}
+                  placeholder="owner/repo"
+                />
+              </Field>
+              <Field label="Push repo" hint="fork; optional">
+                <TextInput
+                  value={pushRepo}
+                  onChange={(e) => setPushRepo(e.target.value)}
+                  placeholder="you/repo"
+                />
+              </Field>
+            </div>
+            <Field label="Base branch" hint="optional">
+              <TextInput
+                value={base}
+                onChange={(e) => setBase(e.target.value)}
+                placeholder="main"
+              />
+            </Field>
+            <p className="text-[11px] text-faint">
+              A typed repo is remembered as a project for next time.
+            </p>
+          </>
+        )}
         <Field label="Manager agent">
           <Select value={agent} onChange={(e) => setAgent(e.target.value)}>
             <option value="claude">claude</option>

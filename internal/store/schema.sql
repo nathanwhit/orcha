@@ -195,3 +195,14 @@ CREATE TABLE IF NOT EXISTS events (
     created_at   TIMESTAMP NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_objective ON events(objective_id);
+
+CREATE TABLE IF NOT EXISTS projects (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    repo        TEXT NOT NULL UNIQUE,  -- upstream: base + PR target
+    push_repo   TEXT NOT NULL DEFAULT '', -- fork pushes go to; '' = repo itself
+    clone_url   TEXT NOT NULL DEFAULT '',
+    base_branch TEXT NOT NULL DEFAULT '',
+    created_at  TIMESTAMP NOT NULL,
+    updated_at  TIMESTAMP NOT NULL
+);

@@ -61,6 +61,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/pull-requests/{id}/steer", s.steerPR)
 	mux.HandleFunc("POST /api/pull-requests/{id}/sync", s.syncPR)
 
+	mux.HandleFunc("GET /api/projects", s.listProjects)
+	mux.HandleFunc("POST /api/projects", s.upsertProject)
+	mux.HandleFunc("DELETE /api/projects/{id}", s.deleteProject)
+
 	mux.HandleFunc("GET /api/questions", s.listQuestions)
 	mux.HandleFunc("POST /api/questions/{id}/answer", s.answerQuestion)
 
@@ -130,7 +134,9 @@ type createObjectiveReq struct {
 	Title      string `json:"title"`
 	Prompt     string `json:"prompt"`
 	Agent      string `json:"agent"`
+	ProjectID  string `json:"project_id"` // registered project; explicit fields below override
 	Repo       string `json:"repo"`
+	PushRepo   string `json:"push_repo"`
 	BaseBranch string `json:"base_branch"`
 }
 
@@ -140,15 +146,86 @@ func (s *Server) createObjective(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	// A registered project supplies repo/fork/base defaults; explicit fields win.
+	if req.ProjectID != "" {
+		p, err := s.st.GetProject(req.ProjectID)
+		if err != nil {
+			writeErr(w, httpStatusFor(err), err)
+			return
+		}
+		if req.Repo == "" {
+			req.Repo = p.Repo
+		}
+		if req.PushRepo == "" {
+			req.PushRepo = p.PushRepo
+		}
+		if req.BaseBranch == "" {
+			req.BaseBranch = p.BaseBranch
+		}
+	}
 	obj, mgr, err := s.o.CreateObjective(orch.NewObjectiveSpec{
 		Title: req.Title, Prompt: req.Prompt, Agent: model.AgentKind(req.Agent),
-		Repo: req.Repo, BaseBranch: req.BaseBranch,
+		Repo: req.Repo, PushRepo: req.PushRepo, BaseBranch: req.BaseBranch,
 	})
 	if err != nil {
 		writeErr(w, httpStatusFor(err), err)
 		return
 	}
+	// Remember a typed repo as a project so next time it's a pick, not typing.
+	if req.ProjectID == "" && req.Repo != "" {
+		_ = s.st.UpsertProject(&model.Project{
+			Repo: req.Repo, PushRepo: req.PushRepo, BaseBranch: req.BaseBranch,
+		})
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{"objective": obj, "manager": mgr})
+}
+
+// ---- projects ----
+
+func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
+	ps, err := s.st.ListProjects()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, orEmpty(ps))
+}
+
+type upsertProjectReq struct {
+	Name       string `json:"name"`
+	Repo       string `json:"repo"`
+	PushRepo   string `json:"push_repo"`
+	BaseBranch string `json:"base_branch"`
+	CloneURL   string `json:"clone_url"`
+}
+
+func (s *Server) upsertProject(w http.ResponseWriter, r *http.Request) {
+	var req upsertProjectReq
+	if err := decode(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Repo == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("repo is required (owner/repo)"))
+		return
+	}
+	p := &model.Project{
+		Name: req.Name, Repo: req.Repo, PushRepo: req.PushRepo,
+		BaseBranch: req.BaseBranch, CloneURL: req.CloneURL,
+	}
+	if err := s.st.UpsertProject(p); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, p)
+}
+
+func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
+	if err := s.st.DeleteProject(r.PathValue("id")); err != nil {
+		writeErr(w, httpStatusFor(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 func (s *Server) getObjective(w http.ResponseWriter, r *http.Request) {

@@ -80,6 +80,12 @@ func (o *Orchestrator) ProcessFeedback(ctx context.Context, prID string) ([]*mod
 		return nil, err
 	}
 	cloneURL := cloneURLFor(pr.Repo)
+	// Fork workflow: the PR branch lives on the fork recorded at publish time.
+	pushRepo, _ := pr.Metadata["push_repo"].(string)
+	pushURL := ""
+	if pushRepo != "" {
+		pushURL = cloneURLFor(pushRepo)
+	}
 	dir := fmt.Sprintf("%s/pr-%d", target.WorkRoot, pr.Number)
 	ws := &model.Workspace{
 		ObjectiveID: pr.ObjectiveID,
@@ -92,7 +98,7 @@ func (o *Orchestrator) ProcessFeedback(ctx context.Context, prID string) ([]*mod
 		BaseSHA:     pr.HeadSHA,
 		BranchName:  pr.Branch,
 		Status:      model.WorkspacePreparing,
-		Metadata:    model.JSONMap{"repo": pr.Repo, "pr_id": prID, "clone_url": cloneURL},
+		Metadata:    prWorkspaceMeta(pr.Repo, prID, cloneURL, pushRepo),
 	}
 	if err := o.st.CreateWorkspace(ws); err != nil {
 		return nil, err
@@ -103,6 +109,7 @@ func (o *Orchestrator) ProcessFeedback(ctx context.Context, prID string) ([]*mod
 		ex := agent.NewExecutor(target)
 		if perr := o.preparer.PreparePRBranch(ctx, ex, workspace.Spec{
 			WorkRoot: target.WorkRoot, RepoURL: cloneURL, Dir: dir, Branch: pr.Branch,
+			PushURL: pushURL,
 		}); perr != nil {
 			_ = o.st.SetWorkspaceStatus(ws.ID, model.WorkspaceFailed)
 			return nil, perr
@@ -201,4 +208,14 @@ func (o *Orchestrator) defaultAgent() model.AgentKind {
 		return k
 	}
 	return model.AgentClaude
+}
+
+// prWorkspaceMeta builds a PR-branch workspace's metadata; push_repo is only
+// present for fork PRs.
+func prWorkspaceMeta(repo, prID, cloneURL, pushRepo string) model.JSONMap {
+	m := model.JSONMap{"repo": repo, "pr_id": prID, "clone_url": cloneURL}
+	if pushRepo != "" {
+		m["push_repo"] = pushRepo
+	}
+	return m
 }

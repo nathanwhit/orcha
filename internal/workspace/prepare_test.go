@@ -137,3 +137,55 @@ func TestSlug(t *testing.T) {
 		}
 	}
 }
+
+// Fork workflow: the checkout bases off upstream but pushes to the fork, and a
+// PR-branch checkout fetches the branch from the fork.
+func TestPrepare_ForkWorkflow(t *testing.T) {
+	ctx := context.Background()
+	ex := exec.NewLocal()
+
+	upstream, _ := seedBare(t)
+	root := t.TempDir()
+	fork := filepath.Join(root, "fork.git")
+	git(t, root, "clone", "--bare", upstream, fork)
+
+	work := filepath.Join(root, "work")
+	dir := filepath.Join(work, "ws1")
+	p := New()
+	if err := p.PrepareIsolated(ctx, ex, Spec{
+		WorkRoot: work, RepoURL: upstream, Dir: dir, Base: "main", Branch: "orcha/feat",
+		PushURL: fork,
+	}); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+
+	// origin fetches from upstream but pushes to the fork.
+	if got := git(t, dir, "remote", "get-url", "origin"); got != upstream {
+		t.Fatalf("fetch url = %q, want upstream %q", got, upstream)
+	}
+	if got := git(t, dir, "remote", "get-url", "--push", "origin"); got != fork {
+		t.Fatalf("push url = %q, want fork %q", got, fork)
+	}
+
+	// A commit pushed via plain `git push origin` lands on the FORK, not upstream.
+	git(t, dir, "commit", "--allow-empty", "-m", "feat: fork test")
+	git(t, dir, "push", "origin", "orcha/feat")
+	if out := git(t, fork, "branch", "--list", "orcha/feat"); !strings.Contains(out, "orcha/feat") {
+		t.Fatalf("branch missing on fork: %q", out)
+	}
+	if out := git(t, upstream, "branch", "--list", "orcha/feat"); strings.Contains(out, "orcha/feat") {
+		t.Fatal("branch leaked to upstream")
+	}
+
+	// A PR-branch checkout for a follow-up fetches the branch from the fork.
+	prDir := filepath.Join(work, "pr1")
+	if err := p.PreparePRBranch(ctx, ex, Spec{
+		WorkRoot: work, RepoURL: upstream, Dir: prDir, Branch: "orcha/feat",
+		PushURL: fork,
+	}); err != nil {
+		t.Fatalf("prepare PR branch: %v", err)
+	}
+	if head := git(t, prDir, "log", "-1", "--format=%s"); !strings.Contains(head, "fork test") {
+		t.Fatalf("PR checkout head = %q, want the fork commit", head)
+	}
+}

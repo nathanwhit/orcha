@@ -7,6 +7,7 @@ import type { IconName } from "./icons";
 import { ActivityPage } from "./pages/Activity";
 import { ObjectivePage } from "./pages/Objective";
 import { Overview } from "./pages/Overview";
+import { ProjectsPage } from "./pages/Projects";
 import { PullRequestsPage } from "./pages/PullRequests";
 import { SessionPage } from "./pages/SessionDetail";
 import { SessionsPage } from "./pages/Sessions";
@@ -16,6 +17,7 @@ const NAV: { to: string; label: string; icon: IconName }[] = [
   { to: "/", label: "Overview", icon: "grid" },
   { to: "/sessions", label: "Sessions", icon: "terminal" },
   { to: "/prs", label: "Pull requests", icon: "pr" },
+  { to: "/projects", label: "Projects", icon: "folder" },
   { to: "/targets", label: "Targets", icon: "server" },
   { to: "/activity", label: "Activity", icon: "activity" },
 ];
@@ -32,6 +34,7 @@ export default function App() {
   else if (seg[0] === "sessions" && seg[1]) page = <SessionPage id={seg[1]} />;
   else if (seg[0] === "sessions") page = <SessionsPage nav={nav} />;
   else if (seg[0] === "prs") page = <PullRequestsPage />;
+  else if (seg[0] === "projects") page = <ProjectsPage />;
   else if (seg[0] === "targets") page = <TargetsPage />;
   else if (seg[0] === "activity") page = <ActivityPage />;
   else

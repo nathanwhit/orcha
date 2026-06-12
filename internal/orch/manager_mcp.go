@@ -31,7 +31,8 @@ func (o *Orchestrator) ManagerMCPHandler() http.Handler {
 			"goal":          str,
 			"agent_hint":    map[string]any{"type": "string", "enum": []string{"claude", "codex"}},
 			"dependencies":  map[string]any{"type": "array", "items": str},
-			"repo":          map[string]any{"type": "string", "description": "override the objective's repo for this worker's checkout (owner/repo)"},
+			"repo":          map[string]any{"type": "string", "description": "override the objective's repo for this worker's checkout (owner/repo, the upstream)"},
+			"push_repo":     map[string]any{"type": "string", "description": "fork to push branches to (owner/repo); omit to push to repo itself"},
 			"base_branch":   map[string]any{"type": "string", "description": "base branch for the checkout (default main)"},
 			"target":        map[string]any{"type": "string", "description": "pin this worker to a target machine (name or id), e.g. a remote SSH box"},
 			"target_labels": map[string]any{"type": "array", "items": str, "description": "require a target with these labels"},
@@ -117,6 +118,9 @@ func (o *Orchestrator) mcpSpawnSession(ctx context.Context, args map[string]any)
 		if base := mcp.StringArg(args, "base_branch"); base != "" {
 			meta["base_branch"] = base
 		}
+	}
+	if pushRepo := mcp.StringArg(args, "push_repo"); pushRepo != "" {
+		meta["push_repo"] = pushRepo
 	}
 	if target := mcp.StringArg(args, "target"); target != "" {
 		meta["pinned_target"] = target

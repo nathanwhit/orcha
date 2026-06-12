@@ -168,6 +168,17 @@ export interface OrchaEvent {
   created_at: string;
 }
 
+export interface Project {
+  id: string;
+  name: string;
+  repo: string;
+  push_repo?: string;
+  clone_url?: string;
+  base_branch?: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Health {
   status: string;
   version: string;
@@ -208,6 +219,10 @@ export function post<T>(url: string, body?: unknown): Promise<T> {
     headers: body ? { "Content-Type": "application/json" } : undefined,
     body: body ? JSON.stringify(body) : undefined,
   }).then(parse);
+}
+
+export function del<T>(url: string): Promise<T> {
+  return fetch(url, { method: "DELETE" }).then(parse);
 }
 
 export const shortId = (id?: string) => (id ? id.slice(0, 8) : "");

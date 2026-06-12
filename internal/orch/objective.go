@@ -15,6 +15,7 @@ type NewObjectiveSpec struct {
 	// on. Coding sessions the manager spawns inherit it and get a fresh isolated
 	// checkout. Optional.
 	Repo       string
+	PushRepo   string // fork branches are pushed to; empty = Repo itself
 	CloneURL   string // explicit clone source; derived from Repo if empty
 	BaseBranch string // default base for checkouts (default "main")
 }
@@ -25,6 +26,9 @@ func (o *Orchestrator) CreateObjective(spec NewObjectiveSpec) (*model.Objective,
 	meta := model.JSONMap{}
 	if spec.Repo != "" {
 		meta["repo"] = spec.Repo
+	}
+	if spec.PushRepo != "" {
+		meta["push_repo"] = spec.PushRepo
 	}
 	if spec.CloneURL != "" {
 		meta["clone_url"] = spec.CloneURL

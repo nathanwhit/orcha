@@ -28,13 +28,15 @@ func (o *Orchestrator) PrepareIsolatedWorkspace(ctx context.Context, sessionID, 
 	if err != nil {
 		return nil, err
 	}
-	return o.prepareIsolatedOn(ctx, sess, target, repo, cloneURL, baseRef)
+	return o.prepareIsolatedOn(ctx, sess, target, repo, "", cloneURL, baseRef)
 }
 
 // prepareIsolatedOn prepares an isolated workspace for a session on a specific
 // target — used when the session has already been placed, so the checkout lands
-// on the same machine the agent runs on.
-func (o *Orchestrator) prepareIsolatedOn(ctx context.Context, sess *model.Session, target *model.Target, repo, cloneURL, baseRef string) (*model.Workspace, error) {
+// on the same machine the agent runs on. pushRepo, when set, is the fork the
+// branch will be pushed to (fork workflow): the checkout fetches from repo but
+// pushes to pushRepo.
+func (o *Orchestrator) prepareIsolatedOn(ctx context.Context, sess *model.Session, target *model.Target, repo, pushRepo, cloneURL, baseRef string) (*model.Workspace, error) {
 	sessionID := sess.ID
 	if baseRef == "" {
 		baseRef = "main"
@@ -45,6 +47,10 @@ func (o *Orchestrator) prepareIsolatedOn(ctx context.Context, sess *model.Sessio
 	branch := "orcha/" + roleShort(sess.Role) + "-" + sessionID[:min(8, len(sessionID))]
 	dir := fmt.Sprintf("%s/%s", target.WorkRoot, sessionID)
 
+	wsMeta := model.JSONMap{"repo": repo, "clone_url": cloneURL}
+	if pushRepo != "" {
+		wsMeta["push_repo"] = pushRepo
+	}
 	ws := &model.Workspace{
 		ObjectiveID: sess.ObjectiveID,
 		SessionID:   sessionID,
@@ -56,7 +62,7 @@ func (o *Orchestrator) prepareIsolatedOn(ctx context.Context, sess *model.Sessio
 		BaseRef:     baseRef,
 		BranchName:  branch,
 		Status:      model.WorkspacePreparing,
-		Metadata:    model.JSONMap{"repo": repo, "clone_url": cloneURL},
+		Metadata:    wsMeta,
 	}
 	if err := o.st.CreateWorkspace(ws); err != nil {
 		return nil, err
@@ -70,9 +76,14 @@ func (o *Orchestrator) prepareIsolatedOn(ctx context.Context, sess *model.Sessio
 	// Materialize the real checkout (target-local, fresh upstream). This is an
 	// external operation and runs outside any DB transaction.
 	if o.preparer != nil {
+		pushURL := ""
+		if pushRepo != "" {
+			pushURL = cloneURLFor(pushRepo)
+		}
 		ex := agent.NewExecutor(target)
 		perr := o.preparer.PrepareIsolated(ctx, ex, workspace.Spec{
 			WorkRoot: target.WorkRoot, RepoURL: cloneURL, Dir: dir, Base: baseRef, Branch: branch,
+			PushURL: pushURL,
 		})
 		if perr != nil {
 			_ = o.st.SetWorkspaceStatus(ws.ID, model.WorkspaceFailed)
@@ -142,31 +153,37 @@ func (o *Orchestrator) ensureWorkspace(ctx context.Context, sess *model.Session,
 	if !needsIsolatedWorkspace(sess.Role) {
 		return nil
 	}
-	repo, cloneURL, base := o.resolveRepo(sess)
+	repo, pushRepo, cloneURL, base := o.resolveRepo(sess)
 	if repo == "" && cloneURL == "" {
 		// A coding worker with nothing to clone must fail loudly here: the
 		// fallback would be an empty scratch dir it can't do its task in (and
 		// historically, the orchestrator's own cwd — the operator's live repo).
 		return fmt.Errorf("orch: %s session has no repo to work on: set repo on the objective or pass repo in spawn_session", sess.Role)
 	}
-	_, err := o.prepareIsolatedOn(ctx, sess, target, repo, cloneURL, base)
+	_, err := o.prepareIsolatedOn(ctx, sess, target, repo, pushRepo, cloneURL, base)
 	return err
 }
 
-// resolveRepo finds the repo/clone-url/base for a session: a per-session
-// override in its metadata wins, otherwise the objective's defaults.
-func (o *Orchestrator) resolveRepo(sess *model.Session) (repo, cloneURL, base string) {
+// resolveRepo finds the repo/push-repo/clone-url/base for a session: a
+// per-session override in its metadata wins, otherwise the objective's
+// defaults. pushRepo is the fork branches are pushed to (fork workflow);
+// empty means pushes go to repo itself.
+func (o *Orchestrator) resolveRepo(sess *model.Session) (repo, pushRepo, cloneURL, base string) {
 	repo, _ = sess.Metadata["repo"].(string)
+	pushRepo, _ = sess.Metadata["push_repo"].(string)
 	cloneURL, _ = sess.Metadata["clone_url"].(string)
 	base, _ = sess.Metadata["base_branch"].(string)
 	if (repo == "" && cloneURL == "") && sess.ObjectiveID != "" {
 		if obj, err := o.st.GetObjective(sess.ObjectiveID); err == nil {
 			repo, _ = obj.Metadata["repo"].(string)
 			cloneURL, _ = obj.Metadata["clone_url"].(string)
+			if pushRepo == "" {
+				pushRepo, _ = obj.Metadata["push_repo"].(string)
+			}
 			if base == "" {
 				base, _ = obj.Metadata["base_branch"].(string)
 			}
 		}
 	}
-	return repo, cloneURL, base
+	return repo, pushRepo, cloneURL, base
 }
