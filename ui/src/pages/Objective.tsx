@@ -34,8 +34,12 @@ export function ObjectivePage({
     return <p className="text-sm text-rose-400">{detail.error}</p>;
   if (!detail.data) return <p className="text-sm text-faint">Loading…</p>;
 
-  const { objective: obj, sessions, pull_requests, questions, artifacts } =
-    detail.data;
+  // Defend against null lists from older servers (Go nil slices encode as null).
+  const obj = detail.data.objective;
+  const sessions = detail.data.sessions ?? [];
+  const pull_requests = detail.data.pull_requests ?? [];
+  const questions = detail.data.questions ?? [];
+  const artifacts = detail.data.artifacts ?? [];
   const openQs = questions.filter((q) => q.status === "open");
   const terminal = ["succeeded", "failed", "canceled"].includes(obj.status);
 

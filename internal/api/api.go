@@ -123,7 +123,7 @@ func (s *Server) listObjectives(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, rows)
+	writeJSON(w, http.StatusOK, orEmpty(rows))
 }
 
 type createObjectiveReq struct {
@@ -162,13 +162,23 @@ func (s *Server) getObjective(w http.ResponseWriter, r *http.Request) {
 	prs, _ := s.st.ListPRsByObjective(id)
 	questions, _ := s.st.ListQuestionsByObjective(id)
 	artifacts, _ := s.st.ListArtifactsByObjective(id)
+	// Lists are never null in the JSON contract (a Go nil slice encodes as
+	// null, which clients then call array methods on).
 	writeJSON(w, http.StatusOK, map[string]any{
 		"objective":     obj,
-		"sessions":      sessions,
-		"pull_requests": prs,
-		"questions":     questions,
-		"artifacts":     artifacts,
+		"sessions":      orEmpty(sessions),
+		"pull_requests": orEmpty(prs),
+		"questions":     orEmpty(questions),
+		"artifacts":     orEmpty(artifacts),
 	})
+}
+
+// orEmpty coalesces a nil slice to an empty one so it encodes as [] not null.
+func orEmpty[T any](s []T) []T {
+	if s == nil {
+		return []T{}
+	}
+	return s
 }
 
 type steerReq struct {
@@ -215,7 +225,7 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, rows)
+	writeJSON(w, http.StatusOK, orEmpty(rows))
 }
 
 func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
@@ -236,7 +246,7 @@ func (s *Server) sessionMessages(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, msgs)
+	writeJSON(w, http.StatusOK, orEmpty(msgs))
 }
 
 func (s *Server) postSessionMessage(w http.ResponseWriter, r *http.Request) {
@@ -302,7 +312,7 @@ func (s *Server) listTargets(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, targets)
+	writeJSON(w, http.StatusOK, orEmpty(targets))
 }
 
 func (s *Server) getTarget(w http.ResponseWriter, r *http.Request) {
@@ -406,7 +416,7 @@ func (s *Server) listPRs(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, prs)
+	writeJSON(w, http.StatusOK, orEmpty(prs))
 }
 
 func (s *Server) getPR(w http.ResponseWriter, r *http.Request) {
@@ -482,7 +492,7 @@ func (s *Server) listQuestions(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, qs)
+	writeJSON(w, http.StatusOK, orEmpty(qs))
 }
 
 type answerReq struct {
@@ -509,7 +519,7 @@ func (s *Server) listUsage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, u)
+	writeJSON(w, http.StatusOK, orEmpty(u))
 }
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
@@ -520,7 +530,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, events)
+	writeJSON(w, http.StatusOK, orEmpty(events))
 }
 
 // streamSession streams transcript rows incrementally as Server-Sent Events.

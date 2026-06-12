@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { Component, useState } from "react";
+import type { ReactNode } from "react";
 import * as api from "./api";
 import { useHashPath, usePoll } from "./hooks";
 import { Icon } from "./icons";
@@ -87,10 +88,41 @@ export default function App() {
       </aside>
 
       <main className="mx-auto w-full max-w-6xl px-4 py-6 md:px-8 md:py-8">
-        {page}
+        {/* Keyed by path so navigating away clears a crashed page. */}
+        <ErrorBoundary key={path}>{page}</ErrorBoundary>
       </main>
     </div>
   );
+}
+
+// ErrorBoundary turns a render crash into a readable error instead of
+// unmounting the whole app (a black page).
+class ErrorBoundary extends Component<
+  { children: ReactNode },
+  { error: Error | null }
+> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="rounded-xl border border-rose-400/25 bg-rose-400/5 p-5">
+          <p className="text-sm font-semibold text-rose-300">
+            This page crashed.
+          </p>
+          <pre className="mt-2 overflow-x-auto font-mono text-xs whitespace-pre-wrap text-mute">
+            {this.state.error.message}
+          </pre>
+          <a href="#/" className="mt-3 inline-block text-sm text-accent">
+            Back to overview
+          </a>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 function Logo() {

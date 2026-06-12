@@ -129,7 +129,7 @@ function TargetCard({ t, onChanged }: { t: api.Target; onChanged: () => void }) 
             </button>
           </div>
           <ul className="mt-2 space-y-1">
-            {doctor.checks.map((c) => (
+            {(doctor.checks ?? []).map((c) => (
               <li key={c.name} className="flex items-center gap-2 text-xs">
                 <Icon
                   name={c.ok ? "check" : "alert"}
@@ -257,14 +257,14 @@ function AddTargetModal({
               {result.doctor && !result.doctor.ok && (
                 <span className="text-rose-300">
                   {" "}
-                  — missing: {result.doctor.missing.join(", ")}
+                  — missing: {(result.doctor.missing ?? []).join(", ")}
                 </span>
               )}
             </p>
           </div>
           {result.doctor && (
             <ul className="space-y-1">
-              {result.doctor.checks.map((c) => (
+              {(result.doctor.checks ?? []).map((c) => (
                 <li key={c.name} className="flex items-center gap-2 text-xs">
                   <Icon
                     name={c.ok ? "check" : "alert"}
