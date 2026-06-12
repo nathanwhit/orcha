@@ -199,6 +199,16 @@ func (o *Orchestrator) UpdatePR(ctx context.Context, prID string, spec UpdateSpe
 			wsPath = ws.Path
 		}
 	}
+	// Commit any uncommitted follow-up edits so there is something to push.
+	if wsPath != "" {
+		msg := spec.Body
+		if msg == "" {
+			msg = "orcha: address PR feedback"
+		}
+		if _, err := o.forge.CommitAll(ctx, wsPath, msg); err != nil {
+			return nil, err
+		}
+	}
 	headSHA, err := o.forge.PushBranch(ctx, pr.Repo, wsPath, pr.Branch, spec.Force)
 	if err != nil {
 		return nil, err

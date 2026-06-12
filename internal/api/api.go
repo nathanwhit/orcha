@@ -59,6 +59,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/pull-requests/{id}", s.getPR)
 	mux.HandleFunc("POST /api/pull-requests/{id}/refresh", s.refreshPR)
 	mux.HandleFunc("POST /api/pull-requests/{id}/steer", s.steerPR)
+	mux.HandleFunc("POST /api/pull-requests/{id}/sync", s.syncPR)
 
 	mux.HandleFunc("GET /api/questions", s.listQuestions)
 	mux.HandleFunc("POST /api/questions/{id}/answer", s.answerQuestion)
@@ -425,6 +426,21 @@ func (s *Server) refreshPR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, pr)
+}
+
+// syncPR polls the host for new comments and spawns follow-up sessions for
+// actionable ones.
+func (s *Server) syncPR(w http.ResponseWriter, r *http.Request) {
+	spawned, err := s.o.SyncPRFeedback(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, httpStatusFor(err), err)
+		return
+	}
+	ids := make([]string, 0, len(spawned))
+	for _, sess := range spawned {
+		ids = append(ids, sess.ID)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"followups_spawned": ids})
 }
 
 func (s *Server) steerPR(w http.ResponseWriter, r *http.Request) {

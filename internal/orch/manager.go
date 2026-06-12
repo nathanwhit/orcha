@@ -138,7 +138,9 @@ func (o *Orchestrator) CommentPR(ctx context.Context, prID, body string) error {
 	if err != nil {
 		return err
 	}
-	if err := o.forge.Comment(ctx, pr.Repo, pr.Number, body); err != nil {
+	// Tag orcha-posted comments so the feedback monitor never reacts to its own
+	// (or the manager's) replies as if they were new user feedback.
+	if err := o.forge.Comment(ctx, pr.Repo, pr.Number, body+"\n\n"+orchaBotMarker); err != nil {
 		return err
 	}
 	o.audit(pr.ObjectiveID, "", "pr_comment", "manager comment", model.JSONMap{"pr_id": prID})

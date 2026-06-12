@@ -110,14 +110,16 @@ func (o *Orchestrator) ProcessFeedback(ctx context.Context, prID string) ([]*mod
 	}
 	_ = o.st.SetWorkspaceStatus(ws.ID, model.WorkspaceReady)
 
-	goal := fmt.Sprintf("Address feedback on PR #%d (%s).\n\nFeedback:\n%s\n\nPrior PR summary: %s",
-		pr.Number, pr.Title, strings.Join(checkLogs, "\n"), pr.Summary)
+	goal := fmt.Sprintf("Address feedback on PR #%d (%q) in repo %s.\n"+
+		"Use orcha pr_id=%q for your tool calls (update_pr / comment_pr take pr_id).\n"+
+		"This checkout is the PR branch %q with origin set.\n\nFeedback:\n%s\n\nPrior PR summary: %s",
+		pr.Number, pr.Title, pr.Repo, prID, pr.Branch, strings.Join(checkLogs, "\n"), pr.Summary)
 
 	sess, err := o.CreateSession(SpawnSpec{
 		ObjectiveID: pr.ObjectiveID,
 		Role:        role,
 		Agent:       o.defaultAgent(),
-		Mode:        model.ModeInteractive,
+		Mode:        model.ModeNoninteractive, // one-shot: do the fix and finish
 		Title:       fmt.Sprintf("Follow-up: PR #%d", pr.Number),
 		Goal:        goal,
 		WorkspaceID: ws.ID,
@@ -132,6 +134,59 @@ func (o *Orchestrator) ProcessFeedback(ctx context.Context, prID string) ([]*mod
 	o.audit(pr.ObjectiveID, sess.ID, "followup_spawned",
 		fmt.Sprintf("spawned %s for PR #%d", role, pr.Number), model.JSONMap{"pr_id": prID})
 	return []*model.Session{sess}, nil
+}
+
+// orchaBotMarker tags orcha's own PR comments so the monitor doesn't react to
+// them as if they were user feedback.
+const orchaBotMarker = "<!-- orcha-bot -->"
+
+// SyncPRFeedback polls the host for new comments on a PR, ingests actionable
+// ones (deduped), refreshes PR state, and spawns follow-up sessions. This is
+// what a PR monitor calls on a tick or what the API triggers on demand.
+func (o *Orchestrator) SyncPRFeedback(ctx context.Context, prID string) ([]*model.Session, error) {
+	if o.forge == nil {
+		return nil, nil
+	}
+	pr, err := o.RefreshPR(ctx, prID) // also picks up merged/closed/checks
+	if err != nil {
+		pr, err = o.st.GetPR(prID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	comments, err := o.forge.ListComments(ctx, pr.Repo, pr.Number)
+	if err != nil {
+		return nil, err
+	}
+	var items []model.PRFeedback
+	for _, c := range comments {
+		if strings.Contains(c.Body, orchaBotMarker) {
+			continue // our own reply
+		}
+		items = append(items, model.PRFeedback{
+			Kind: model.FeedbackKind(c.Kind), ExternalID: c.ExternalID, Body: c.Body, Actionable: true,
+		})
+	}
+	if len(items) > 0 {
+		if err := o.IngestFeedback(ctx, prID, items); err != nil {
+			return nil, err
+		}
+	}
+	return o.ProcessFeedback(ctx, prID)
+}
+
+// SyncOpenPRs runs a feedback sync for every open/draft PR. A PR monitor loop
+// calls this on a tick.
+func (o *Orchestrator) SyncOpenPRs(ctx context.Context) {
+	prs, err := o.st.ListPRs()
+	if err != nil {
+		return
+	}
+	for _, pr := range prs {
+		if pr.Status == model.PROpen || pr.Status == model.PRDraft {
+			_, _ = o.SyncPRFeedback(ctx, pr.ID)
+		}
+	}
 }
 
 // defaultAgent returns any registered provider kind (preferring claude) for

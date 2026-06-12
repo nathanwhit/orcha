@@ -215,6 +215,48 @@ func (g *GitForge) Comment(ctx context.Context, repo string, number int, body st
 	return err
 }
 
+// ListComments returns the PR's issue comments and review bodies via gh.
+func (g *GitForge) ListComments(ctx context.Context, repo string, number int) ([]Comment, error) {
+	out, err := g.gh(ctx, "pr", "view", strconv.Itoa(number), "--repo", repo, "--json", "comments,reviews")
+	if err != nil {
+		return nil, err
+	}
+	var raw struct {
+		Comments []struct {
+			Author struct {
+				Login string `json:"login"`
+			} `json:"author"`
+			Body string `json:"body"`
+			URL  string `json:"url"`
+		} `json:"comments"`
+		Reviews []struct {
+			Author struct {
+				Login string `json:"login"`
+			} `json:"author"`
+			Body        string `json:"body"`
+			State       string `json:"state"`
+			SubmittedAt string `json:"submittedAt"`
+		} `json:"reviews"`
+	}
+	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+		return nil, err
+	}
+	var cs []Comment
+	for _, c := range raw.Comments {
+		cs = append(cs, Comment{ExternalID: c.URL, Author: c.Author.Login, Body: c.Body, Kind: "issue_comment"})
+	}
+	for _, r := range raw.Reviews {
+		if strings.TrimSpace(r.Body) == "" {
+			continue // approvals/empty reviews carry no actionable text
+		}
+		cs = append(cs, Comment{
+			ExternalID: "review:" + r.Author.Login + ":" + r.SubmittedAt,
+			Author:     r.Author.Login, Body: r.Body, Kind: "review",
+		})
+	}
+	return cs, nil
+}
+
 // ---- helpers ----
 
 func ghStatus(state string, isDraft bool) string {

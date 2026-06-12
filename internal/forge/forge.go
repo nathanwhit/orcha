@@ -10,6 +10,14 @@ import (
 	"sync"
 )
 
+// Comment is an issue or review comment observed on a PR.
+type Comment struct {
+	ExternalID string // stable id for dedup (comment URL, or review key)
+	Author     string
+	Body       string
+	Kind       string // "issue_comment" | "review"
+}
+
 // PRState is the live state of a PR on the host.
 type PRState struct {
 	Number      int
@@ -46,6 +54,8 @@ type Forge interface {
 	GetPRState(ctx context.Context, repo string, number int) (PRState, error)
 	// Comment posts an issue/PR comment.
 	Comment(ctx context.Context, repo string, number int, body string) error
+	// ListComments returns the PR's issue and review comments.
+	ListComments(ctx context.Context, repo string, number int) ([]Comment, error)
 }
 
 // ErrRepoMissing indicates the target repo is unreachable.
@@ -66,6 +76,7 @@ type Fake struct {
 	ForcePush []PushRecord
 	Comments  []CommentRecord
 	Commits   []CommitRecord
+	incoming  []Comment
 }
 
 // PushRecord captures a push for assertions.
@@ -175,6 +186,15 @@ func (f *Fake) Comment(_ context.Context, repo string, number int, body string) 
 	f.Comments = append(f.Comments, CommentRecord{Repo: repo, Number: number, Body: body})
 	return nil
 }
+
+func (f *Fake) ListComments(_ context.Context, repo string, number int) ([]Comment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]Comment(nil), f.incoming...), nil
+}
+
+// SetComments seeds the comments ListComments returns.
+func (f *Fake) SetComments(cs ...Comment) { f.mu.Lock(); f.incoming = cs; f.mu.Unlock() }
 
 // itoa avoids importing strconv across many call sites.
 func itoa(n int) string {

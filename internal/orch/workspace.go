@@ -113,6 +113,20 @@ func needsIsolatedWorkspace(role model.SessionRole) bool {
 	return false
 }
 
+// isCodingWorker reports whether a role runs one-shot in a checkout with edit
+// permissions: the isolated-workspace roles plus PR/CI follow-ups (which get a
+// PR-branch workspace instead).
+func isCodingWorker(role model.SessionRole) bool {
+	if needsIsolatedWorkspace(role) {
+		return true
+	}
+	switch role {
+	case model.RolePRFollowup, model.RoleCIFollowup:
+		return true
+	}
+	return false
+}
+
 // ensureWorkspace auto-prepares an isolated checkout for a coding session on its
 // already-chosen target, if it has none yet. The repo is taken from the session
 // metadata (a spawn override) or inherited from the objective. It is a no-op

@@ -118,16 +118,28 @@ func (o *Orchestrator) buildSpec(sess *model.Session, ws *model.Workspace, tgt *
 		Target:         tgt,
 		Metadata:       sess.Metadata,
 	}
-	// Wire the manager tool surface into manager sessions.
-	if sess.Role == model.RoleManager && o.cfg.ManagerMCPBaseURL != "" {
+	switch {
+	// Manager: full tool surface.
+	case sess.Role == model.RoleManager && o.cfg.ManagerMCPBaseURL != "":
 		spec.MCP = map[string]string{"orcha": o.cfg.ManagerMCPBaseURL + "/mcp/" + sess.ID}
 		spec.AllowedTools = []string{"mcp__orcha"}
 		spec.PermissionMode = "default"
 		if spec.Prompt != "" {
 			spec.Prompt = managerSystemPreamble + "\n\n" + spec.Prompt
 		}
-	} else if needsIsolatedWorkspace(sess.Role) {
-		// Coding workers run one-shot in an isolated checkout: let them edit files.
+	// PR/CI follow-up: the agent itself decides how to respond, using its tools
+	// (update_pr to push a fix, comment_pr to reply, ask_user, create_note).
+	case sess.Role == model.RolePRFollowup || sess.Role == model.RoleCIFollowup:
+		if o.cfg.ManagerMCPBaseURL != "" {
+			spec.MCP = map[string]string{"orcha": o.cfg.ManagerMCPBaseURL + "/mcp/" + sess.ID}
+			spec.AllowedTools = []string{"mcp__orcha"}
+		}
+		spec.PermissionMode = "acceptEdits" // edit files; git ops go through tools
+		if spec.Prompt != "" {
+			spec.Prompt = followupSystemPreamble + "\n\n" + spec.Prompt
+		}
+	// Other coding workers run one-shot in a checkout and do not publish.
+	case isCodingWorker(sess.Role):
 		spec.PermissionMode = o.cfg.WorkerPermissionMode
 		if spec.Prompt != "" {
 			spec.Prompt = workerSystemPreamble + "\n\n" + spec.Prompt
@@ -135,6 +147,20 @@ func (o *Orchestrator) buildSpec(sess *model.Session, ws *model.Workspace, tgt *
 	}
 	return spec
 }
+
+// followupSystemPreamble orients a PR follow-up agent. It must decide and act —
+// the orchestrator does not respond on its behalf.
+const followupSystemPreamble = `You are a PR follow-up agent, running in a checkout of
+the PR's branch. Read the feedback and DECIDE how to respond, then act using your
+orcha tools (mcp__orcha__*):
+- If a code change is warranted: edit the files here, then call update_pr (with
+  session_id set to your own session) to commit and push to the PR branch.
+- To reply to the reviewer: call comment_pr with a clear, specific message.
+- If the feedback is a question: answer it with comment_pr.
+- If it is non-actionable or you disagree: explain why with comment_pr.
+- If you are blocked or need a decision: call ask_user.
+Always leave at least a comment so the reviewer knows the outcome. Do not use raw
+git push or the gh CLI — use the tools.`
 
 // workerSystemPreamble orients a one-shot worker.
 const workerSystemPreamble = `You are a worker on an engineering team, running in an

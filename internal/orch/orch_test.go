@@ -998,3 +998,48 @@ func TestPublishPR_CommitsUncommittedChanges(t *testing.T) {
 		t.Fatalf("expected one push, got %d", len(f.Pushes))
 	}
 }
+
+// ---- PR feedback: sync spawns a follow-up; the agent responds via tools ----
+
+func TestSyncPRFeedback_SpawnsFollowupForUserComment(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	f := forge.NewFake()
+	o.SetForge(f)
+
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "owner/repo", Number: 7, Branch: "feature",
+		BaseBranch: "main", HeadSHA: "sha1", Status: model.PROpen}
+	_ = st.CreatePR(pr)
+
+	// A user review comment, plus an orcha bot comment that must be ignored.
+	f.SetComments(
+		forge.Comment{ExternalID: "c1", Author: "human", Body: "Please rename Foo to Bar.", Kind: "issue_comment"},
+		forge.Comment{ExternalID: "c2", Author: "human", Body: "looks good " + "<!-- orcha-bot -->", Kind: "issue_comment"},
+	)
+
+	spawned, err := o.SyncPRFeedback(context.Background(), pr.ID)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if len(spawned) != 1 {
+		t.Fatalf("expected 1 follow-up for the user comment (bot comment ignored), got %d", len(spawned))
+	}
+	fu := spawned[0]
+	if fu.Role != model.RolePRFollowup {
+		t.Fatalf("expected pr_followup, got %s", fu.Role)
+	}
+	if fu.Mode != model.ModeNoninteractive {
+		t.Fatalf("follow-up should be one-shot, got %s", fu.Mode)
+	}
+	if fu.Metadata["pr_id"] != pr.ID {
+		t.Fatal("follow-up not attached to the PR")
+	}
+
+	// Re-syncing the same comments spawns nothing new (deduped + bot-skipped).
+	again, _ := o.SyncPRFeedback(context.Background(), pr.ID)
+	if len(again) != 0 {
+		t.Fatalf("re-sync should not respawn, got %d", len(again))
+	}
+}

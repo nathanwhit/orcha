@@ -169,10 +169,21 @@ func (o *Orchestrator) mcpPublishPR(ctx context.Context, args map[string]any) (s
 }
 
 func (o *Orchestrator) mcpUpdatePR(ctx context.Context, args map[string]any) (string, error) {
+	// Default the pushing session to the caller (e.g. a follow-up pushing its own
+	// checkout), so the agent need not know its own session/workspace id.
+	sessionID := mcp.StringArg(args, "session_id")
+	if sessionID == "" {
+		sessionID = mcp.SessionFromContext(ctx)
+	}
+	workspaceID := ""
+	if s, err := o.st.GetSession(sessionID); err == nil {
+		workspaceID = s.WorkspaceID
+	}
 	pr, err := o.UpdatePR(ctx, mcp.StringArg(args, "pr_id"), UpdateSpec{
-		SessionID: mcp.StringArg(args, "session_id"),
-		Title:     mcp.StringArg(args, "title"),
-		Body:      mcp.StringArg(args, "body"),
+		SessionID:   sessionID,
+		WorkspaceID: workspaceID,
+		Title:       mcp.StringArg(args, "title"),
+		Body:        mcp.StringArg(args, "body"),
 	})
 	if err != nil {
 		return "", err
