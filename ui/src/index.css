@@ -1,0 +1,59 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0a0d13;
+  --color-surface: #0f141d;
+  --color-raised: #151c27;
+  --color-edge: #1d2632;
+  --color-edge-bright: #2b3848;
+  --color-ink: #e3e9f1;
+  --color-mute: #8b99ac;
+  --color-faint: #5d6b7e;
+  --color-accent: #7c93ff;
+  --color-accent-deep: #4b5fd6;
+
+  --font-sans:
+    "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas,
+    monospace;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-bg text-ink antialiased;
+  font-feature-settings:
+    "cv02",
+    "cv03",
+    "cv11";
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-accent) 35%, transparent);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-edge-bright) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-edge-bright);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Terminal panel: preserve the tmux capture verbatim. */
+.term {
+  @apply font-mono text-[12px] leading-[1.35] whitespace-pre overflow-auto;
+}

@@ -22,6 +22,7 @@ import (
 	"github.com/nathanwhit/orcha/internal/orch"
 	"github.com/nathanwhit/orcha/internal/store"
 	"github.com/nathanwhit/orcha/internal/version"
+	"github.com/nathanwhit/orcha/internal/webui"
 	"github.com/nathanwhit/orcha/internal/workspace"
 )
 
@@ -130,7 +131,8 @@ func main() {
 	// Manager tool surface (MCP). Manager sessions' Claude connects to
 	// /mcp/<sessionID> to drive the orchestrator.
 	mux.Handle("/mcp/", http.StripPrefix("/mcp", o.ManagerMCPHandler()))
-	mux.HandleFunc("/", dashboard)
+	// The dashboard SPA (built from ui/, embedded at compile time).
+	mux.Handle("/", webui.Handler())
 
 	httpSrv := &http.Server{Addr: *addr, Handler: mux}
 
@@ -161,132 +163,4 @@ func ensureLocalTarget(st *store.Store) {
 		CapacitySessions: 4,
 		CPUSummary:       "local",
 	})
-}
-
-const dashboardHTML = `<!doctype html>
-<html><head><meta charset="utf-8"><title>orcha</title>
-<style>
- body{font:13px/1.4 ui-monospace,monospace;margin:0;background:#0d1117;color:#c9d1d9}
- header{padding:8px 12px;background:#161b22;border-bottom:1px solid #30363d}
- .wrap{display:flex}
- main{flex:1;padding:12px}
- aside{width:260px;padding:12px;border-left:1px solid #30363d}
- table{width:100%;border-collapse:collapse}
- td,th{text-align:left;padding:4px 8px;border-bottom:1px solid #21262d}
- .badge{padding:1px 6px;border-radius:8px;background:#30363d}
- .needs{background:#9e6a03}
- h2{font-size:12px;text-transform:uppercase;color:#8b949e}
-</style></head>
-<style>
- #sessions tr{cursor:pointer}
- #sessions tr.sel{background:#1f6feb33}
- #term{background:#000;color:#d0d0d0;padding:8px;border:1px solid #30363d;border-radius:4px;
-   white-space:pre;overflow:auto;max-height:60vh;min-height:120px;font-size:12px}
- .attach{color:#3fb950;font-size:11px;margin:4px 0}
- code{background:#21262d;padding:1px 4px;border-radius:3px}
-</style>
-<body>
-<header><strong>orcha</strong> — agent team orchestrator</header>
-<div class="wrap">
- <main>
-  <h2>New objective</h2>
-  <form id="newobj" onsubmit="return submitObj(event)" style="margin-bottom:14px">
-   <input id="f-title" placeholder="title" required style="width:30%">
-   <input id="f-repo" placeholder="repo (owner/name, optional)" style="width:30%">
-   <input id="f-agent" placeholder="agent (claude/codex)" value="claude" style="width:14%">
-   <br>
-   <textarea id="f-prompt" placeholder="what should the team do?" required style="width:78%;height:48px;margin-top:4px"></textarea>
-   <br><button type="submit">create &amp; start</button>
-   <span id="newmsg" style="color:#3fb950;margin-left:8px"></span>
-  </form>
-  <h2>Objectives</h2>
-  <table id="objs"><thead><tr><th>status</th><th>title</th><th>repo</th>
-   <th>sessions</th><th>PRs</th><th>needs</th><th>activity</th></tr></thead><tbody></tbody></table>
-  <h2>Sessions</h2>
-  <table id="sessions"><thead><tr><th>status</th><th>role</th><th>agent</th><th>mode</th><th>title</th><th>activity</th></tr></thead><tbody></tbody></table>
-  <h2>Live terminal <span id="selname" style="color:#8b949e"></span></h2>
-  <div id="attach" class="attach"></div>
-  <div id="term">select a running session to view its live tmux panel…</div>
- </main>
- <aside>
-  <h2>Targets</h2><div id="targets"></div>
-  <form id="addmachine" onsubmit="return addMachine(event)" style="margin-top:6px;font-size:11px">
-   <input id="m-name" placeholder="name" style="width:46%"> <input id="m-host" placeholder="host" style="width:46%"><br>
-   <input id="m-user" placeholder="user" style="width:30%"> <input id="m-root" placeholder="work root" value="/home/bot/work" style="width:62%"><br>
-   <input id="m-cap" placeholder="capacity" value="2" style="width:30%"> <button type="submit">add ssh machine</button>
-   <span id="mmsg" style="color:#3fb950"></span>
-  </form>
-  <h2>Needs user</h2><div id="questions"></div>
-  <h2>Usage</h2><div id="usage"></div>
- </aside>
-</div>
-<script>
-async function j(u){return (await fetch(u)).json()}
-async function submitObj(e){
- e.preventDefault();
- const body={title:document.getElementById('f-title').value,prompt:document.getElementById('f-prompt').value,
-  agent:document.getElementById('f-agent').value||'claude',repo:document.getElementById('f-repo').value};
- const r=await fetch('/api/objectives',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
- const msg=document.getElementById('newmsg');
- if(r.ok){const d=await r.json();msg.textContent='created '+d.objective.id.slice(0,8)+' — manager starting…';
-  document.getElementById('f-title').value='';document.getElementById('f-prompt').value='';document.getElementById('f-repo').value='';
-  refresh();}
- else{msg.style.color='#f85149';msg.textContent='error: '+r.status;}
- return false;
-}
-async function addMachine(e){
- e.preventDefault();
- const body={name:document.getElementById('m-name').value,kind:'ssh',host:document.getElementById('m-host').value,
-  user:document.getElementById('m-user').value,work_root:document.getElementById('m-root').value,
-  capacity_sessions:parseInt(document.getElementById('m-cap').value||'2')};
- const msg=document.getElementById('mmsg');msg.textContent='checking…';
- const r=await fetch('/api/targets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
- if(r.ok){const d=await r.json();const st=d.target?d.target.status:'?';const miss=(d.doctor&&d.doctor.missing)||[];
-  msg.style.color=st==='online'?'#3fb950':'#f85149';
-  msg.textContent=st+(miss.length?(' — missing: '+miss.join(', ')):'');refresh();}
- else{msg.style.color='#f85149';msg.textContent='error '+r.status;}
- return false;
-}
-let sel=null;
-function pick(id,title){sel=id;document.getElementById('selname').textContent=title?('— '+title):'';drawTerm();
- document.querySelectorAll('#sessions tr').forEach(r=>r.classList.toggle('sel',r.dataset.id===id));}
-async function refresh(){
- const objs=await j('/api/objectives');
- document.querySelector('#objs tbody').innerHTML=objs.map(o=>
-  '<tr><td><span class="badge">'+o.status+'</span></td><td>'+o.title+'</td><td>'+(o.repo||'')+
-  '</td><td>'+o.active_sessions+'</td><td>'+o.pr_count+'</td><td>'+
-  (o.needs_user?'<span class="badge needs">user</span>':'')+'</td><td>'+(o.latest_activity||'')+'</td></tr>').join('');
- const ss=await j('/api/sessions');
- document.querySelector('#sessions tbody').innerHTML=ss.map(s=>
-  '<tr data-id="'+s.id+'" onclick="pick(\''+s.id+'\',\''+(s.title||s.role)+'\')"><td><span class="badge">'+s.status+
-  '</span></td><td>'+s.role+'</td><td>'+s.agent+'</td><td>'+s.mode+'</td><td>'+(s.title||'')+'</td><td>'+(s.current_activity||'')+'</td></tr>').join('');
- if(sel)document.querySelectorAll('#sessions tr').forEach(r=>r.classList.toggle('sel',r.dataset.id===sel));
- const t=await j('/api/targets');
- document.getElementById('targets').innerHTML=t.map(x=>x.name+(x.host?(' ('+(x.user?x.user+'@':'')+x.host+')'):'')+' ['+x.status+'] '+x.available_sessions+'/'+x.capacity_sessions).join('<br>');
- const q=await j('/api/questions');
- document.getElementById('questions').innerHTML=q.length?q.map(x=>'• '+x.question).join('<br>'):'<i>none</i>';
- const u=await j('/api/usage');
- document.getElementById('usage').innerHTML=u.length?u.map(x=>x.provider+': '+x.state).join('<br>'):'<i>n/a</i>';
-}
-async function drawTerm(){
- if(!sel)return;
- const r=await fetch('/api/sessions/'+sel+'/screen');
- const term=document.getElementById('term'),att=document.getElementById('attach');
- if(r.status===204){term.textContent='(no live terminal — session not running or not a tmux session)';att.textContent='';return;}
- const d=await r.json();
- term.textContent=d.screen||'(empty)';
- att.innerHTML=d.attach?('attach live: <code>'+d.attach+'</code>'):'';
-}
-refresh();setInterval(refresh,2000);
-setInterval(drawTerm,1000);
-</script>
-</body></html>`
-
-func dashboard(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(dashboardHTML))
 }

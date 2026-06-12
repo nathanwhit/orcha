@@ -1,0 +1,6 @@
+ui/node_modules/
+orcha.db
+orcha.db-wal
+orcha.db-shm
+internal/webui/dist/*
+!internal/webui/dist/.gitkeep
