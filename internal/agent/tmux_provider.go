@@ -21,6 +21,11 @@ type TmuxConfig struct {
 	// (give a TUI time to come up before typing).
 	SendInitialPrompt bool
 	StartDelay        time.Duration
+	// ResumeCommand builds the argv used when a logical session must be
+	// recreated because its tmux session died (e.g. claude --continue picks the
+	// conversation back up in the same checkout). Nil falls back to Command
+	// with the opening prompt retyped — a cold start.
+	ResumeCommand func(spec Spec) []string
 	// ExecutorFor selects the executor (local/SSH); defaults to ExecutorForTarget.
 	ExecutorFor func(spec Spec) exec.Executor
 	TmuxBin     string
@@ -102,29 +107,8 @@ func (p *TmuxProvider) StartSession(ctx context.Context, spec Spec) (Handle, <-c
 		cancel()
 		return nil, nil, err
 	}
-
-	// Keep a durable raw log of the pane on the target. The transcript does NOT
-	// get per-line pane output: a TUI redraws constantly, so streamed lines are
-	// unreadable fragments. The live view is Snapshot / tmux attach; the log file
-	// is the forensic record.
-	logPath := "/tmp/orcha-tmux-" + sanitizeID(spec.SessionID) + ".log"
-	_ = ctrl.PipePane(runCtx, name, "cat >> "+logPath)
-
-	sess := &tmuxSession{name: name, ctrl: ctrl, cancel: cancel}
-	p.mu.Lock()
-	p.sessions[spec.SessionID] = sess
-	p.mu.Unlock()
-
-	out := make(chan Event, 64)
-
-	// Announce the attachable session up front so a human can watch it live.
-	out <- Event{
-		Kind:     EventStatus,
-		Source:   model.MsgSystem,
-		Content:  "tmux session " + name + " — attach: " + attachCommand(spec.Target, name),
-		Activity: "interactive tmux session " + name,
-		Metadata: model.JSONMap{"tmux_session": name, "tmux_attach": attachCommand(spec.Target, name), "tmux_log": logPath},
-	}
+	out := p.arm(runCtx, cancel, ctrl, name, spec,
+		"tmux session "+name+" — attach: "+attachCommand(spec.Target, name))
 
 	// Type the opening prompt once the program has had time to start.
 	if p.cfg.SendInitialPrompt && spec.Prompt != "" {
@@ -137,6 +121,73 @@ func (p *TmuxProvider) StartSession(ctx context.Context, spec Spec) (Handle, <-c
 			}
 			_ = ctrl.SendKeys(runCtx, name, prompt)
 		}()
+	}
+
+	return &tmuxHandle{sessionID: spec.SessionID}, out, nil
+}
+
+// ResumeSession resumes a logical session, e.g. after an orchestrator restart.
+// tmux sessions outlive the orchestrator process, so if the session is still
+// alive it is ADOPTED as-is: the running TUI keeps its full conversation and
+// nothing is typed into it. Only when the tmux session is gone is a new one
+// created — via ResumeCommand (continuing the prior agent conversation) when
+// configured, else a cold start.
+func (p *TmuxProvider) ResumeSession(ctx context.Context, sessionID string, spec Spec) (Handle, <-chan Event, error) {
+	spec.SessionID = sessionID
+	ex := p.cfg.ExecutorFor(spec)
+	ctrl := tmux.New(ex).WithBinary(p.cfg.TmuxBin).WithSize(p.cfg.Cols, p.cfg.Rows)
+	name := tmux.SessionName(sessionID)
+
+	if alive, _ := ctrl.HasSession(ctx, name); alive {
+		runCtx, cancel := context.WithCancel(ctx)
+		out := p.arm(runCtx, cancel, ctrl, name, spec,
+			"re-adopted live tmux session "+name+" — attach: "+attachCommand(spec.Target, name))
+		return &tmuxHandle{sessionID: sessionID}, out, nil
+	}
+
+	if p.cfg.ResumeCommand != nil {
+		dir := ""
+		if spec.Workspace != nil {
+			dir = spec.Workspace.Path
+		}
+		runCtx, cancel := context.WithCancel(ctx)
+		if err := ctrl.NewSession(runCtx, name, dir, p.cfg.ResumeCommand(spec)); err != nil {
+			cancel()
+			return nil, nil, err
+		}
+		out := p.arm(runCtx, cancel, ctrl, name, spec,
+			"tmux session "+name+" recreated, resuming the prior conversation — attach: "+attachCommand(spec.Target, name))
+		// The resumed conversation already contains the prompt; don't retype it.
+		return &tmuxHandle{sessionID: sessionID}, out, nil
+	}
+	return p.StartSession(ctx, spec)
+}
+
+// arm wires up a (new or adopted) live tmux session: registers it, keeps the
+// raw pane log piping, announces the attach command, and starts the watcher
+// that emits the terminal event when the session ends.
+//
+// The transcript does NOT get per-line pane output: a TUI redraws constantly,
+// so streamed lines are unreadable fragments. The live view is Snapshot / tmux
+// attach; the pipe-pane log file is the forensic record.
+func (p *TmuxProvider) arm(runCtx context.Context, cancel context.CancelFunc, ctrl *tmux.Controller, name string, spec Spec, announce string) chan Event {
+	logPath := "/tmp/orcha-tmux-" + sanitizeID(spec.SessionID) + ".log"
+	_ = ctrl.PipePane(runCtx, name, "cat >> "+logPath) // -o: no-op if already piping
+
+	sess := &tmuxSession{name: name, ctrl: ctrl, cancel: cancel}
+	p.mu.Lock()
+	p.sessions[spec.SessionID] = sess
+	p.mu.Unlock()
+
+	out := make(chan Event, 64)
+
+	// Announce the attachable session up front so a human can watch it live.
+	out <- Event{
+		Kind:     EventStatus,
+		Source:   model.MsgSystem,
+		Content:  announce,
+		Activity: "interactive tmux session " + name,
+		Metadata: model.JSONMap{"tmux_session": name, "tmux_attach": attachCommand(spec.Target, name), "tmux_log": logPath},
 	}
 
 	// Watch for the session to end, then emit the single terminal event and
@@ -166,13 +217,7 @@ func (p *TmuxProvider) StartSession(ctx context.Context, spec Spec) (Handle, <-c
 		out <- Event{Kind: EventDone, Success: success, Content: msg}
 	}()
 
-	return &tmuxHandle{sessionID: spec.SessionID}, out, nil
-}
-
-// ResumeSession recreates the interactive session, preserving the logical id.
-func (p *TmuxProvider) ResumeSession(ctx context.Context, sessionID string, spec Spec) (Handle, <-chan Event, error) {
-	spec.SessionID = sessionID
-	return p.StartSession(ctx, spec)
+	return out
 }
 
 // SendInput types a steering message into the live pane.

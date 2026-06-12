@@ -105,6 +105,16 @@ func NewTmuxClaude(cfg ClaudeConfig) *TmuxProvider {
 			args = append(args, claudeControlArgs(spec)...)
 			return append(args, cfg.ExtraArgs...)
 		},
+		// If the tmux session died, --continue reopens the most recent
+		// conversation in the session's checkout instead of starting cold.
+		ResumeCommand: func(spec Spec) []string {
+			args := []string{bin, "--continue"}
+			if cfg.Model != "" {
+				args = append(args, "--model", cfg.Model)
+			}
+			args = append(args, claudeControlArgs(spec)...)
+			return append(args, cfg.ExtraArgs...)
+		},
 	})
 }
 

@@ -114,3 +114,91 @@ func TestTmuxProvider_Snapshot(t *testing.T) {
 	}
 	t.Fatal("snapshot never showed the typed content")
 }
+
+// An orchestrator restart must ADOPT a still-live tmux session — the TUI keeps
+// its full context — never kill and recreate it.
+func TestTmuxProvider_ResumeAdoptsLiveSession(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	const id = "tmux-adopt-1"
+
+	// First process: start a shell session and put a marker on its screen.
+	p1 := NewTmux(TmuxConfig{Kind: model.AgentOther})
+	h1, ev1, err := p1.StartSession(context.Background(), Spec{SessionID: id})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	go func() {
+		for range ev1 {
+		}
+	}()
+	if err := p1.SendInput(h1, "echo ADOPT-MARKER"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	waitForScreen(t, p1, h1, "ADOPT-MARKER")
+
+	// "Restart": a fresh provider instance with no in-memory state. Resume must
+	// find the live tmux session and adopt it — the marker is still on screen,
+	// which a kill-and-recreate would have wiped.
+	p2 := NewTmux(TmuxConfig{Kind: model.AgentOther})
+	h2, ev2, err := p2.ResumeSession(context.Background(), id, Spec{})
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	sawDone := make(chan bool, 1)
+	adopted := make(chan string, 1)
+	go func() {
+		for ev := range ev2 {
+			switch ev.Kind {
+			case EventStatus:
+				select {
+				case adopted <- ev.Content:
+				default:
+				}
+			case EventDone:
+				select {
+				case sawDone <- ev.Success:
+				default:
+				}
+			}
+		}
+	}()
+	select {
+	case msg := <-adopted:
+		if !strings.Contains(msg, "re-adopted") {
+			t.Fatalf("status = %q, want re-adoption announcement", msg)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no status event after resume")
+	}
+	if screen, err := p2.Snapshot(h2); err != nil || !strings.Contains(screen, "ADOPT-MARKER") {
+		t.Fatalf("adopted screen lost prior context (err=%v):\n%s", err, screen)
+	}
+
+	// The adopted session is fully driveable: steer it and cancel it.
+	if err := p2.SendInput(h2, "echo ADOPT-STEER"); err != nil {
+		t.Fatalf("send after adopt: %v", err)
+	}
+	waitForScreen(t, p2, h2, "ADOPT-STEER")
+	if err := p2.CancelSession(h2); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	select {
+	case <-sawDone:
+	case <-time.After(6 * time.Second):
+		t.Fatal("no done event after cancel")
+	}
+}
+
+func waitForScreen(t *testing.T, p *TmuxProvider, h Handle, want string) {
+	t.Helper()
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) {
+		if screen, err := p.Snapshot(h); err == nil && strings.Contains(screen, want) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("screen never showed %q", want)
+}

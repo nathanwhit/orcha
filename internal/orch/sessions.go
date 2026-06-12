@@ -157,14 +157,18 @@ func (o *Orchestrator) StartRun(ctx context.Context, sessionID string) (*Run, er
 	spec := o.buildSpec(sess, ws, tgt)
 
 	runCtx, cancel := context.WithCancel(ctx)
-	// A session that already has a provider conversation (captured during a
-	// prior run, e.g. before an orchestrator restart) resumes it instead of
-	// starting cold.
+	// A session whose prior run captured a durable provider-side handle — a
+	// provider conversation id, or a tmux session that outlived the process —
+	// RESUMES instead of starting cold. After an orchestrator restart this is
+	// what keeps a manager's context (and its knowledge of already-spawned
+	// workers) intact rather than re-planning from scratch.
 	var (
 		handle agent.Handle
 		events <-chan agent.Event
 	)
-	if pid, _ := sess.Metadata["provider_session_id"].(string); pid != "" {
+	pid, _ := sess.Metadata["provider_session_id"].(string)
+	tmuxName, _ := sess.Metadata["tmux_session"].(string)
+	if pid != "" || tmuxName != "" {
 		handle, events, err = prov.ResumeSession(runCtx, sessionID, spec)
 	} else {
 		handle, events, err = prov.StartSession(runCtx, spec)
