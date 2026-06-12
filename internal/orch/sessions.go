@@ -142,7 +142,15 @@ func (o *Orchestrator) StartRun(ctx context.Context, sessionID string) (*Run, er
 		if err := o.st.AcquireLock(workspaceLockKey(sess.WorkspaceID), model.LockWorkspace, sessionID, "session run"); err != nil {
 			o.releaseTargetSlot(sess)
 			if errors.Is(err, store.ErrLockHeld) {
+				// Not a capacity shortage: another session (typically a sibling
+				// sharing this inherited workspace) holds the single-writer lock.
+				// Record the real reason so the dashboard does not read as "no
+				// machine free" when the targets are idle. The scheduler retries
+				// this session when the lock is released.
 				_, _ = o.st.UpdateSessionStatus(sessionID, model.SessionWaitingCapacity)
+				_, _ = o.st.UpdateSessionRuntime(sessionID, func(s *model.Session) {
+					s.CurrentActivity = "waiting for workspace (in use by another session)"
+				})
 			}
 			return nil, err
 		}

@@ -190,7 +190,12 @@ is complete, COMMIT it yourself with a clear, descriptive commit message
 (conventional-commits style, e.g. "feat: ..."/"fix: ..."/"docs: ...") that
 explains what changed and why — run "git add -A && git commit". Do NOT push or
 open a PR and do NOT amend the git author/identity — the orchestrator publishes
-your commit. Finish with a brief summary of what you changed.`
+your commit.
+A long build or test run is expected and fine — let it finish; do not abandon it
+just because it is slow. Only if a command is genuinely hung (no progress for a
+long time) in code unrelated to your change should you stop waiting on it, say so,
+and proceed.
+Finish with a brief summary of what you changed.`
 
 // managerSystemPreamble orients the manager agent toward the tool surface and
 // the operating rules from the spec.
@@ -207,8 +212,14 @@ references. Do NOT code, commit, or push yourself — workers do the coding in
 their own isolated checkouts; you read, plan, and coordinate.
 Coding workers need a repo: if the objective does not already name one, you
 MUST pass repo (owner/repo) in spawn_session — a coding worker without a repo
-fails to start. If you don't know the repo, ask_user. Keep your messages
-concise and operational.`
+fails to start. If you don't know the repo, ask_user.
+Workers can legitimately take many minutes (long builds and test suites, large
+changes) — that is normal, not a failure. WAIT for a running worker; you are
+notified automatically when it finishes. Do NOT spawn another worker that
+duplicates one already in progress, and do NOT run two workers on the same change
+at once — dependent workers share one branch and will block each other on it. If
+you genuinely need to redo a worker's task, cancel it first, then re-spawn. Keep
+your messages concise and operational.`
 
 // managerContext renders objective-level repo facts into the manager's prompt.
 // The repo lives in objective metadata for workspace prep, but the manager
