@@ -300,7 +300,55 @@ func (g *GitForge) ListComments(ctx context.Context, repo string, number int) ([
 			Author:     r.Author.Login, Body: r.Body, Kind: "review",
 		})
 	}
+	// Inline review-thread comments (left on specific diff lines) are NOT included
+	// in `pr view`'s comments/reviews — they live on the REST pulls/comments
+	// endpoint. Fetch them too so line-level code feedback also drives follow-ups.
+	// Best-effort: a failure here must not drop the issue/review comments above.
+	cs = append(cs, g.listReviewThreadComments(ctx, repo, number)...)
 	return cs, nil
+}
+
+// listReviewThreadComments returns inline (diff-line) review comments via the
+// REST API. Each carries its file:line so the follow-up knows where the request
+// applies. Returns nil on any error — the caller treats inline comments as a
+// best-effort enrichment over the top-level comments.
+func (g *GitForge) listReviewThreadComments(ctx context.Context, repo string, number int) []Comment {
+	out, err := g.gh(ctx, "api",
+		"repos/"+repo+"/pulls/"+strconv.Itoa(number)+"/comments?per_page=100",
+		"-H", "Accept: application/vnd.github+json")
+	if err != nil {
+		return nil
+	}
+	var raw []struct {
+		User struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		Body    string `json:"body"`
+		HTMLURL string `json:"html_url"`
+		Path    string `json:"path"`
+		Line    int    `json:"line"`
+	}
+	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+		return nil
+	}
+	var cs []Comment
+	for _, c := range raw {
+		if strings.TrimSpace(c.Body) == "" {
+			continue
+		}
+		body := c.Body
+		if c.Path != "" {
+			loc := c.Path
+			if c.Line > 0 {
+				loc += ":" + strconv.Itoa(c.Line)
+			}
+			body = "On " + loc + ":\n" + body
+		}
+		cs = append(cs, Comment{
+			ExternalID: c.HTMLURL, Author: c.User.Login, Body: body, Kind: "review_comment",
+		})
+	}
+	return cs
 }
 
 // ---- helpers ----
