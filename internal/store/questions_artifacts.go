@@ -180,6 +180,16 @@ func (s *Store) CancelOpenQuestionsByObjective(objectiveID string) error {
 // CancelOpenQuestionsBySession closes a session's open questions: an answer is
 // delivered to the asking session, so once that session is terminal nobody can
 // ever act on one.
+// HasOpenQuestionBySession reports whether a session has an unanswered question
+// — i.e. it is blocked waiting on the user, not idle-because-finished.
+func (s *Store) HasOpenQuestionBySession(sessionID string) bool {
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM questions WHERE session_id = ? AND status = ?`,
+		sessionID, string(model.QuestionOpen)).Scan(&n)
+	return err == nil && n > 0
+}
+
 func (s *Store) CancelOpenQuestionsBySession(sessionID string) error {
 	_, err := s.db.Exec(
 		`UPDATE questions SET status = ? WHERE session_id = ? AND status = ?`,

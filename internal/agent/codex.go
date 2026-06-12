@@ -16,6 +16,8 @@ type CodexConfig struct {
 	Model       string
 	ExtraArgs   []string
 	ExecutorFor func(spec Spec) exec.Executor
+	// CompletionGate vetoes idle-pane completion in tmux mode (see TmuxConfig).
+	CompletionGate func(sessionID string) bool
 }
 
 // NewCodex builds a real Codex provider backed by `codex exec --json`.
@@ -67,8 +69,9 @@ func NewTmuxCodex(cfg CodexConfig) *TmuxProvider {
 		return append(args, cfg.ExtraArgs...)
 	}
 	return NewTmux(TmuxConfig{
-		Kind:        model.AgentCodex,
-		ExecutorFor: cfg.ExecutorFor,
+		Kind:           model.AgentCodex,
+		ExecutorFor:    cfg.ExecutorFor,
+		CompletionGate: cfg.CompletionGate,
 		Command: func(spec Spec) []string {
 			args := base(spec)
 			if spec.Prompt != "" {

@@ -30,8 +30,14 @@ type TmuxConfig struct {
 	AcceptDialog func(screen string) bool
 	// ExecutorFor selects the executor (local/SSH); defaults to ExecutorForTarget.
 	ExecutorFor func(spec Spec) exec.Executor
-	TmuxBin     string
-	Cols, Rows  int
+	// CompletionGate, when set, vetoes quiescence-based completion: it is consulted
+	// only on the idle-pane fallback (never on the explicit sentinel) and must
+	// return true for the turn to be treated as done. The orchestrator wires it to
+	// "this session has no open question" so a worker that asked the user and is
+	// idle waiting for the answer is not mistaken for finished.
+	CompletionGate func(sessionID string) bool
+	TmuxBin        string
+	Cols, Rows     int
 }
 
 // TmuxProvider runs each session as an interactive program inside a real,
@@ -213,7 +219,7 @@ func (p *TmuxProvider) arm(runCtx context.Context, cancel context.CancelFunc, ct
 		var quietSince time.Time
 		streamer := newPaneStreamer()
 		var lastActivity string
-		ticker := time.NewTicker(2 * time.Second)
+		ticker := time.NewTicker(tmuxPollInterval)
 		defer ticker.Stop()
 	wait:
 		for {
@@ -260,8 +266,15 @@ func (p *TmuxProvider) arm(runCtx context.Context, cancel context.CancelFunc, ct
 					if quietSince.IsZero() {
 						quietSince = time.Now()
 					} else if time.Since(quietSince) >= tmuxIdleComplete {
-						success, completed, finalScreen = true, true, screen
-						break wait
+						// A quiescent pane means "finished" only if the session isn't
+						// blocked waiting on the user. A worker that called ask_user and
+						// is idle at the prompt awaiting an answer looks identical to a
+						// done one — completing it here would kill it and drop the answer.
+						if p.cfg.CompletionGate == nil || p.cfg.CompletionGate(spec.SessionID) {
+							success, completed, finalScreen = true, true, screen
+							break wait
+						}
+						quietSince = time.Time{} // gated (awaiting the user): keep waiting
 					}
 				} else {
 					lastScreen, quietSince = screen, time.Time{}
@@ -292,7 +305,11 @@ func (p *TmuxProvider) arm(runCtx context.Context, cancel context.CancelFunc, ct
 // before the provider concludes the turn is done without a sentinel. Generous
 // on purpose: it is a safety net, not the primary signal, and a working TUI
 // never stays static this long (its spinner/elapsed timer ticks every second).
-const tmuxIdleComplete = 120 * time.Second
+var tmuxIdleComplete = 120 * time.Second
+
+// tmuxPollInterval is how often the watcher captures the pane (for streaming,
+// done detection, and liveness). A var so tests can speed it up.
+var tmuxPollInterval = 2 * time.Second
 
 // trySend delivers a best-effort event without blocking: if the channel buffer
 // is full (a slow consumer), the event is dropped rather than stalling the

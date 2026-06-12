@@ -4,6 +4,7 @@ import (
 	"context"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -444,3 +445,60 @@ func waitForScreenT(t *testing.T, p *TmuxProvider, h Handle, want string, timeou
 	}
 	t.Fatalf("screen never showed %q", want)
 }
+
+// TestTmuxProvider_CompletionGateBlocksIdleCompletion proves that a one-shot
+// session whose pane is idle is NOT completed while the gate is closed (e.g. it
+// asked the user and is waiting on an answer), and IS completed once the gate
+// opens.
+func TestTmuxProvider_CompletionGateBlocksIdleCompletion(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	origIdle, origPoll := tmuxIdleComplete, tmuxPollInterval
+	tmuxIdleComplete, tmuxPollInterval = 300*time.Millisecond, 50*time.Millisecond
+	defer func() { tmuxIdleComplete, tmuxPollInterval = origIdle, origPoll }()
+
+	var gateOpen atomicBool
+	p := NewTmux(TmuxConfig{
+		Kind:           model.AgentOther,
+		CompletionGate: func(string) bool { return gateOpen.get() },
+	})
+	h, events, err := p.StartSession(context.Background(), Spec{SessionID: "tmux-gate-1", OneShot: true})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer p.CancelSession(h)
+	done := make(chan bool, 1)
+	go func() {
+		for ev := range events {
+			if ev.Kind == EventDone {
+				select {
+				case done <- ev.Success:
+				default:
+				}
+			}
+		}
+	}()
+
+	// Idle pane + closed gate: must NOT complete even after the quiescence window.
+	select {
+	case <-done:
+		t.Fatal("completed while the gate was closed (worker still awaiting the user)")
+	case <-time.After(2 * time.Second):
+	}
+	// Open the gate: it completes.
+	gateOpen.set(true)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("did not complete after the gate opened")
+	}
+}
+
+type atomicBool struct {
+	mu sync.Mutex
+	v  bool
+}
+
+func (a *atomicBool) set(v bool) { a.mu.Lock(); a.v = v; a.mu.Unlock() }
+func (a *atomicBool) get() bool  { a.mu.Lock(); defer a.mu.Unlock(); return a.v }

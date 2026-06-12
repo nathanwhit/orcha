@@ -58,14 +58,15 @@ func (o *Orchestrator) ManagerMCPHandler() http.Handler {
 	})
 	s.AddTool(mcp.Tool{
 		Name:        "update_pr",
-		Description: "Push follow-up changes to an existing PR (branch-safe: never pushes to a merged PR).",
+		Description: "Push follow-up changes to an existing PR (branch-safe: never pushes to a merged PR). After a rebase (which rewrites history) set force=true, or the push is rejected as non-fast-forward.",
 		InputSchema: obj(map[string]any{
 			"pr_id":          str,
 			"session_id":     str,
 			"title":          str,
 			"body":           str,
 			"commit_message": map[string]any{"type": "string", "description": "used only if you left changes uncommitted; prefer committing yourself with git"},
-			"push_changes":   map[string]any{"type": "boolean"},
+			"force":          map[string]any{"type": "boolean", "description": "force-push (--force-with-lease); required after a rebase or any history rewrite"},
+			"force_reason":   map[string]any{"type": "string", "description": "why a force push is needed (e.g. 'rebased onto main to resolve conflicts')"},
 		}, "pr_id"),
 		Handler: o.mcpUpdatePR,
 	})
@@ -184,12 +185,21 @@ func (o *Orchestrator) mcpUpdatePR(ctx context.Context, args map[string]any) (st
 	if s, err := o.st.GetSession(sessionID); err == nil {
 		workspaceID = s.WorkspaceID
 	}
+	force := mcp.BoolArg(args, "force")
+	reason := mcp.StringArg(args, "force_reason")
+	if force && reason == "" {
+		// UpdatePR requires a reason with a force push; supply a sensible default
+		// so an agent that force-pushes after a rebase isn't blocked on wording.
+		reason = "force update after history rewrite (e.g. rebase to resolve conflicts)"
+	}
 	pr, err := o.UpdatePR(ctx, mcp.StringArg(args, "pr_id"), UpdateSpec{
 		SessionID:     sessionID,
 		WorkspaceID:   workspaceID,
 		Title:         mcp.StringArg(args, "title"),
 		Body:          mcp.StringArg(args, "body"),
 		CommitMessage: mcp.StringArg(args, "commit_message"),
+		Force:         force,
+		ForceReason:   reason,
 	})
 	if err != nil {
 		return "", err

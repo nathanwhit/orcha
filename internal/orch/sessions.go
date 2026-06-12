@@ -382,6 +382,15 @@ func (o *Orchestrator) notifyManagerOfChild(childID string, success bool) {
 	_ = o.Steer(context.Background(), mgr.ID, msg)
 }
 
+// CompletionAllowed reports whether a tmux session may be treated as finished
+// when its pane goes idle. It is false while the session has an open question —
+// the agent called ask_user and is waiting on the answer, not done. Wired into
+// the tmux providers' CompletionGate so a waiting worker isn't killed (which
+// would drop the user's pending answer).
+func (o *Orchestrator) CompletionAllowed(sessionID string) bool {
+	return !o.st.HasOpenQuestionBySession(sessionID)
+}
+
 // hasPendingDependents reports whether any non-terminal session for the
 // objective depends on sessionID — i.e. work that continues this one's branch is
 // still queued or running, so its slice is not finished.

@@ -15,6 +15,7 @@ import (
 
 	"github.com/nathanwhit/orcha/internal/agent"
 	"github.com/nathanwhit/orcha/internal/forge"
+	"github.com/nathanwhit/orcha/internal/mcp"
 	"github.com/nathanwhit/orcha/internal/model"
 	"github.com/nathanwhit/orcha/internal/store"
 	"github.com/nathanwhit/orcha/internal/workspace"
@@ -1432,5 +1433,32 @@ func TestConflictingPR_SpawnsRebaseFollowup(t *testing.T) {
 	again, _ := o.ProcessFeedback(context.Background(), pr.ID)
 	if len(again) != 0 {
 		t.Fatalf("the same conflict must not re-spawn, got %d", len(again))
+	}
+}
+
+func TestUpdatePR_ForcePushViaMCP(t *testing.T) {
+	o, st := newTestOrch(t)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	f := forge.NewFake()
+	o.SetForge(f)
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+
+	ws := &model.Workspace{ObjectiveID: obj.ID, Kind: model.WorkspacePRBranch, ProjectPath: "octo/repo",
+		VCS: model.VCSGit, BranchName: "orcha/impl-x", Path: "/tmp/pr-3", Status: model.WorkspaceReady}
+	_ = st.CreateWorkspace(ws)
+	fu := &model.Session{ObjectiveID: obj.ID, Role: model.RolePRFollowup, Agent: model.AgentClaude,
+		Status: model.SessionRunning, WorkspaceID: ws.ID}
+	_ = st.CreateSession(fu)
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "octo/repo", Number: 3, Branch: "orcha/impl-x",
+		BaseBranch: "main", Status: model.PROpen}
+	_ = st.CreatePR(pr)
+
+	// A rebase follow-up force-pushes its rewritten branch via update_pr.
+	ctx := mcp.WithSession(context.Background(), fu.ID)
+	if _, err := o.mcpUpdatePR(ctx, map[string]any{"pr_id": pr.ID, "force": true}); err != nil {
+		t.Fatalf("update_pr force: %v", err)
+	}
+	if len(f.ForcePush) == 0 {
+		t.Fatal("update_pr with force=true should have force-pushed the branch")
 	}
 }

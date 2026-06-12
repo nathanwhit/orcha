@@ -81,8 +81,8 @@ func main() {
 		// Each session is an interactive TUI inside a real, attachable tmux
 		// session. Watch or take over any session with `tmux attach -t orcha-<id>`
 		// (the attach command is recorded on each session).
-		o.RegisterProvider(agent.NewTmuxClaude(agent.ClaudeConfig{Binary: *claudeBin}))
-		o.RegisterProvider(agent.NewTmuxCodex(agent.CodexConfig{Binary: *codexBin}))
+		o.RegisterProvider(agent.NewTmuxClaude(agent.ClaudeConfig{Binary: *claudeBin, CompletionGate: o.CompletionAllowed}))
+		o.RegisterProvider(agent.NewTmuxCodex(agent.CodexConfig{Binary: *codexBin, CompletionGate: o.CompletionAllowed}))
 		log.Println("using tmux interactive TUIs (attach: tmux attach -t orcha-<sessionID>)")
 	default:
 		// Real CLIs, headless. Claude runs as a persistent interactive stream-json

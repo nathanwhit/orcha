@@ -246,3 +246,19 @@ func TestDeduplicatePRs(t *testing.T) {
 		t.Fatalf("the surviving #7 should be findable, got %v %v", pr, err)
 	}
 }
+
+func TestHasOpenQuestionBySession(t *testing.T) {
+	st := newTestStore(t)
+	if st.HasOpenQuestionBySession("s1") {
+		t.Fatal("no question yet")
+	}
+	q := &model.Question{SessionID: "s1", Question: "which repo?"}
+	_ = st.CreateQuestion(q)
+	if !st.HasOpenQuestionBySession("s1") {
+		t.Fatal("an open question should be reported")
+	}
+	_, _ = st.AnswerQuestion(q.ID, "octo/repo")
+	if st.HasOpenQuestionBySession("s1") {
+		t.Fatal("an answered question is no longer open")
+	}
+}
