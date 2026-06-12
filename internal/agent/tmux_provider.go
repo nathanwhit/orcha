@@ -17,14 +17,17 @@ type TmuxConfig struct {
 	// Command builds the interactive argv run inside the tmux pane. An empty
 	// result launches the target's default shell — a real interactive shell.
 	Command func(spec Spec) []string
-	// SendInitialPrompt delivers the session prompt to the TUI once its pane
-	// has rendered (readiness is observed, not timed).
-	SendInitialPrompt bool
 	// ResumeCommand builds the argv used when a logical session must be
 	// recreated because its tmux session died (e.g. claude --continue picks the
-	// conversation back up in the same checkout). Nil falls back to Command
-	// with the opening prompt retyped — a cold start.
+	// conversation back up in the same checkout). Nil falls back to Command —
+	// a cold start.
 	ResumeCommand func(spec Spec) []string
+	// AcceptDialog reports whether the screen shows a blocking startup dialog
+	// that should be accepted with Enter (e.g. claude's "Do you trust the files
+	// in this folder?"). The opening prompt is passed as a positional argument,
+	// which the TUI queues and submits itself once unblocked — so accepting a
+	// dialog can never eat the prompt.
+	AcceptDialog func(screen string) bool
 	// ExecutorFor selects the executor (local/SSH); defaults to ExecutorForTarget.
 	ExecutorFor func(spec Spec) exec.Executor
 	TmuxBin     string
@@ -56,13 +59,19 @@ func NewTmux(cfg TmuxConfig) *TmuxProvider {
 func (p *TmuxProvider) Kind() model.AgentKind { return p.cfg.Kind }
 
 // NewTmuxAgent builds a tmux provider that runs an agent's interactive TUI
-// (e.g. ["codex"] or ["claude"]) in an attachable session and types the opening
-// prompt into it. binArgs is the argv of the interactive program.
+// (e.g. ["codex"] or ["claude"]) in an attachable session. The opening prompt
+// is passed as a positional argument — both CLIs accept one and submit it
+// themselves once the TUI is up, so delivery never depends on typing into a
+// possibly-not-ready (or dialog-blocked) screen.
 func NewTmuxAgent(kind model.AgentKind, binArgs ...string) *TmuxProvider {
 	return NewTmux(TmuxConfig{
-		Kind:              kind,
-		Command:           func(Spec) []string { return binArgs },
-		SendInitialPrompt: true,
+		Kind: kind,
+		Command: func(spec Spec) []string {
+			if spec.Prompt != "" {
+				return append(append([]string{}, binArgs...), spec.Prompt)
+			}
+			return binArgs
+		},
 	})
 }
 
@@ -104,21 +113,38 @@ func (p *TmuxProvider) StartSession(ctx context.Context, spec Spec) (Handle, <-c
 	out := p.arm(runCtx, cancel, ctrl, name, spec,
 		"tmux session "+name+" — attach: "+attachCommand(spec.Target, name))
 
-	// Deliver the opening prompt once the program is observably up. Input sent
-	// before a TUI attaches its stdin reader is dropped (a remote cold start
-	// takes several seconds), so wait for the pane to paint — a readiness
-	// signal, not a guessed delay.
-	if p.cfg.SendInitialPrompt && spec.Prompt != "" {
-		prompt := spec.Prompt
-		go func() {
-			if !waitForPaint(runCtx, ctrl, name) {
-				return // canceled before the program ever rendered
-			}
-			_ = ctrl.SendKeys(runCtx, name, prompt)
-		}()
+	// Accept known blocking startup dialogs (e.g. the folder trust prompt a
+	// fresh checkout always triggers). The opening prompt rides in argv, so
+	// pressing Enter on a dialog cannot eat it — the TUI submits the queued
+	// prompt itself once unblocked.
+	if p.cfg.AcceptDialog != nil {
+		go p.watchDialogs(runCtx, ctrl, name)
 	}
 
 	return &tmuxHandle{sessionID: spec.SessionID}, out, nil
+}
+
+// watchDialogs polls the pane during startup and presses Enter whenever the
+// configured blocking dialog is visible. Bounded: these dialogs are a startup
+// phenomenon, so watching stops after a couple of minutes (covering slow
+// remote cold starts) — it is a watchdog for a known screen state, not a
+// delivery delay.
+func (p *TmuxProvider) watchDialogs(ctx context.Context, ctrl *tmux.Controller, name string) {
+	deadline := time.Now().Add(2 * time.Minute)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second):
+		}
+		screen, err := ctrl.CapturePane(ctx, name)
+		if err != nil {
+			continue
+		}
+		if p.cfg.AcceptDialog(screen) {
+			_ = ctrl.SendRaw(ctx, name, "Enter")
+		}
+	}
 }
 
 // ResumeSession resumes a logical session, e.g. after an orchestrator restart.
@@ -150,7 +176,10 @@ func (p *TmuxProvider) ResumeSession(ctx context.Context, sessionID string, spec
 		}
 		out := p.arm(runCtx, cancel, ctrl, name, spec,
 			"tmux session "+name+" recreated, resuming the prior conversation — attach: "+attachCommand(spec.Target, name))
-		// The resumed conversation already contains the prompt; don't retype it.
+		if p.cfg.AcceptDialog != nil {
+			go p.watchDialogs(runCtx, ctrl, name)
+		}
+		// The resumed conversation already contains the prompt; don't repass it.
 		return &tmuxHandle{sessionID: sessionID}, out, nil
 	}
 	return p.StartSession(ctx, spec)
@@ -285,20 +314,4 @@ func attachCommand(t *model.Target, name string) string {
 
 func sanitizeID(s string) string {
 	return strings.NewReplacer(".", "-", ":", "-", "/", "-").Replace(s)
-}
-
-// waitForPaint blocks until the pane has rendered content — the observable
-// signal that the program inside is up and reading input. Returns false if the
-// context ended first. The 200ms is a poll interval, not a readiness guess.
-func waitForPaint(ctx context.Context, ctrl *tmux.Controller, name string) bool {
-	for {
-		if screen, err := ctrl.CapturePane(ctx, name); err == nil && strings.TrimSpace(screen) != "" {
-			return true
-		}
-		select {
-		case <-ctx.Done():
-			return false
-		case <-time.After(200 * time.Millisecond):
-		}
-	}
 }

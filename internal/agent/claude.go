@@ -84,33 +84,43 @@ func claudeControlArgs(spec Spec) []string {
 // NewTmuxClaude runs Claude's interactive TUI inside an attachable tmux session,
 // wired with the same per-session MCP/tool flags as the headless launcher — so
 // an attachable manager can also drive the orchestrator. The opening prompt is
-// typed into the TUI.
+// passed as a positional argument (`claude "prompt"`), which the TUI queues and
+// submits itself once it is up — it survives the folder trust dialog, which a
+// fresh checkout always triggers and the provider auto-accepts.
 func NewTmuxClaude(cfg ClaudeConfig) *TmuxProvider {
 	bin := cfg.Binary
 	if bin == "" {
 		bin = "claude"
 	}
+	base := func(spec Spec, lead ...string) []string {
+		args := append([]string{bin}, lead...)
+		if cfg.Model != "" {
+			args = append(args, "--model", cfg.Model)
+		}
+		args = append(args, claudeControlArgs(spec)...)
+		return append(args, cfg.ExtraArgs...)
+	}
 	return NewTmux(TmuxConfig{
-		Kind:              model.AgentClaude,
-		SendInitialPrompt: true,
-		ExecutorFor:       cfg.ExecutorFor,
+		Kind:        model.AgentClaude,
+		ExecutorFor: cfg.ExecutorFor,
 		Command: func(spec Spec) []string {
-			args := []string{bin}
-			if cfg.Model != "" {
-				args = append(args, "--model", cfg.Model)
+			args := base(spec)
+			if spec.Prompt != "" {
+				args = append(args, spec.Prompt)
 			}
-			args = append(args, claudeControlArgs(spec)...)
-			return append(args, cfg.ExtraArgs...)
+			return args
 		},
 		// If the tmux session died, --continue reopens the most recent
-		// conversation in the session's checkout instead of starting cold.
+		// conversation in the session's checkout instead of starting cold (the
+		// prompt is already part of that conversation).
 		ResumeCommand: func(spec Spec) []string {
-			args := []string{bin, "--continue"}
-			if cfg.Model != "" {
-				args = append(args, "--model", cfg.Model)
-			}
-			args = append(args, claudeControlArgs(spec)...)
-			return append(args, cfg.ExtraArgs...)
+			return base(spec, "--continue")
+		},
+		// The trust dialog's phrasing varies across claude versions; the accept
+		// option label is the stable marker.
+		AcceptDialog: func(screen string) bool {
+			return strings.Contains(screen, "Yes, I trust this folder") ||
+				strings.Contains(screen, "Do you trust the files in this folder?")
 		},
 	})
 }

@@ -202,3 +202,43 @@ func waitForScreen(t *testing.T, p *TmuxProvider, h Handle, want string) {
 	}
 	t.Fatalf("screen never showed %q", want)
 }
+
+// A blocking startup dialog (like claude's folder trust prompt) is accepted by
+// the dialog watcher; the program proceeds without any typed input.
+func TestTmuxProvider_AcceptsStartupDialog(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	// A stand-in TUI: shows the trust question, blocks on Enter, then proceeds.
+	script := `echo "Do you trust the files in this folder?"; read line; echo DIALOG-ACCEPTED; sleep 60`
+	p := NewTmux(TmuxConfig{
+		Kind:    model.AgentOther,
+		Command: func(Spec) []string { return []string{"sh", "-c", script} },
+		AcceptDialog: func(screen string) bool {
+			return strings.Contains(screen, "Do you trust the files in this folder?") &&
+				!strings.Contains(screen, "DIALOG-ACCEPTED")
+		},
+	})
+	h, events, err := p.StartSession(context.Background(), Spec{SessionID: "tmux-dialog-1"})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	go func() {
+		for range events {
+		}
+	}()
+	defer p.CancelSession(h)
+	waitForScreenT(t, p, h, "DIALOG-ACCEPTED", 8*time.Second)
+}
+
+func waitForScreenT(t *testing.T, p *TmuxProvider, h Handle, want string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if screen, err := p.Snapshot(h); err == nil && strings.Contains(screen, want) {
+			return
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	t.Fatalf("screen never showed %q", want)
+}
