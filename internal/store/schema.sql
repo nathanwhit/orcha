@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     target_id          TEXT,
     workspace_id       TEXT,
     usage_provider     TEXT,
+    used_tokens        INTEGER NOT NULL DEFAULT 0,
     created_at         TIMESTAMP NOT NULL,
     started_at         TIMESTAMP,
     updated_at         TIMESTAMP NOT NULL,

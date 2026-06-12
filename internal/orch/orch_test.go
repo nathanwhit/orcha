@@ -1474,3 +1474,50 @@ func TestUpdatePR_ForcePushViaMCP(t *testing.T) {
 		t.Fatal("update_pr with force=true should have force-pushed the branch")
 	}
 }
+
+// recordUsage must increment the session's running token total while still
+// crediting the provider usage bucket — the per-session counter is additive,
+// not a replacement for the scheduling buckets.
+func TestRecordUsage_IncrementsSessionAndProviderBucket(t *testing.T) {
+	o, st := newTestOrch(t)
+	s := &model.Session{Role: model.RoleImplementer, Agent: model.AgentClaude, Status: model.SessionRunning}
+	if err := st.CreateSession(s); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	o.recordUsage(s.ID, 120)
+
+	// Session total reflects the usage.
+	got, err := st.SessionUsedTokens(s.ID)
+	if err != nil {
+		t.Fatalf("session tokens: %v", err)
+	}
+	if got != 120 {
+		t.Fatalf("session used=%d, want 120", got)
+	}
+
+	// Provider bucket behavior is unchanged: the claude bucket still got 120.
+	buckets, _ := st.ListUsage()
+	var providerTotal int64
+	for _, b := range buckets {
+		if b.Provider == string(model.AgentClaude) {
+			providerTotal += b.UsedTokens
+		}
+	}
+	if providerTotal != 120 {
+		t.Fatalf("provider bucket=%d, want 120", providerTotal)
+	}
+
+	// A second call accumulates on both counters.
+	o.recordUsage(s.ID, 30)
+	if got, _ := st.SessionUsedTokens(s.ID); got != 150 {
+		t.Fatalf("session used=%d after second call, want 150", got)
+	}
+
+	// Non-positive token counts are ignored on both counters.
+	o.recordUsage(s.ID, 0)
+	o.recordUsage(s.ID, -5)
+	if got, _ := st.SessionUsedTokens(s.ID); got != 150 {
+		t.Fatalf("session used=%d after no-op calls, want 150", got)
+	}
+}

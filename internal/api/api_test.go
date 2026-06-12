@@ -149,6 +149,45 @@ func TestQuestionAnswerFlow_UpdatesObjective(t *testing.T) {
 	}
 }
 
+// The dedicated usage endpoint and the session JSON must both expose token
+// totals so the dashboard can render per-objective and per-session usage.
+func TestObjectiveUsage_EndpointAndSessionField(t *testing.T) {
+	srv, o, st := newTestServer(t)
+	obj, mgr, err := o.CreateObjective(orch.NewObjectiveSpec{Title: "U", Prompt: "p", Agent: model.AgentClaude})
+	if err != nil {
+		t.Fatalf("create objective: %v", err)
+	}
+	if err := st.AddSessionTokens(mgr.ID, 1234); err != nil {
+		t.Fatalf("add tokens: %v", err)
+	}
+
+	var usage model.ObjectiveUsage
+	getJSON(t, srv.URL+"/api/objectives/"+obj.ID+"/usage", &usage)
+	if usage.TotalTokens != 1234 {
+		t.Fatalf("total=%d, want 1234", usage.TotalTokens)
+	}
+	if len(usage.Providers) != 1 || usage.Providers[0].Provider != string(model.AgentClaude) ||
+		usage.Providers[0].UsedTokens != 1234 {
+		t.Fatalf("provider breakdown wrong: %+v", usage.Providers)
+	}
+
+	// model.Session JSON (GET /api/sessions/{id}) carries used_tokens.
+	var sess model.Session
+	getJSON(t, srv.URL+"/api/sessions/"+mgr.ID, &sess)
+	if sess.UsedTokens != 1234 {
+		t.Fatalf("session used_tokens=%d, want 1234", sess.UsedTokens)
+	}
+
+	// Objective detail embeds the same usage summary.
+	var detail struct {
+		Usage model.ObjectiveUsage `json:"usage"`
+	}
+	getJSON(t, srv.URL+"/api/objectives/"+obj.ID, &detail)
+	if detail.Usage.TotalTokens != 1234 {
+		t.Fatalf("detail usage total=%d, want 1234", detail.Usage.TotalTokens)
+	}
+}
+
 func TestTargetStatus_AppearsAndDrains(t *testing.T) {
 	srv, _, st := newTestServer(t)
 	tgt := &model.Target{Name: "remote-1", Kind: model.TargetSSH, Status: model.TargetOnline,

@@ -35,6 +35,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/objectives", s.listObjectives)
 	mux.HandleFunc("POST /api/objectives", s.createObjective)
 	mux.HandleFunc("GET /api/objectives/{id}", s.getObjective)
+	mux.HandleFunc("GET /api/objectives/{id}/usage", s.objectiveUsage)
 	mux.HandleFunc("POST /api/objectives/{id}/steer", s.steerObjective)
 	mux.HandleFunc("POST /api/objectives/{id}/cancel", s.cancelObjective)
 
@@ -273,6 +274,7 @@ func (s *Server) getObjective(w http.ResponseWriter, r *http.Request) {
 	prs, _ := s.st.ListPRsByObjective(id)
 	questions, _ := s.st.ListQuestionsByObjective(id)
 	artifacts, _ := s.st.ListArtifactsByObjective(id)
+	usage, _ := s.st.ObjectiveUsage(id)
 	// Lists are never null in the JSON contract (a Go nil slice encodes as
 	// null, which clients then call array methods on).
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -281,7 +283,24 @@ func (s *Server) getObjective(w http.ResponseWriter, r *http.Request) {
 		"pull_requests": orEmpty(prs),
 		"questions":     orEmpty(questions),
 		"artifacts":     orEmpty(artifacts),
+		"usage":         usage,
 	})
+}
+
+// objectiveUsage returns the aggregate token usage for one objective: a grand
+// total with per-session and per-provider breakdowns. The objective detail
+// payload also embeds this, but the dedicated endpoint lets the UI poll usage
+// alone without refetching the whole detail.
+func (s *Server) objectiveUsage(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	usage, err := s.st.ObjectiveUsage(id)
+	if err != nil {
+		writeErr(w, httpStatusFor(err), err)
+		return
+	}
+	usage.Sessions = orEmpty(usage.Sessions)
+	usage.Providers = orEmpty(usage.Providers)
+	writeJSON(w, http.StatusOK, usage)
 }
 
 // orEmpty coalesces a nil slice to an empty one so it encodes as [] not null.

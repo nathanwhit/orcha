@@ -37,6 +37,7 @@ export interface DashboardSession {
   title: string;
   target_id: string;
   current_activity: string;
+  used_tokens: number;
   updated_at: string;
 }
 
@@ -54,6 +55,7 @@ export interface Session {
   latest_summary?: string;
   target_id?: string;
   workspace_id?: string;
+  used_tokens: number;
   created_at: string;
   started_at?: string;
   updated_at: string;
@@ -187,12 +189,44 @@ export interface Health {
   time: string;
 }
 
+export interface SessionUsageBreakdown {
+  session_id: string;
+  title: string;
+  role: string;
+  provider: string;
+  used_tokens: number;
+}
+
+export interface ProviderUsageTotal {
+  provider: string;
+  used_tokens: number;
+}
+
+export interface ObjectiveUsageSummary {
+  objective_id: string;
+  total_tokens: number;
+  sessions: SessionUsageBreakdown[];
+  providers: ProviderUsageTotal[];
+}
+
 export interface ObjectiveDetail {
   objective: Objective;
   sessions: DashboardSession[];
   pull_requests: PullRequest[];
   questions: Question[];
   artifacts: Artifact[];
+  usage?: ObjectiveUsageSummary;
+}
+
+// Compact token formatter, e.g. 1234 -> "1.2k", 2_500_000 -> "2.5M".
+export function formatTokens(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) {
+    const k = n / 1000;
+    return `${k >= 100 ? Math.round(k) : k.toFixed(1)}k`;
+  }
+  const m = n / 1_000_000;
+  return `${m >= 100 ? Math.round(m) : m.toFixed(1)}M`;
 }
 
 export interface Screen {

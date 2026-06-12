@@ -213,6 +213,99 @@ func TestMessagesAfter_Incremental(t *testing.T) {
 	}
 }
 
+func TestAddSessionTokens_Accumulates(t *testing.T) {
+	st := newTestStore(t)
+	s := mkSession(t, st, model.SessionRunning)
+	if err := st.AddSessionTokens(s.ID, 10); err != nil {
+		t.Fatalf("add 10: %v", err)
+	}
+	if err := st.AddSessionTokens(s.ID, 5); err != nil {
+		t.Fatalf("add 5: %v", err)
+	}
+	n, err := st.SessionUsedTokens(s.ID)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if n != 15 {
+		t.Fatalf("used=%d, want 15", n)
+	}
+}
+
+// ObjectiveUsage must sum only the sessions of the given objective and break the
+// total down by session and by provider, where usage_provider overrides agent.
+func TestObjectiveUsage_AggregatesAndScopes(t *testing.T) {
+	st := newTestStore(t)
+	objA := &model.Objective{Title: "A", Prompt: "p"}
+	objB := &model.Objective{Title: "B", Prompt: "p"}
+	if err := st.CreateObjective(objA); err != nil {
+		t.Fatalf("create A: %v", err)
+	}
+	if err := st.CreateObjective(objB); err != nil {
+		t.Fatalf("create B: %v", err)
+	}
+
+	// objA: claude agent, no override.
+	s1 := &model.Session{ObjectiveID: objA.ID, Role: model.RoleImplementer,
+		Agent: model.AgentClaude, Status: model.SessionRunning, Title: "impl"}
+	// objA: codex agent, but usage_provider overrides the provider to claude.
+	s2 := &model.Session{ObjectiveID: objA.ID, Role: model.RoleReviewer,
+		Agent: model.AgentCodex, UsageProvider: "claude", Status: model.SessionRunning, Title: "review"}
+	// objA: codex agent, no override.
+	s3 := &model.Session{ObjectiveID: objA.ID, Role: model.RoleValidator,
+		Agent: model.AgentCodex, Status: model.SessionRunning, Title: "validate"}
+	// objB: must never leak into objA's totals.
+	s4 := &model.Session{ObjectiveID: objB.ID, Role: model.RoleImplementer,
+		Agent: model.AgentClaude, Status: model.SessionRunning, Title: "other"}
+	for _, s := range []*model.Session{s1, s2, s3, s4} {
+		if err := st.CreateSession(s); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+	}
+	for id, n := range map[string]int64{s1.ID: 100, s2.ID: 50, s3.ID: 25, s4.ID: 9999} {
+		if err := st.AddSessionTokens(id, n); err != nil {
+			t.Fatalf("add tokens: %v", err)
+		}
+	}
+
+	u, err := st.ObjectiveUsage(objA.ID)
+	if err != nil {
+		t.Fatalf("usage: %v", err)
+	}
+	if u.TotalTokens != 175 {
+		t.Fatalf("total=%d, want 175 (objB's 9999 must be excluded)", u.TotalTokens)
+	}
+	if len(u.Sessions) != 3 {
+		t.Fatalf("want 3 session rows, got %d", len(u.Sessions))
+	}
+
+	// Per-provider: claude = s1(100) + s2(50, via usage_provider override) = 150;
+	// codex = s3(25).
+	byProvider := map[string]int64{}
+	for _, p := range u.Providers {
+		byProvider[p.Provider] = p.UsedTokens
+	}
+	if byProvider["claude"] != 150 {
+		t.Fatalf("claude=%d, want 150 (s2's override must count as claude)", byProvider["claude"])
+	}
+	if byProvider["codex"] != 25 {
+		t.Fatalf("codex=%d, want 25", byProvider["codex"])
+	}
+
+	// Per-session provider reflects the override for s2 and the agent for s3.
+	for _, b := range u.Sessions {
+		switch b.SessionID {
+		case s2.ID:
+			if b.Provider != "claude" {
+				t.Fatalf("s2 provider=%q, want claude (usage_provider override)", b.Provider)
+			}
+		case s3.ID:
+			if b.Provider != "codex" {
+				t.Fatalf("s3 provider=%q, want codex (falls back to agent)", b.Provider)
+			}
+		}
+	}
+}
+
 func TestObjectiveTerminalIsFinal(t *testing.T) {
 	st := newTestStore(t)
 	obj := &model.Objective{Title: "x", Prompt: "p"}
