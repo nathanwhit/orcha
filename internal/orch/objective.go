@@ -90,5 +90,8 @@ func (o *Orchestrator) CancelObjective(objectiveID, summary string) error {
 			_ = o.Cancel(s.ID, true)
 		}
 	}
+	// Close open questions too: a canceled objective must not keep the
+	// "needs you" flag raised over questions nobody will act on.
+	_ = o.st.CancelOpenQuestionsByObjective(objectiveID)
 	return o.st.UpdateObjectiveStatus(objectiveID, model.ObjectiveCanceled, summary)
 }

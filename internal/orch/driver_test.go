@@ -264,3 +264,66 @@ func TestRecoverInterruptedRequeuesAndRestarts(t *testing.T) {
 		return fresh.Status == model.SessionRunning || fresh.Status.IsTerminal()
 	})
 }
+
+// An orchestrator shutdown must not bury live sessions: the provider's
+// failure done event (emitted when the run context is canceled) used to mark
+// them failed — terminal — so restart recovery never resumed them.
+func TestShutdownLeavesRunningSessionsRecoverable(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	// A provider that models the tmux watcher: it emits a failure done when
+	// its context is canceled (e.g. the process is shutting down).
+	script := func(ctx context.Context, spec agent.Spec, in <-chan string, out chan<- agent.Event) {
+		select {
+		case out <- agent.Event{Kind: agent.EventStatus, Activity: "running"}:
+		case <-ctx.Done():
+		}
+		<-ctx.Done()
+		out <- agent.Event{Kind: agent.EventDone, Success: false, Content: "tmux session canceled"}
+	}
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, script))
+
+	s := &model.Session{Role: model.RoleManager, Agent: model.AgentClaude, Status: model.SessionQueued, Goal: "g"}
+	if err := st.CreateSession(s); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	run, err := o.StartRun(ctx, s.ID)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitFor(t, func() bool {
+		fresh, _ := st.GetSession(s.ID)
+		return fresh.Status == model.SessionRunning
+	})
+
+	cancel() // the shutdown
+	run.Wait()
+
+	fresh, _ := st.GetSession(s.ID)
+	if fresh.Status != model.SessionRunning {
+		t.Fatalf("status after shutdown = %s, want running (recoverable)", fresh.Status)
+	}
+	// And recovery picks it up.
+	if n := o.RecoverInterrupted(); n != 1 {
+		t.Fatalf("recovered %d, want 1", n)
+	}
+
+	// An EXPLICIT cancel still lands on canceled, not running.
+	s2 := &model.Session{Role: model.RoleManager, Agent: model.AgentClaude, Status: model.SessionQueued, Goal: "g"}
+	_ = st.CreateSession(s2)
+	if _, err := o.StartRun(context.Background(), s2.ID); err != nil {
+		t.Fatalf("start2: %v", err)
+	}
+	waitFor(t, func() bool {
+		fresh, _ := st.GetSession(s2.ID)
+		return fresh.Status == model.SessionRunning
+	})
+	if err := o.Cancel(s2.ID, false); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	waitFor(t, func() bool {
+		fresh, _ := st.GetSession(s2.ID)
+		return fresh.Status == model.SessionCanceled
+	})
+}

@@ -70,6 +70,7 @@ type run struct {
 	sessionID   string
 	provider    agent.Provider
 	handle      agent.Handle
+	ctx         context.Context // the run's lifetime; canceled on shutdown/cancel
 	cancel      context.CancelFunc
 	interactive bool
 	done        chan struct{}
@@ -188,6 +189,7 @@ func (o *Orchestrator) StartRun(ctx context.Context, sessionID string) (*Run, er
 		sessionID:   sessionID,
 		provider:    prov,
 		handle:      handle,
+		ctx:         runCtx,
 		cancel:      cancel,
 		interactive: handle.Interactive(),
 		done:        make(chan struct{}),
@@ -238,6 +240,14 @@ func (o *Orchestrator) consume(r *run, events <-chan agent.Event) {
 				return
 			}
 		case agent.EventDone:
+			// A failure done that arrives after the run's context was canceled is
+			// not the agent failing: it is the orchestrator shutting down (leave
+			// the session running so restart recovery resumes it) or an explicit
+			// cancel (which already set the terminal status). Marking it failed
+			// here buried live sessions in a terminal state on a plain restart.
+			if !ev.Success && r.ctx.Err() != nil {
+				return
+			}
 			o.finishRun(r, ev.Success)
 			return
 		}

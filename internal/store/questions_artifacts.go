@@ -167,3 +167,12 @@ func (s *Store) ListArtifactsByObjective(objectiveID string) ([]*model.Artifact,
 	}
 	return out, rows.Err()
 }
+
+// CancelOpenQuestionsByObjective closes every open question on an objective —
+// a canceled objective must not keep demanding the user's attention.
+func (s *Store) CancelOpenQuestionsByObjective(objectiveID string) error {
+	_, err := s.db.Exec(
+		`UPDATE questions SET status = ? WHERE objective_id = ? AND status = ?`,
+		string(model.QuestionCanceled), objectiveID, string(model.QuestionOpen))
+	return err
+}
