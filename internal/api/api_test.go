@@ -59,6 +59,7 @@ func TestHealth_ReportsOK(t *testing.T) {
 	var body struct {
 		Status  string `json:"status"`
 		Version string `json:"version"`
+		Time    string `json:"time"`
 	}
 	// getJSON fails the test unless the endpoint returns 200.
 	getJSON(t, srv.URL+"/api/health", &body)
@@ -67,6 +68,9 @@ func TestHealth_ReportsOK(t *testing.T) {
 	}
 	if body.Version == "" {
 		t.Fatal("health should report a version")
+	}
+	if body.Time == "" {
+		t.Fatal("health should report the current server time")
 	}
 }
 

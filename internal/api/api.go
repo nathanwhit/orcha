@@ -74,11 +74,13 @@ func (s *Server) Handler() http.Handler {
 // ---- health ----
 
 // health is a lightweight liveness/version probe for monitoring and the
-// dashboard.
+// dashboard. It also reports the current server time (RFC3339) so callers can
+// detect clock skew and confirm the response is fresh.
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status":  "ok",
 		"version": version.Version,
+		"time":    time.Now().UTC().Format(time.RFC3339),
 	})
 }
 
