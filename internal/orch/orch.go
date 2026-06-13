@@ -7,6 +7,7 @@ package orch
 import (
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/nathanwhit/orcha/internal/agent"
 	"github.com/nathanwhit/orcha/internal/forge"
@@ -76,6 +77,11 @@ type Orchestrator struct {
 	tunnels  map[string]*mcpTunnel // reverse MCP tunnels keyed by target id
 
 	adoptMu sync.Mutex // serializes PR adoption so concurrent scans can't double-record a PR
+
+	pokeMu   sync.Mutex           // guards lastPoke
+	lastPoke map[string]time.Time // per-objective last supervisor re-poke time (cooldown)
+
+	gcMu sync.Mutex // held during a workspace-reclaim pass so passes don't overlap
 }
 
 // SetNotify installs a hook called whenever schedulable state changes (a
@@ -116,6 +122,7 @@ func New(st *store.Store, cfg Config) *Orchestrator {
 		guards:    map[string]*guardState{},
 		runs:      map[string]*run{},
 		tunnels:   map[string]*mcpTunnel{},
+		lastPoke:  map[string]time.Time{},
 	}
 }
 
