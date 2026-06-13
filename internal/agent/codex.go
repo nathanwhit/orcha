@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/nathanwhit/orcha/internal/exec"
 	"github.com/nathanwhit/orcha/internal/model"
@@ -18,6 +19,9 @@ type CodexConfig struct {
 	ExecutorFor func(spec Spec) exec.Executor
 	// CompletionGate vetoes idle-pane completion in tmux mode (see TmuxConfig).
 	CompletionGate func(sessionID string) bool
+	// MaxIdleWithBgWork overrides TmuxConfig.MaxIdleWithBgWork (tmux mode); zero
+	// uses the default.
+	MaxIdleWithBgWork time.Duration
 }
 
 // NewCodex builds a real Codex provider backed by `codex exec --json`.
@@ -69,9 +73,10 @@ func NewTmuxCodex(cfg CodexConfig) *TmuxProvider {
 		return append(args, cfg.ExtraArgs...)
 	}
 	return NewTmux(TmuxConfig{
-		Kind:           model.AgentCodex,
-		ExecutorFor:    cfg.ExecutorFor,
-		CompletionGate: cfg.CompletionGate,
+		Kind:              model.AgentCodex,
+		ExecutorFor:       cfg.ExecutorFor,
+		CompletionGate:    cfg.CompletionGate,
+		MaxIdleWithBgWork: cfg.MaxIdleWithBgWork,
 		Command: func(spec Spec) []string {
 			args := base(spec)
 			if spec.Prompt != "" {

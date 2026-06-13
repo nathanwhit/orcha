@@ -413,6 +413,52 @@ func TestPaneSignalsDone(t *testing.T) {
 	}
 }
 
+func TestPaneShowsLiveBackgroundWork(t *testing.T) {
+	cases := []struct {
+		name   string
+		screen string
+		want   bool
+	}{
+		{
+			"idle footer with shell count",
+			"● Still compiling. I'll resume when the build completes.\n\n❯ \n  ◢◢ bypass permissions on · PR #35186 · 2 shells · ↓ to manage",
+			true,
+		},
+		{
+			"churn line still running",
+			"✻ Churned for 1m 14s · 2 shells still running\n❯ ",
+			true,
+		},
+		{
+			"single shell",
+			"❯ \n  bypass permissions on · 1 shell · ↓ to manage",
+			true,
+		},
+		{
+			"no background work",
+			"● Done.\n" + TurnDoneSentinel + "\n❯ \n  ◢◢ bypass permissions on · PR #35186",
+			false,
+		},
+		{
+			"prose mentions shells, not a status bar",
+			"● I refactored the 3 shells helper module and it passes.\n❯ ",
+			false,
+		},
+		{
+			"shell count too far up to be the footer",
+			"2 shells · ↓ to manage" + strings.Repeat("\nfiller output line pushing the footer mention out of the tail window", 20) + "\n❯ ",
+			false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := paneShowsLiveBackgroundWork(c.screen); got != c.want {
+				t.Fatalf("paneShowsLiveBackgroundWork = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 func TestFinalPaneMessage(t *testing.T) {
 	screen := "● Done. Upgraded vite to ^8.\n" +
 		"  Committed as dd46176.\n" +
@@ -492,6 +538,67 @@ func TestTmuxProvider_CompletionGateBlocksIdleCompletion(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("did not complete after the gate opened")
+	}
+}
+
+// TestTmuxProvider_BackgroundWorkDefersIdleCompletion proves the build-survival
+// fix: a one-shot pane that has gone static but still reports live background
+// shells in its footer is NOT reaped at the normal quiescence window, yet the
+// explicit sentinel still finishes it immediately (the escape hatch for work
+// that is genuinely done but left a shell running).
+func TestTmuxProvider_BackgroundWorkDefersIdleCompletion(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	origIdle, origPoll := tmuxIdleComplete, tmuxPollInterval
+	tmuxIdleComplete, tmuxPollInterval = 300*time.Millisecond, 50*time.Millisecond
+	defer func() { tmuxIdleComplete, tmuxPollInterval = origIdle, origPoll }()
+
+	// Background-work ceiling far above the short idle window, so the test
+	// exercises "deferred past tmuxIdleComplete" without waiting the real default.
+	p := NewTmux(TmuxConfig{Kind: model.AgentOther, MaxIdleWithBgWork: 30 * time.Second})
+	h, events, err := p.StartSession(context.Background(), Spec{SessionID: "tmux-bgwork-1", OneShot: true})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer p.CancelSession(h)
+	done := make(chan bool, 1)
+	go func() {
+		for ev := range events {
+			if ev.Kind == EventDone {
+				select {
+				case done <- ev.Success:
+				default:
+				}
+			}
+		}
+	}()
+
+	// Paint a static footer that looks like a yielded agent waiting on a build.
+	time.Sleep(300 * time.Millisecond)
+	if err := p.SendInput(h, "printf '%s\\n' 'waiting on build  bypass permissions on \xc2\xb7 2 shells \xc2\xb7 to manage'"); err != nil {
+		t.Fatalf("send footer: %v", err)
+	}
+
+	// Static pane + live background shells: must NOT complete at tmuxIdleComplete
+	// (300ms), which is well short of the background window (30s).
+	select {
+	case <-done:
+		t.Fatal("reaped a static pane that still reported live background shells")
+	case <-time.After(2 * time.Second):
+	}
+
+	// The sentinel is the authoritative finish and overrides the background veto.
+	if err := p.SendInput(h, "printf '%s\\n' "+TurnDoneSentinel); err != nil {
+		t.Fatalf("send sentinel: %v", err)
+	}
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("sentinel completion reported failure, want success")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("sentinel did not finish the turn despite background shells")
 	}
 }
 
