@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -36,8 +37,16 @@ type TmuxConfig struct {
 	// "this session has no open question" so a worker that asked the user and is
 	// idle waiting for the answer is not mistaken for finished.
 	CompletionGate func(sessionID string) bool
-	TmuxBin        string
-	Cols, Rows     int
+	// MaxIdleWithBgWork bounds how long a one-shot pane that has gone static but
+	// still reports live background shells (a build the agent yielded its turn to
+	// await) is tolerated before the no-sentinel backstop reaps it. Zero uses
+	// defaultMaxIdleWithBgWork. It must exceed the longest real build+wait: the
+	// footer's shell count resets the quiescence clock the moment a shell exits,
+	// so this only ever fires on a genuinely stuck session (work that finished,
+	// left an immortal shell, and never printed the completion sentinel).
+	MaxIdleWithBgWork time.Duration
+	TmuxBin           string
+	Cols, Rows        int
 }
 
 // TmuxProvider runs each session as an interactive program inside a real,
@@ -57,6 +66,9 @@ type TmuxProvider struct {
 func NewTmux(cfg TmuxConfig) *TmuxProvider {
 	if cfg.ExecutorFor == nil {
 		cfg.ExecutorFor = ExecutorForTarget
+	}
+	if cfg.MaxIdleWithBgWork <= 0 {
+		cfg.MaxIdleWithBgWork = defaultMaxIdleWithBgWork
 	}
 	return &TmuxProvider{cfg: cfg, sessions: map[string]*tmuxSession{}}
 }
@@ -265,16 +277,29 @@ func (p *TmuxProvider) arm(runCtx context.Context, cancel context.CancelFunc, ct
 				if screen == lastScreen {
 					if quietSince.IsZero() {
 						quietSince = time.Now()
-					} else if time.Since(quietSince) >= tmuxIdleComplete {
-						// A quiescent pane means "finished" only if the session isn't
-						// blocked waiting on the user. A worker that called ask_user and
-						// is idle at the prompt awaiting an answer looks identical to a
-						// done one — completing it here would kill it and drop the answer.
-						if p.cfg.CompletionGate == nil || p.cfg.CompletionGate(spec.SessionID) {
-							success, completed, finalScreen = true, true, screen
-							break wait
+					} else {
+						// An agent that yielded its turn to await a background build
+						// goes byte-identical too — it stops ticking its spinner while
+						// it is not its turn — so a static pane is NOT proof of "done".
+						// If the footer still reports live background shells, wait far
+						// longer before the no-sentinel backstop fires, so we don't kill
+						// in-flight work (the explicit sentinel above still finishes the
+						// turn instantly regardless of any background shells).
+						idleWindow := tmuxIdleComplete
+						if paneShowsLiveBackgroundWork(screen) {
+							idleWindow = p.cfg.MaxIdleWithBgWork
 						}
-						quietSince = time.Time{} // gated (awaiting the user): keep waiting
+						if time.Since(quietSince) >= idleWindow {
+							// A quiescent pane means "finished" only if the session isn't
+							// blocked waiting on the user. A worker that called ask_user and
+							// is idle at the prompt awaiting an answer looks identical to a
+							// done one — completing it here would kill it and drop the answer.
+							if p.cfg.CompletionGate == nil || p.cfg.CompletionGate(spec.SessionID) {
+								success, completed, finalScreen = true, true, screen
+								break wait
+							}
+							quietSince = time.Time{} // gated (awaiting the user): keep waiting
+						}
 					}
 				} else {
 					lastScreen, quietSince = screen, time.Time{}
@@ -306,6 +331,54 @@ func (p *TmuxProvider) arm(runCtx context.Context, cancel context.CancelFunc, ct
 // on purpose: it is a safety net, not the primary signal, and a working TUI
 // never stays static this long (its spinner/elapsed timer ticks every second).
 var tmuxIdleComplete = 120 * time.Second
+
+// defaultMaxIdleWithBgWork is the fallback for TmuxConfig.MaxIdleWithBgWork: the
+// quiescence window applied when the pane still shows live background work (see
+// paneShowsLiveBackgroundWork). An agent that kicked off a long build and yielded
+// its turn to await it sits byte-identical — the spinner only ticks while it is
+// the agent's turn — so at tmuxIdleComplete it looks done and gets reaped
+// mid-build (the bug this guards against). While background shells are reported
+// we hold off until this far larger window, kept bounded so a leaked/never-exiting
+// shell can't pin the session slot forever. It only governs the no-sentinel
+// backstop: an agent that prints the completion sentinel is finished immediately
+// regardless of background shells — the intended escape hatch for genuinely-done
+// work that left a shell (e.g. a dev server) running. Default is generous because
+// the footer's shell count resets the clock the instant a build's shell exits, so
+// in practice this fires only on a truly stuck session; deployments with builds
+// longer than this can raise it via -idle-bg-work-timeout.
+const defaultMaxIdleWithBgWork = 4 * time.Hour
+
+// bgWorkRe matches the Claude Code status-bar segment reporting background
+// shells still alive: the "2 shells" in a footer like
+// "… · PR #35186 · 2 shells · ↓ to manage", or the "2 shells still running" on
+// its churn line. The count does not animate, so the pane stays byte-identical.
+var bgWorkRe = regexp.MustCompile(`(?i)\b\d+\s+shells?\b`)
+
+// paneShowsLiveBackgroundWork reports whether a (static) captured pane indicates
+// the agent still has background shells running. Only the footer region is
+// inspected, and the match must sit on a status-bar line (a "·" separator or the
+// "still running" churn text) so prose that merely mentions shells cannot trip
+// it. A false negative only means a faster reap (back to the old behaviour); a
+// false positive only delays the no-sentinel backstop — neither kills the turn,
+// which the sentinel always ends regardless.
+func paneShowsLiveBackgroundWork(screen string) bool {
+	lines := strings.Split(screen, "\n")
+	seen := 0
+	for i := len(lines) - 1; i >= 0 && seen < 12; i-- {
+		t := strings.TrimSpace(lines[i])
+		if t == "" {
+			continue
+		}
+		seen++
+		if !bgWorkRe.MatchString(t) {
+			continue
+		}
+		if strings.Contains(t, "·") || strings.Contains(t, "still running") || strings.Contains(t, "to manage") {
+			return true
+		}
+	}
+	return false
+}
 
 // tmuxPollInterval is how often the watcher captures the pane (for streaming,
 // done detection, and liveness). A var so tests can speed it up.

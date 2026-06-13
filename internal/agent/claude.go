@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"strings"
+	"time"
 
 	"github.com/nathanwhit/orcha/internal/exec"
 	"github.com/nathanwhit/orcha/internal/model"
@@ -20,6 +21,9 @@ type ClaudeConfig struct {
 	ExecutorFor func(spec Spec) exec.Executor
 	// CompletionGate vetoes idle-pane completion in tmux mode (see TmuxConfig).
 	CompletionGate func(sessionID string) bool
+	// MaxIdleWithBgWork overrides TmuxConfig.MaxIdleWithBgWork (tmux mode); zero
+	// uses the default.
+	MaxIdleWithBgWork time.Duration
 }
 
 // NewClaude builds a real, interactive Claude provider. The session is one
@@ -109,9 +113,10 @@ func NewTmuxClaude(cfg ClaudeConfig) *TmuxProvider {
 		return append(args, cfg.ExtraArgs...)
 	}
 	return NewTmux(TmuxConfig{
-		Kind:           model.AgentClaude,
-		ExecutorFor:    cfg.ExecutorFor,
-		CompletionGate: cfg.CompletionGate,
+		Kind:              model.AgentClaude,
+		ExecutorFor:       cfg.ExecutorFor,
+		CompletionGate:    cfg.CompletionGate,
+		MaxIdleWithBgWork: cfg.MaxIdleWithBgWork,
 		Command: func(spec Spec) []string {
 			args := base(spec)
 			if spec.Prompt != "" {

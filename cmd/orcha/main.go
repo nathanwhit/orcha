@@ -47,6 +47,7 @@ func main() {
 		prMonitor   = flag.Duration("pr-monitor", 0, "poll open PRs for new comments/checks/merges this often and spawn follow-ups / notify the manager (0 = auto: on at 60s with -real-forge, off otherwise)")
 		issueBot    = flag.String("issue-bot-login", "", "GitHub login orcha runs as; @-mentioning or assigning it on an issue in a registered project creates an objective (needs -real-forge and -issue-allow)")
 		issueAllow  = flag.String("issue-allow", "", "comma-separated GitHub logins permitted to summon work via an issue @-mention/assignment (empty disables the issue trigger)")
+		idleBgWork  = flag.Duration("idle-bg-work-timeout", 4*time.Hour, "tmux mode: max time a one-shot worker may sit on a static pane that still shows live background shells (a build it yielded to await) before it is reaped; must exceed the longest build+wait")
 	)
 	flag.Parse()
 
@@ -88,8 +89,8 @@ func main() {
 		// Each session is an interactive TUI inside a real, attachable tmux
 		// session. Watch or take over any session with `tmux attach -t orcha-<id>`
 		// (the attach command is recorded on each session).
-		o.RegisterProvider(agent.NewTmuxClaude(agent.ClaudeConfig{Binary: *claudeBin, CompletionGate: o.CompletionAllowed}))
-		o.RegisterProvider(agent.NewTmuxCodex(agent.CodexConfig{Binary: *codexBin, CompletionGate: o.CompletionAllowed}))
+		o.RegisterProvider(agent.NewTmuxClaude(agent.ClaudeConfig{Binary: *claudeBin, CompletionGate: o.CompletionAllowed, MaxIdleWithBgWork: *idleBgWork}))
+		o.RegisterProvider(agent.NewTmuxCodex(agent.CodexConfig{Binary: *codexBin, CompletionGate: o.CompletionAllowed, MaxIdleWithBgWork: *idleBgWork}))
 		log.Println("using tmux interactive TUIs (attach: tmux attach -t orcha-<sessionID>)")
 	default:
 		// Real CLIs, headless. Claude runs as a persistent interactive stream-json
