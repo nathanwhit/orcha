@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -44,6 +45,8 @@ func main() {
 		showVersion = flag.Bool("version", false, "print version and exit")
 		workerPerm  = flag.String("agent-permissions", "bypassPermissions", "permission/sandbox mode for all agents: bypassPermissions (no prompts/sandbox — safe in a VM) or acceptEdits (edits only, prompts for shell)")
 		prMonitor   = flag.Duration("pr-monitor", 0, "poll open PRs for new comments/checks/merges this often and spawn follow-ups / notify the manager (0 = auto: on at 60s with -real-forge, off otherwise)")
+		issueBot    = flag.String("issue-bot-login", "", "GitHub login orcha runs as; @-mentioning or assigning it on an issue in a registered project creates an objective (needs -real-forge and -issue-allow)")
+		issueAllow  = flag.String("issue-allow", "", "comma-separated GitHub logins permitted to summon work via an issue @-mention/assignment (empty disables the issue trigger)")
 	)
 	flag.Parse()
 
@@ -70,6 +73,10 @@ func main() {
 		ProviderFallback:     []model.AgentKind{model.AgentClaude, model.AgentCodex},
 		ManagerMCPBaseURL:    *mcpBase,
 		WorkerPermissionMode: *workerPerm,
+		IssueTriggers: orch.IssueTriggerConfig{
+			BotLogin:      *issueBot,
+			AllowedLogins: splitCSV(*issueAllow),
+		},
 	})
 	switch {
 	case *fakeAgents:
@@ -121,21 +128,37 @@ func main() {
 	}
 	go sched.Run(ctx)
 
-	// PR monitor: poll open PRs for new comments/checks and spawn follow-ups.
-	if *prMonitor > 0 {
+	// Host monitor: poll open PRs for new comments/checks (spawning follow-ups)
+	// and registered projects' issues for @-mention/assignment triggers. Both run
+	// on the same cadence. The issue trigger can be on without PR polling, so the
+	// interval falls back to 60s when only it is enabled.
+	monitorEvery := *prMonitor
+	if monitorEvery == 0 && o.IssueTriggersEnabled() {
+		monitorEvery = 60 * time.Second
+	}
+	if monitorEvery > 0 {
 		go func() {
-			t := time.NewTicker(*prMonitor)
+			t := time.NewTicker(monitorEvery)
 			defer t.Stop()
 			for {
 				select {
 				case <-ctx.Done():
 					return
 				case <-t.C:
-					o.SyncOpenPRs(ctx)
+					if *prMonitor > 0 {
+						o.SyncOpenPRs(ctx)
+					}
+					o.SyncIssueTriggers(ctx)
 				}
 			}
 		}()
-		log.Printf("PR monitor on (every %s)", *prMonitor)
+		if *prMonitor > 0 {
+			log.Printf("PR monitor on (every %s)", monitorEvery)
+		}
+		if o.IssueTriggersEnabled() {
+			log.Printf("issue trigger on (every %s, bot=@%s, %d allowed login(s))",
+				monitorEvery, *issueBot, len(splitCSV(*issueAllow)))
+		}
 	}
 
 	srv := api.New(o)
@@ -183,6 +206,17 @@ func main() {
 	if restarting {
 		os.Exit(42) // restart sentinel for scripts/dev.sh
 	}
+}
+
+// splitCSV parses a comma-separated flag into trimmed, non-empty tokens.
+func splitCSV(s string) []string {
+	var out []string
+	for _, tok := range strings.Split(s, ",") {
+		if t := strings.TrimSpace(tok); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func ensureLocalTarget(st *store.Store) {
