@@ -58,6 +58,20 @@ type Config struct {
 	// HTTP port is exposed via a managed reverse tunnel, so remote agents can
 	// reach their MCP tools (default 18080).
 	MCPTunnelPort int
+	// IssueTriggers configures turning GitHub issues into objectives on an
+	// @-mention or assignment. Disabled unless a bot login and a non-empty
+	// allowlist are both set (and a real forge is installed).
+	IssueTriggers IssueTriggerConfig
+}
+
+// IssueTriggerConfig governs the issue-trigger monitor. BotLogin is the GitHub
+// account orcha runs as (the handle people @-mention or assign). AllowedLogins
+// is the set of GitHub logins permitted to summon work this way — the request is
+// attributed to the comment author (for a mention) or the assigner (for an
+// assignment), and ignored unless that login is listed.
+type IssueTriggerConfig struct {
+	BotLogin      string
+	AllowedLogins []string
 }
 
 // Orchestrator coordinates sessions across targets and providers.

@@ -197,6 +197,19 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_objective ON events(objective_id);
 
+-- One row per issue trigger orcha has acted on, so a re-poll (or restart) does
+-- not spawn a duplicate objective for the same @-mention or assignment. The
+-- unique key mirrors pr_feedback's dedup index.
+CREATE TABLE IF NOT EXISTS issue_tasks (
+    id           TEXT PRIMARY KEY,
+    repo         TEXT NOT NULL,
+    number       INTEGER NOT NULL,
+    external_id  TEXT NOT NULL,
+    objective_id TEXT NOT NULL DEFAULT '',
+    created_at   TIMESTAMP NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_tasks_external ON issue_tasks(repo, number, external_id);
+
 CREATE TABLE IF NOT EXISTS projects (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,

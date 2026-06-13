@@ -20,6 +20,29 @@ type Comment struct {
 	Kind       string // "issue_comment" | "review"
 }
 
+// Issue is an open issue observed on a repo, used by the issue-trigger monitor
+// to turn an @-mention or an assignment into an objective.
+type Issue struct {
+	Number    int
+	Title     string
+	Body      string
+	Author    string // login of the issue opener
+	URL       string
+	Assignees []string
+}
+
+// IssueComment is a comment on an issue's conversation, used to detect
+// @-mentions. IsPR flags comments that live on a pull request's conversation
+// (PRs are issues to the REST API) so the trigger monitor can skip them — those
+// are handled by the PR feedback path instead.
+type IssueComment struct {
+	IssueNumber int
+	ExternalID  string // stable id for dedup (the comment's html_url)
+	Author      string
+	Body        string
+	IsPR        bool
+}
+
 // PRState is the live state of a PR on the host.
 type PRState struct {
 	Number      int
@@ -64,6 +87,25 @@ type Forge interface {
 	Comment(ctx context.Context, repo string, number int, body string) error
 	// ListComments returns the PR's issue and review comments.
 	ListComments(ctx context.Context, repo string, number int) ([]Comment, error)
+	// ListRecentIssueComments returns the repo's most recent issue-conversation
+	// comments (newest first, across all issues) so the trigger monitor can scan
+	// for @-mentions with one call per repo. Comments on PR conversations are
+	// returned with IsPR set so callers can skip them.
+	ListRecentIssueComments(ctx context.Context, repo string) ([]IssueComment, error)
+	// GetIssue fetches a single issue's title/body/author for building the
+	// objective prompt once a trigger fires.
+	GetIssue(ctx context.Context, repo string, number int) (Issue, error)
+	// ListAssignedIssues returns the open issues currently assigned to `assignee`.
+	ListAssignedIssues(ctx context.Context, repo, assignee string) ([]Issue, error)
+	// LatestAssignment returns who most recently assigned `assignee` to the issue
+	// (to authorize the trigger) and a stable id for that assignment event (so a
+	// later re-assignment, which is a new event, re-fires rather than being
+	// deduped against the first). actor is "" (no error) when it cannot be
+	// determined; eventID may be "" when the host exposes no stable id.
+	LatestAssignment(ctx context.Context, repo string, number int, assignee string) (actor, eventID string, err error)
+	// CommentIssue posts a comment on an issue (used to acknowledge a triggered
+	// task).
+	CommentIssue(ctx context.Context, repo string, number int, body string) error
 }
 
 // ErrRepoMissing indicates the target repo is unreachable.
@@ -87,17 +129,22 @@ func (f *Fake) OnExecutor(exec.Executor) Forge { return f }
 
 // Fake is an in-memory Forge for tests/dev.
 type Fake struct {
-	mu           sync.Mutex
-	repos        map[string]bool
-	diffs        map[string]bool     // workspacePath -> has diff
-	prs          map[string]*PRState // repo#number -> state
-	openByBranch map[string]*PRState // repo\x00branch -> open PR (for FindOpenPR)
-	nextNum      int
-	Pushes       []PushRecord
-	ForcePush    []PushRecord
-	Comments     []CommentRecord
-	Commits      []CommitRecord
-	incoming     []Comment
+	mu            sync.Mutex
+	repos         map[string]bool
+	diffs         map[string]bool     // workspacePath -> has diff
+	prs           map[string]*PRState // repo#number -> state
+	openByBranch  map[string]*PRState // repo\x00branch -> open PR (for FindOpenPR)
+	nextNum       int
+	Pushes        []PushRecord
+	ForcePush     []PushRecord
+	Comments      []CommentRecord
+	Commits       []CommitRecord
+	incoming      []Comment
+	issueComments []IssueComment        // returned by ListRecentIssueComments
+	issues        map[string]Issue      // key(repo,n) -> issue, for GetIssue
+	assigned      map[string][]Issue    // repo -> issues assigned to the bot
+	assignments   map[string]assignment // key(repo,n) -> latest assignment
+	IssueComments []CommentRecord       // recorded CommentIssue calls (assertions)
 }
 
 // PushRecord captures a push for assertions.
@@ -125,6 +172,9 @@ func NewFake() *Fake {
 		diffs:        map[string]bool{},
 		prs:          map[string]*PRState{},
 		openByBranch: map[string]*PRState{},
+		issues:       map[string]Issue{},
+		assigned:     map[string][]Issue{},
+		assignments:  map[string]assignment{},
 		nextNum:      100,
 	}
 }
@@ -236,6 +286,78 @@ func (f *Fake) ListComments(_ context.Context, repo string, number int) ([]Comme
 
 // SetComments seeds the comments ListComments returns.
 func (f *Fake) SetComments(cs ...Comment) { f.mu.Lock(); f.incoming = cs; f.mu.Unlock() }
+
+// SetIssueComments seeds the comments ListRecentIssueComments returns.
+func (f *Fake) SetIssueComments(cs ...IssueComment) {
+	f.mu.Lock()
+	f.issueComments = cs
+	f.mu.Unlock()
+}
+
+// SetIssue seeds an issue GetIssue will return for (repo, number).
+func (f *Fake) SetIssue(repo string, iss Issue) {
+	f.mu.Lock()
+	f.issues[key(repo, iss.Number)] = iss
+	f.mu.Unlock()
+}
+
+// SetAssignedIssues seeds the issues ListAssignedIssues returns for a repo, and
+// registers each for GetIssue too.
+func (f *Fake) SetAssignedIssues(repo string, iss ...Issue) {
+	f.mu.Lock()
+	f.assigned[repo] = iss
+	for _, i := range iss {
+		f.issues[key(repo, i.Number)] = i
+	}
+	f.mu.Unlock()
+}
+
+// assignment is the Fake's record of who last assigned the bot to an issue and
+// the stable id of that assignment event.
+type assignment struct{ actor, eventID string }
+
+// SetAssignment seeds who LatestAssignment reports as the assigner and the
+// assignment event id. A new eventID simulates a re-assignment (which re-fires).
+func (f *Fake) SetAssignment(repo string, number int, actor, eventID string) {
+	f.mu.Lock()
+	f.assignments[key(repo, number)] = assignment{actor: actor, eventID: eventID}
+	f.mu.Unlock()
+}
+
+func (f *Fake) ListRecentIssueComments(_ context.Context, _ string) ([]IssueComment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]IssueComment(nil), f.issueComments...), nil
+}
+
+func (f *Fake) GetIssue(_ context.Context, repo string, number int) (Issue, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if iss, ok := f.issues[key(repo, number)]; ok {
+		return iss, nil
+	}
+	return Issue{Number: number}, nil
+}
+
+func (f *Fake) ListAssignedIssues(_ context.Context, repo, _ string) ([]Issue, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]Issue(nil), f.assigned[repo]...), nil
+}
+
+func (f *Fake) LatestAssignment(_ context.Context, repo string, number int, _ string) (string, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a := f.assignments[key(repo, number)]
+	return a.actor, a.eventID, nil
+}
+
+func (f *Fake) CommentIssue(_ context.Context, repo string, number int, body string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.IssueComments = append(f.IssueComments, CommentRecord{Repo: repo, Number: number, Body: body})
+	return nil
+}
 
 // itoa avoids importing strconv across many call sites.
 func itoa(n int) string {
