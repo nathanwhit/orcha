@@ -37,6 +37,44 @@ func (o *Orchestrator) forgeForWorkspace(ws *model.Workspace) forge.Forge {
 	return o.forgeFor(tgt)
 }
 
+// prBranchWorkspace resolves the checkout a PR follow-up should push from. It
+// prefers an explicitly supplied workspace (the follow-up session's own checkout)
+// when that workspace actually tracks the PR's branch, and otherwise finds the
+// ready PR-branch workspace recorded for this PR. It returns nil when neither
+// resolves, so UpdatePR can refuse to push instead of running git in the
+// orchestrator's own cwd against the wrong (or a missing) branch.
+func (o *Orchestrator) prBranchWorkspace(workspaceID string, pr *model.PullRequest) *model.Workspace {
+	isForPR := func(ws *model.Workspace) bool {
+		if ws == nil {
+			return false
+		}
+		if id, _ := ws.Metadata["pr_id"].(string); id == pr.ID {
+			return true
+		}
+		// A PR-branch checkout tracks the PR's branch even without pr_id metadata.
+		return ws.Kind == model.WorkspacePRBranch && ws.BranchName != "" && ws.BranchName == pr.Branch
+	}
+	if workspaceID != "" {
+		if ws, err := o.st.GetWorkspace(workspaceID); err == nil && isForPR(ws) {
+			return ws
+		}
+	}
+	wss, err := o.st.ListWorkspacesByObjective(pr.ObjectiveID)
+	if err != nil {
+		return nil
+	}
+	var best *model.Workspace
+	for _, ws := range wss {
+		if ws.Kind != model.WorkspacePRBranch || ws.Status != model.WorkspaceReady || !isForPR(ws) {
+			continue
+		}
+		if best == nil || ws.CreatedAt.After(best.CreatedAt) {
+			best = ws
+		}
+	}
+	return best
+}
+
 // PublishSpec carries the agent-supplied PR content.
 type PublishSpec struct {
 	Title         string
@@ -195,12 +233,11 @@ func (o *Orchestrator) UpdatePR(ctx context.Context, prID string, spec UpdateSpe
 	if err != nil {
 		return nil, err
 	}
-	// Run git/gh on the machine holding the PR-branch checkout (the follow-up
-	// workspace's target), not the orchestrator host.
-	var fws *model.Workspace
-	if spec.WorkspaceID != "" {
-		fws, _ = o.st.GetWorkspace(spec.WorkspaceID)
-	}
+	// Resolve the checkout that actually holds the PR branch and run git/gh on its
+	// target, not the orchestrator host. fws may be nil here — the state refresh
+	// and the merged/closed/force checks below don't need a checkout, so we defer
+	// the "no checkout" failure until just before the push.
+	fws := o.prBranchWorkspace(spec.WorkspaceID, pr)
 	f := o.forgeForWorkspace(fws)
 
 	// Refresh host state before deciding anything.
@@ -235,6 +272,15 @@ func (o *Orchestrator) UpdatePR(ctx context.Context, prID string, spec UpdateSpe
 		return pr, errors.New("orch: force push requires an explicit reason")
 	}
 
+	// A push needs a checkout of the PR branch. Refuse rather than fall back to
+	// the orchestrator host's cwd (which would push the wrong branch, or nothing,
+	// silently). This is the case a manager-spawned follow-up with no PR-branch
+	// workspace used to hit — its fix would commit to a stranded local branch and
+	// update_pr would appear to do nothing.
+	if fws == nil {
+		return pr, fmt.Errorf("%w: no PR-branch checkout for PR #%d — spawn the follow-up with address_pr_feedback so its fix lands on the PR branch", ErrUnsafePublish, pr.Number)
+	}
+
 	// One updater per PR branch, keyed by PR id.
 	lockKey := prBranchLockKey(prID)
 	if err := o.st.AcquireLock(lockKey, model.LockPRBranch, spec.SessionID, "follow-up update"); err != nil {
@@ -245,10 +291,7 @@ func (o *Orchestrator) UpdatePR(ctx context.Context, prID string, spec UpdateSpe
 	}
 	defer o.st.ReleaseLock(lockKey, spec.SessionID)
 
-	wsPath := ""
-	if fws != nil {
-		wsPath = fws.Path
-	}
+	wsPath := fws.Path
 	// Fallback: commit any edits the agent left uncommitted (normally the agent
 	// commits its own work with its own message, so this is a no-op).
 	if wsPath != "" {
