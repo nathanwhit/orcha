@@ -91,7 +91,10 @@ func Open(path string, opts ...Option) (*Store, error) {
 // explicit, idempotent ALTER for older DBs. New DBs already have the column
 // from schema.sql and these calls become no-ops.
 func (s *Store) migrate() error {
-	return s.ensureColumn("sessions", "used_tokens", "INTEGER NOT NULL DEFAULT 0")
+	if err := s.ensureColumn("sessions", "used_tokens", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	return s.ensureColumn("sessions", "handoff_summary", "TEXT NOT NULL DEFAULT ''")
 }
 
 // ensureColumn adds a column to a table if it is not already present. Existing

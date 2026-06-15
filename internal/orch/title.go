@@ -50,6 +50,19 @@ func truncateRunes(s string, max int) string {
 	return strings.TrimRight(string(r[:max-1]), " ") + "…"
 }
 
+// tailRunes keeps at most the last max runes of s, prefixing an ellipsis when it
+// had to cut. It counts runes (not bytes) so multibyte text — box-drawing chars
+// in a scraped TUI pane, say — is never split mid-character. The TAIL is kept on
+// purpose: an agent's conclusion (and the bottom of a settled pane) is at the
+// end, so head-truncation would drop exactly the part that matters.
+func tailRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return "…" + strings.TrimLeft(string(r[len(r)-(max-1):]), " ")
+}
+
 // sanitizeTitle cleans an LLM-produced title into a single tidy line: it keeps
 // the first non-empty line (models sometimes add preamble or trailing notes),
 // strips surrounding quotes and whitespace, drops trailing sentence

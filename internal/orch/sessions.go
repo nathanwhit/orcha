@@ -233,10 +233,12 @@ func (o *Orchestrator) consume(r *run, events <-chan agent.Event) {
 			// parent manager is handed when this session finishes. Without this
 			// LatestSummary is never written and the handoff says nothing useful.
 			if ev.Kind == agent.EventText && ev.Source == model.MsgAgent && strings.TrimSpace(ev.Content) != "" {
-				summary := ev.Content
-				if len(summary) > 2000 {
-					summary = summary[:2000]
-				}
+				// Keep the TAIL, rune-safe: this is a fallback for when a worker did
+				// not call report_result, and the meaningful conclusion sits at the
+				// end of the message (or the bottom of a scraped TUI pane). Byte
+				// slicing here previously split multibyte box-drawing chars and, worse,
+				// kept the noisy build-log preamble while dropping the findings.
+				summary := tailRunes(ev.Content, 2000)
 				_, _ = o.st.UpdateSessionRuntime(r.sessionID, func(s *model.Session) {
 					s.LatestSummary = summary
 				})
@@ -345,10 +347,7 @@ func (o *Orchestrator) notifyManagerOfChild(childID string, success bool) {
 	if err != nil || mgr.Role != model.RoleManager || mgr.Status.IsTerminal() {
 		return
 	}
-	summary := child.LatestSummary
-	if summary == "" {
-		summary = child.CurrentActivity
-	}
+	summary := relaySummary(child)
 	var msg string
 	switch {
 	case !success:

@@ -32,7 +32,7 @@ const maxManagerSessions = 4
 type supervisorAction struct {
 	kind        string
 	objectiveID string
-	prompt      string         // objective prompt, for respawn
+	prompt      string          // objective prompt, for respawn
 	agent       model.AgentKind // manager agent to reuse, for respawn
 	manager     *model.Session  // the live manager, for poke
 }
@@ -217,7 +217,7 @@ func (o *Orchestrator) objectiveStateSnapshot(objectiveID string) string {
 			continue
 		}
 		wrote = true
-		sum := firstNonEmpty(s.LatestSummary, s.CurrentActivity)
+		sum := relaySummaryLine(s)
 		if sum == "" {
 			sum = "(no summary reported)"
 		}

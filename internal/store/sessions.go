@@ -26,13 +26,13 @@ func (s *Store) CreateSession(sess *model.Session) error {
 	}
 	_, err := s.db.Exec(
 		`INSERT INTO sessions(id, objective_id, parent_session_id, role, agent, mode,
-		   status, title, goal, current_activity, latest_summary, target_id,
-		   workspace_id, usage_provider, used_tokens, created_at, started_at,
+		   status, title, goal, current_activity, latest_summary, handoff_summary,
+		   target_id, workspace_id, usage_provider, used_tokens, created_at, started_at,
 		   updated_at, completed_at, metadata)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		sess.ID, nullStr(sess.ObjectiveID), nullStr(sess.ParentSessionID),
 		string(sess.Role), string(sess.Agent), string(sess.Mode), string(sess.Status),
-		sess.Title, sess.Goal, sess.CurrentActivity, sess.LatestSummary,
+		sess.Title, sess.Goal, sess.CurrentActivity, sess.LatestSummary, sess.HandoffSummary,
 		nullStr(sess.TargetID), nullStr(sess.WorkspaceID), nullStr(sess.UsageProvider),
 		sess.UsedTokens, sess.CreatedAt, nullTime(sess.StartedAt), sess.UpdatedAt,
 		nullTime(sess.CompletedAt), sess.Metadata,
@@ -41,7 +41,7 @@ func (s *Store) CreateSession(sess *model.Session) error {
 }
 
 var sessionCols = `id, objective_id, parent_session_id, role, agent, mode, status,
-	title, goal, current_activity, latest_summary, target_id, workspace_id,
+	title, goal, current_activity, latest_summary, handoff_summary, target_id, workspace_id,
 	usage_provider, used_tokens, created_at, started_at, updated_at, completed_at, metadata`
 
 func scanSession(r rowScanner) (*model.Session, error) {
@@ -49,7 +49,7 @@ func scanSession(r rowScanner) (*model.Session, error) {
 	var obj, parent, target, ws, provider sql.NullString
 	var started, completed sql.NullTime
 	err := r.Scan(&s.ID, &obj, &parent, &s.Role, &s.Agent, &s.Mode, &s.Status,
-		&s.Title, &s.Goal, &s.CurrentActivity, &s.LatestSummary, &target, &ws,
+		&s.Title, &s.Goal, &s.CurrentActivity, &s.LatestSummary, &s.HandoffSummary, &target, &ws,
 		&provider, &s.UsedTokens, &s.CreatedAt, &started, &s.UpdatedAt, &completed, &s.Metadata)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -213,9 +213,9 @@ func (s *Store) UpdateSessionRuntime(id string, fn func(*model.Session)) (*model
 	sess.UpdatedAt = now
 	_, err = tx.Exec(
 		`UPDATE sessions SET title = ?, goal = ?, current_activity = ?,
-		   latest_summary = ?, target_id = ?, workspace_id = ?,
+		   latest_summary = ?, handoff_summary = ?, target_id = ?, workspace_id = ?,
 		   usage_provider = ?, metadata = ?, updated_at = ? WHERE id = ?`,
-		sess.Title, sess.Goal, sess.CurrentActivity, sess.LatestSummary,
+		sess.Title, sess.Goal, sess.CurrentActivity, sess.LatestSummary, sess.HandoffSummary,
 		nullStr(sess.TargetID), nullStr(sess.WorkspaceID), nullStr(sess.UsageProvider),
 		sess.Metadata, now, id)
 	if err != nil {

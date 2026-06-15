@@ -24,11 +24,7 @@ func (o *Orchestrator) compactContext(objectiveID string) string {
 	if sessions, err := o.st.ListSessionsByObjective(objectiveID); err == nil && len(sessions) > 0 {
 		b.WriteString("SESSION SUMMARIES:\n")
 		for _, s := range sessions {
-			summary := s.LatestSummary
-			if summary == "" {
-				summary = s.CurrentActivity
-			}
-			fmt.Fprintf(&b, "- [%s/%s] %s: %s\n", s.Role, s.Status, s.Title, summary)
+			fmt.Fprintf(&b, "- [%s/%s] %s: %s\n", s.Role, s.Status, s.Title, relaySummaryLine(s))
 		}
 		b.WriteString("\n")
 	}

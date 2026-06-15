@@ -242,15 +242,22 @@ type Session struct {
 	Goal            string        `json:"goal"`
 	CurrentActivity string        `json:"current_activity,omitempty"`
 	LatestSummary   string        `json:"latest_summary,omitempty"`
-	TargetID        string        `json:"target_id,omitempty"`
-	WorkspaceID     string        `json:"workspace_id,omitempty"`
-	UsageProvider   string        `json:"usage_provider,omitempty"`
-	UsedTokens      int64         `json:"used_tokens"`
-	CreatedAt       time.Time     `json:"created_at"`
-	StartedAt       *time.Time    `json:"started_at,omitempty"`
-	UpdatedAt       time.Time     `json:"updated_at"`
-	CompletedAt     *time.Time    `json:"completed_at,omitempty"`
-	Metadata        JSONMap       `json:"metadata,omitempty"`
+	// HandoffSummary is the worker-authored result relayed to the manager when the
+	// session finishes (set via the report_result tool). Unlike LatestSummary —
+	// which is scraped from the agent's last output and can capture a transitional
+	// line or noisy TUI pane — this is exactly what the worker chose to hand off
+	// (findings, a diff, references). Preferred over LatestSummary wherever a
+	// worker's result is relayed.
+	HandoffSummary string     `json:"handoff_summary,omitempty"`
+	TargetID       string     `json:"target_id,omitempty"`
+	WorkspaceID    string     `json:"workspace_id,omitempty"`
+	UsageProvider  string     `json:"usage_provider,omitempty"`
+	UsedTokens     int64      `json:"used_tokens"`
+	CreatedAt      time.Time  `json:"created_at"`
+	StartedAt      *time.Time `json:"started_at,omitempty"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	CompletedAt    *time.Time `json:"completed_at,omitempty"`
+	Metadata       JSONMap    `json:"metadata,omitempty"`
 }
 
 // Target is a machine where sessions can run.
