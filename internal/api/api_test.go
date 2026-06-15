@@ -54,6 +54,21 @@ func postJSON(t *testing.T, url string, body any) *http.Response {
 	return resp
 }
 
+func patchJSON(t *testing.T, url string, body any) *http.Response {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	req, err := http.NewRequest(http.MethodPatch, url, bytes.NewReader(b))
+	if err != nil {
+		t.Fatalf("PATCH %s: %v", url, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PATCH %s: %v", url, err)
+	}
+	return resp
+}
+
 func TestHealth_ReportsOK(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	var body struct {
@@ -323,5 +338,77 @@ func TestCreateTarget_RegistersAndHealthChecks(t *testing.T) {
 	getJSON(t, srv.URL+"/api/targets", &targets)
 	if len(targets) != 1 || targets[0].Name != "box" {
 		t.Fatalf("target not listed: %+v", targets)
+	}
+}
+
+func TestUpdateTarget_PatchesFieldsAndMetadata(t *testing.T) {
+	srv, _, st := newTestServer(t)
+	tgt := &model.Target{Name: "remote", Kind: model.TargetSSH, Status: model.TargetOnline,
+		WorkRoot: "/old", CapacitySessions: 4, Host: "old-host", User: "old-user",
+		Labels: []string{"old"}, CPUSummary: "cpu", MemorySummary: "mem", DiskSummary: "disk",
+		Metadata: model.JSONMap{"ssh_port": float64(22), "identity_file": "/old/key", "keep": "value"}}
+	if err := st.CreateTarget(tgt); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	if err := st.ClaimTargetSlot(tgt.ID); err != nil {
+		t.Fatalf("claim slot: %v", err)
+	}
+	if err := st.SetTargetStatus(tgt.ID, model.TargetDraining); err != nil {
+		t.Fatalf("drain target: %v", err)
+	}
+
+	resp := patchJSON(t, srv.URL+"/api/targets/"+tgt.ID, map[string]any{
+		"name":              "renamed",
+		"host":              "new-host",
+		"user":              "bot",
+		"work_root":         "/new",
+		"labels":            []string{"gpu", "linux"},
+		"capacity_sessions": 2,
+		"ssh_port":          2222,
+		"identity_file":     "/home/bot/.ssh/id_ed25519",
+		"bootstrap":         "echo ready",
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("patch status=%d, want 200", resp.StatusCode)
+	}
+	var got model.Target
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode patch response: %v", err)
+	}
+	if got.Name != "renamed" || got.Host != "new-host" || got.User != "bot" ||
+		got.WorkRoot != "/new" || got.CapacitySessions != 2 || got.AvailableSessions != 1 {
+		t.Fatalf("updated target wrong: %+v", got)
+	}
+	if got.Kind != model.TargetSSH || got.Status != model.TargetDraining ||
+		got.CPUSummary != "cpu" || got.MemorySummary != "mem" || got.DiskSummary != "disk" {
+		t.Fatalf("immutable/status summary fields should be preserved: %+v", got)
+	}
+	if len(got.Labels) != 2 || got.Labels[0] != "gpu" || got.Labels[1] != "linux" {
+		t.Fatalf("labels not updated: %+v", got.Labels)
+	}
+	if got.Metadata["ssh_port"] != float64(2222) ||
+		got.Metadata["identity_file"] != "/home/bot/.ssh/id_ed25519" ||
+		got.Metadata["bootstrap"] != "echo ready" ||
+		got.Metadata["keep"] != "value" {
+		t.Fatalf("metadata not updated/preserved: %#v", got.Metadata)
+	}
+}
+
+func TestUpdateTarget_RejectsMissingAndInvalidCapacity(t *testing.T) {
+	srv, _, st := newTestServer(t)
+	resp := patchJSON(t, srv.URL+"/api/targets/missing", map[string]any{"name": "x"})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing patch status=%d, want 404", resp.StatusCode)
+	}
+	tgt := &model.Target{Name: "remote", Kind: model.TargetSSH, WorkRoot: "/w", CapacitySessions: 1}
+	if err := st.CreateTarget(tgt); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	resp = patchJSON(t, srv.URL+"/api/targets/"+tgt.ID, map[string]any{"capacity_sessions": 0})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid capacity status=%d, want 400", resp.StatusCode)
 	}
 }

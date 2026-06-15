@@ -41,6 +41,54 @@ func (s *Store) CreateTarget(t *model.Target) error {
 	return err
 }
 
+// UpdateTarget updates a target's mutable operator configuration and preserves
+// scheduling state, health summaries, and last-seen data. Capacity changes keep
+// currently used slots accounted for: available becomes max(new-used, 0).
+func (s *Store) UpdateTarget(id string, t *model.Target) (*model.Target, error) {
+	if t.CapacitySessions < 1 {
+		return nil, fmt.Errorf("store: capacity_sessions must be at least 1")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	row := tx.QueryRow(`SELECT `+targetCols+` FROM targets WHERE id = ?`, id)
+	old, err := scanTarget(row)
+	if err != nil {
+		return nil, err
+	}
+	used := old.CapacitySessions - old.AvailableSessions
+	if used < 0 {
+		used = 0
+	}
+	available := t.CapacitySessions - used
+	if available < 0 {
+		available = 0
+	}
+
+	if _, err := tx.Exec(
+		`UPDATE targets
+		 SET name = ?, host = ?, user = ?, work_root = ?, labels = ?,
+		     capacity_sessions = ?, available_sessions = ?, metadata = ?
+		 WHERE id = ?`,
+		t.Name, nullStr(t.Host), nullStr(t.User), t.WorkRoot, joinLabels(t.Labels),
+		t.CapacitySessions, available, t.Metadata, id,
+	); err != nil {
+		return nil, err
+	}
+	row = tx.QueryRow(`SELECT `+targetCols+` FROM targets WHERE id = ?`, id)
+	updated, err := scanTarget(row)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
 var targetCols = `id, name, kind, status, host, user, work_root, labels,
 	capacity_sessions, available_sessions, cpu_summary, memory_summary,
 	disk_summary, last_seen_at, metadata`

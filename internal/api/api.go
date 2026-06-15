@@ -51,6 +51,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/targets", s.listTargets)
 	mux.HandleFunc("POST /api/targets", s.createTarget)
 	mux.HandleFunc("GET /api/targets/{id}", s.getTarget)
+	mux.HandleFunc("PATCH /api/targets/{id}", s.updateTarget)
 	mux.HandleFunc("POST /api/targets/{id}/drain", s.targetMode(model.TargetDraining))
 	mux.HandleFunc("POST /api/targets/{id}/enable", s.targetMode(model.TargetOnline))
 	mux.HandleFunc("POST /api/targets/{id}/disable", s.targetMode(model.TargetDisabled))
@@ -494,6 +495,26 @@ type createTargetReq struct {
 	Bootstrap        string   `json:"bootstrap"`
 }
 
+type updateTargetReq struct {
+	Name             *string   `json:"name"`
+	Host             *string   `json:"host"`
+	User             *string   `json:"user"`
+	WorkRoot         *string   `json:"work_root"`
+	Labels           *[]string `json:"labels"`
+	CapacitySessions *int      `json:"capacity_sessions"`
+	SSHPort          *int      `json:"ssh_port"`
+	IdentityFile     *string   `json:"identity_file"`
+	Bootstrap        *string   `json:"bootstrap"`
+}
+
+func copyJSONMap(m model.JSONMap) model.JSONMap {
+	out := model.JSONMap{}
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
 // createTarget registers a machine (local or SSH). For SSH it health-checks the
 // host, so the response status reflects whether it is reachable (this can take a
 // few seconds for an unreachable host).
@@ -528,6 +549,75 @@ func (s *Server) createTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"target": created, "doctor": doctor})
+}
+
+func (s *Server) updateTarget(w http.ResponseWriter, r *http.Request) {
+	var req updateTargetReq
+	if err := decode(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	old, err := s.st.GetTarget(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, httpStatusFor(err), err)
+		return
+	}
+	if req.CapacitySessions != nil && *req.CapacitySessions < 1 {
+		writeErr(w, http.StatusBadRequest, errors.New("capacity_sessions must be at least 1"))
+		return
+	}
+
+	next := *old
+	if req.Name != nil {
+		next.Name = *req.Name
+	}
+	if req.Host != nil {
+		next.Host = *req.Host
+	}
+	if req.User != nil {
+		next.User = *req.User
+	}
+	if req.WorkRoot != nil {
+		next.WorkRoot = *req.WorkRoot
+	}
+	if req.Labels != nil {
+		next.Labels = *req.Labels
+	}
+	if req.CapacitySessions != nil {
+		next.CapacitySessions = *req.CapacitySessions
+	}
+	next.Metadata = copyJSONMap(old.Metadata)
+	if req.SSHPort != nil {
+		if *req.SSHPort > 0 {
+			next.Metadata["ssh_port"] = float64(*req.SSHPort)
+		} else {
+			delete(next.Metadata, "ssh_port")
+		}
+	}
+	if req.IdentityFile != nil {
+		if *req.IdentityFile != "" {
+			next.Metadata["identity_file"] = *req.IdentityFile
+		} else {
+			delete(next.Metadata, "identity_file")
+		}
+	}
+	if req.Bootstrap != nil {
+		if *req.Bootstrap != "" {
+			next.Metadata["bootstrap"] = *req.Bootstrap
+		} else {
+			delete(next.Metadata, "bootstrap")
+		}
+	}
+	if len(next.Metadata) == 0 {
+		next.Metadata = nil
+	}
+
+	updated, err := s.st.UpdateTarget(old.ID, &next)
+	if err != nil {
+		writeErr(w, httpStatusFor(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
 }
 
 // doctorTarget re-runs readiness diagnostics on a target.
