@@ -153,6 +153,67 @@ func TestTargetCapacity_LimitsScheduling(t *testing.T) {
 	}
 }
 
+func TestUpdateTarget_AdjustsAvailableForCapacityChange(t *testing.T) {
+	st := newTestStore(t)
+	tgt := &model.Target{Name: "t", Kind: model.TargetLocal, Status: model.TargetOnline,
+		WorkRoot: "/w", CapacitySessions: 4}
+	if err := st.CreateTarget(tgt); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	if err := st.ClaimTargetSlot(tgt.ID); err != nil {
+		t.Fatalf("claim 1: %v", err)
+	}
+	if err := st.ClaimTargetSlot(tgt.ID); err != nil {
+		t.Fatalf("claim 2: %v", err)
+	}
+
+	updated, err := st.UpdateTarget(tgt.ID, &model.Target{
+		Name: "renamed", Kind: model.TargetSSH, Host: "box", User: "bot",
+		WorkRoot: "/new", Labels: []string{"gpu"}, CapacitySessions: 6,
+		Metadata: model.JSONMap{"ssh_port": float64(2222)},
+	})
+	if err != nil {
+		t.Fatalf("update grow: %v", err)
+	}
+	if updated.Kind != model.TargetLocal || updated.Status != model.TargetOnline {
+		t.Fatalf("kind/status should be preserved, got %s/%s", updated.Kind, updated.Status)
+	}
+	if updated.CapacitySessions != 6 || updated.AvailableSessions != 4 {
+		t.Fatalf("capacity/available=%d/%d, want 6/4", updated.CapacitySessions, updated.AvailableSessions)
+	}
+	if updated.Name != "renamed" || updated.Host != "box" || updated.User != "bot" ||
+		updated.WorkRoot != "/new" || len(updated.Labels) != 1 || updated.Labels[0] != "gpu" {
+		t.Fatalf("mutable fields not updated: %+v", updated)
+	}
+
+	updated, err = st.UpdateTarget(tgt.ID, &model.Target{
+		Name: "renamed", WorkRoot: "/new", CapacitySessions: 1,
+		Metadata: model.JSONMap{"ssh_port": float64(2222)},
+	})
+	if err != nil {
+		t.Fatalf("update shrink: %v", err)
+	}
+	if updated.CapacitySessions != 1 || updated.AvailableSessions != 0 {
+		t.Fatalf("capacity/available=%d/%d, want 1/0", updated.CapacitySessions, updated.AvailableSessions)
+	}
+}
+
+func TestUpdateTarget_RejectsInvalidOrMissingTarget(t *testing.T) {
+	st := newTestStore(t)
+	tgt := &model.Target{Name: "t", Kind: model.TargetLocal, WorkRoot: "/w", CapacitySessions: 1}
+	if err := st.CreateTarget(tgt); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	if _, err := st.UpdateTarget(tgt.ID, &model.Target{Name: "t", WorkRoot: "/w"}); err == nil {
+		t.Fatal("capacity below 1 should be rejected")
+	}
+	if _, err := st.UpdateTarget("missing", &model.Target{
+		Name: "missing", WorkRoot: "/w", CapacitySessions: 1,
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing target should return ErrNotFound, got %v", err)
+	}
+}
+
 // The dashboard query must return only small rows — never transcript content,
 // no matter how large the transcript grows.
 func TestDashboard_NoTranscriptBlobs(t *testing.T) {

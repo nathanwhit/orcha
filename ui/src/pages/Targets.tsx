@@ -53,6 +53,7 @@ export function TargetsPage() {
 function TargetCard({ t, onChanged }: { t: api.Target; onChanged: () => void }) {
   const [doctor, setDoctor] = useState<api.DoctorReport | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
 
   const act = async (name: string, fn: () => Promise<unknown>) => {
     setBusy(name);
@@ -160,6 +161,10 @@ function TargetCard({ t, onChanged }: { t: api.Target; onChanged: () => void }) 
           <Icon name="stethoscope" className="size-3.5" />
           {busy === "doctor" ? "Checking…" : "Doctor"}
         </Button>
+        <Button disabled={busy !== null} onClick={() => setEditing(true)}>
+          <Icon name="pencil" className="size-3.5" />
+          Edit
+        </Button>
         {t.status === "online" && (
           <Button
             disabled={busy !== null}
@@ -192,7 +197,160 @@ function TargetCard({ t, onChanged }: { t: api.Target; onChanged: () => void }) 
           </Button>
         )}
       </div>
+      {editing && (
+        <EditTargetModal
+          target={t}
+          onClose={() => setEditing(false)}
+          onSaved={() => {
+            setEditing(false);
+            onChanged();
+          }}
+        />
+      )}
     </Card>
+  );
+}
+
+function metadataText(t: api.Target, key: string) {
+  const value = t.metadata?.[key];
+  return typeof value === "string" ? value : "";
+}
+
+function metadataNumber(t: api.Target, key: string) {
+  const value = t.metadata?.[key];
+  return typeof value === "number" ? String(value) : "";
+}
+
+function EditTargetModal({
+  target,
+  onClose,
+  onSaved,
+}: {
+  target: api.Target;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [name, setName] = useState(target.name);
+  const [host, setHost] = useState(target.host ?? "");
+  const [user, setUser] = useState(target.user ?? "");
+  const [workRoot, setWorkRoot] = useState(target.work_root);
+  const [capacity, setCapacity] = useState(String(target.capacity_sessions));
+  const [labels, setLabels] = useState((target.labels ?? []).join(", "));
+  const [sshPort, setSSHPort] = useState(metadataNumber(target, "ssh_port"));
+  const [identityFile, setIdentityFile] = useState(
+    metadataText(target, "identity_file"),
+  );
+  const [bootstrap, setBootstrap] = useState(metadataText(target, "bootstrap"));
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const parsedCapacity = parseInt(capacity, 10);
+      const parsedPort = parseInt(sshPort, 10);
+      await api.patch<api.Target>(`/api/targets/${target.id}`, {
+        name,
+        host,
+        user,
+        work_root: workRoot,
+        capacity_sessions: Number.isFinite(parsedCapacity)
+          ? parsedCapacity
+          : target.capacity_sessions,
+        labels: labels
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean),
+        ssh_port: Number.isFinite(parsedPort) ? parsedPort : 0,
+        identity_file: identityFile,
+        bootstrap,
+      });
+      onSaved();
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : String(ex));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal title="Edit target" onClose={onClose}>
+      <form onSubmit={submit} className="space-y-4">
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Name">
+            <TextInput
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              required
+              autoFocus
+            />
+          </Field>
+          <Field label="Host">
+            <TextInput value={host} onChange={(e) => setHost(e.target.value)} />
+          </Field>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="User">
+            <TextInput value={user} onChange={(e) => setUser(e.target.value)} />
+          </Field>
+          <Field label="Capacity" hint="parallel sessions">
+            <TextInput
+              value={capacity}
+              onChange={(e) => setCapacity(e.target.value)}
+              inputMode="numeric"
+            />
+          </Field>
+        </div>
+        <Field label="Work root">
+          <TextInput
+            value={workRoot}
+            onChange={(e) => setWorkRoot(e.target.value)}
+            required
+          />
+        </Field>
+        <Field label="Labels" hint="comma-separated">
+          <TextInput
+            value={labels}
+            onChange={(e) => setLabels(e.target.value)}
+            placeholder="gpu, linux"
+          />
+        </Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="SSH port">
+            <TextInput
+              value={sshPort}
+              onChange={(e) => setSSHPort(e.target.value)}
+              inputMode="numeric"
+              placeholder="22"
+            />
+          </Field>
+          <Field label="Identity file">
+            <TextInput
+              value={identityFile}
+              onChange={(e) => setIdentityFile(e.target.value)}
+              placeholder="~/.ssh/id_ed25519"
+            />
+          </Field>
+        </div>
+        <Field label="Bootstrap">
+          <TextInput
+            value={bootstrap}
+            onChange={(e) => setBootstrap(e.target.value)}
+            placeholder="optional command"
+          />
+        </Field>
+        {err && <p className="text-xs text-rose-400">{err}</p>}
+        <div className="flex justify-end gap-2">
+          <Button onClick={onClose}>Cancel</Button>
+          <Button type="submit" variant="primary" disabled={busy}>
+            {busy ? "Saving…" : "Save"}
+          </Button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 
