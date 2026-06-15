@@ -78,6 +78,28 @@ func (o *Orchestrator) ProcessFeedback(ctx context.Context, prID string) ([]*mod
 		checkLogs = append(checkLogs, string(f.Kind)+": "+f.Body)
 	}
 
+	sess, err := o.spawnPRFollowup(ctx, pr, role, strings.Join(checkLogs, "\n"))
+	if err != nil {
+		return nil, err
+	}
+	for _, f := range pending {
+		_ = o.st.MarkFeedbackHandled(f.ID, sess.ID)
+	}
+	o.audit(pr.ObjectiveID, sess.ID, "followup_spawned",
+		fmt.Sprintf("spawned %s for PR #%d", role, pr.Number), model.JSONMap{"pr_id": prID})
+	return []*model.Session{sess}, nil
+}
+
+// spawnPRFollowup creates a follow-up session bound to a PR and returns it. It is
+// the single path for creating PR/CI follow-ups: it provisions the PR-branch
+// workspace (the canonical checkout for the PR's branch, which update_pr pushes
+// from), bakes the PR's internal id and branch into the goal, and records the
+// pr_id in session metadata. Both the automatic feedback path (ProcessFeedback)
+// and the manager's address_pr_feedback tool go through here, so a follow-up can
+// never be created without the checkout it must push its fix back from. feedback
+// is the body the agent acts on (review comments, check logs, or the manager's
+// instructions).
+func (o *Orchestrator) spawnPRFollowup(ctx context.Context, pr *model.PullRequest, role model.SessionRole, feedback string) (*model.Session, error) {
 	// PR-branch workspace for the follow-up. Pick a schedulable target.
 	target, err := o.SelectTarget(TargetRequest{})
 	if err != nil {
@@ -102,7 +124,7 @@ func (o *Orchestrator) ProcessFeedback(ctx context.Context, prID string) ([]*mod
 		BaseSHA:     pr.HeadSHA,
 		BranchName:  pr.Branch,
 		Status:      model.WorkspacePreparing,
-		Metadata:    prWorkspaceMeta(pr.Repo, prID, cloneURL, pushRepo),
+		Metadata:    prWorkspaceMeta(pr.Repo, pr.ID, cloneURL, pushRepo),
 	}
 	if err := o.st.CreateWorkspace(ws); err != nil {
 		return nil, err
@@ -124,9 +146,9 @@ func (o *Orchestrator) ProcessFeedback(ctx context.Context, prID string) ([]*mod
 	goal := fmt.Sprintf("Address feedback on PR #%d (%q) in repo %s.\n"+
 		"Use orcha pr_id=%q for your tool calls (update_pr / comment_pr take pr_id).\n"+
 		"This checkout is the PR branch %q with origin set.\n\nFeedback:\n%s\n\nPrior PR summary: %s",
-		pr.Number, pr.Title, pr.Repo, prID, pr.Branch, strings.Join(checkLogs, "\n"), pr.Summary)
+		pr.Number, pr.Title, pr.Repo, pr.ID, pr.Branch, feedback, pr.Summary)
 
-	sess, err := o.CreateSession(SpawnSpec{
+	return o.CreateSession(SpawnSpec{
 		ObjectiveID: pr.ObjectiveID,
 		Role:        role,
 		Agent:       o.defaultAgent(),
@@ -134,17 +156,8 @@ func (o *Orchestrator) ProcessFeedback(ctx context.Context, prID string) ([]*mod
 		Title:       fmt.Sprintf("Follow-up: PR #%d", pr.Number),
 		Goal:        goal,
 		WorkspaceID: ws.ID,
-		Metadata:    model.JSONMap{"pr_id": prID},
+		Metadata:    model.JSONMap{"pr_id": pr.ID},
 	})
-	if err != nil {
-		return nil, err
-	}
-	for _, f := range pending {
-		_ = o.st.MarkFeedbackHandled(f.ID, sess.ID)
-	}
-	o.audit(pr.ObjectiveID, sess.ID, "followup_spawned",
-		fmt.Sprintf("spawned %s for PR #%d", role, pr.Number), model.JSONMap{"pr_id": prID})
-	return []*model.Session{sess}, nil
 }
 
 // orchaBotMarker tags orcha's own PR comments so the monitor doesn't react to

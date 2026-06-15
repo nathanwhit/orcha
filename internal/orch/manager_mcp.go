@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/nathanwhit/orcha/internal/mcp"
 	"github.com/nathanwhit/orcha/internal/model"
@@ -24,9 +26,9 @@ func (o *Orchestrator) ManagerMCPHandler() http.Handler {
 
 	s.AddTool(mcp.Tool{
 		Name:        "spawn_session",
-		Description: "Spawn a scoped worker session under this objective. Returns the new session id. Use dependencies to make a session wait for others to succeed.",
+		Description: "Spawn a scoped worker session under this objective. Returns the new session id. Use dependencies to make a session wait for others to succeed. To address feedback or push a fix to an existing PR, use address_pr_feedback instead — not spawn_session.",
 		InputSchema: obj(map[string]any{
-			"role":          map[string]any{"type": "string", "enum": []string{"implementer", "reviewer", "validator", "researcher", "pr_followup", "ci_followup", "custom"}},
+			"role":          map[string]any{"type": "string", "enum": []string{"implementer", "reviewer", "validator", "researcher", "custom"}},
 			"title":         str,
 			"goal":          str,
 			"agent_hint":    map[string]any{"type": "string", "enum": []string{"claude", "codex"}},
@@ -72,9 +74,21 @@ func (o *Orchestrator) ManagerMCPHandler() http.Handler {
 	})
 	s.AddTool(mcp.Tool{
 		Name:        "comment_pr",
-		Description: "Leave a comment on a PR.",
+		Description: "Leave a comment on a PR. pr_id accepts the Orcha pr_id or the GitHub PR number.",
 		InputSchema: obj(map[string]any{"pr_id": str, "body": str}, "pr_id", "body"),
 		Handler:     o.mcpCommentPR,
+	})
+	s.AddTool(mcp.Tool{
+		Name: "address_pr_feedback",
+		Description: "Spawn a follow-up worker to address review feedback or push a fix to an existing PR. " +
+			"Use this for any PR follow-up instead of spawn_session: the worker gets a checkout of the PR " +
+			"branch and pushes its fix back to the same PR. pr_id accepts the Orcha pr_id or the GitHub PR number.",
+		InputSchema: obj(map[string]any{
+			"pr_id":        str,
+			"instructions": map[string]any{"type": "string", "description": "what the follow-up should do: the review comments to address or the fix to make"},
+			"role":         map[string]any{"type": "string", "enum": []string{"pr_followup", "ci_followup"}, "description": "ci_followup for CI/check failures; pr_followup (default) for review feedback"},
+		}, "pr_id", "instructions"),
+		Handler: o.mcpAddressPRFeedback,
 	})
 	s.AddTool(mcp.Tool{
 		Name:        "create_note",
@@ -112,6 +126,14 @@ func (o *Orchestrator) mcpSpawnSession(ctx context.Context, args map[string]any)
 	if err != nil {
 		return "", err
 	}
+	role := model.SessionRole(mcp.StringArg(args, "role"))
+	// PR/CI follow-ups need a PR-branch checkout that spawn_session cannot
+	// provision; routing them through address_pr_feedback is the only way they get
+	// one (without it the follow-up commits to a stranded branch and update_pr has
+	// nothing to push). Block them here so the enum can't be worked around.
+	if role == model.RolePRFollowup || role == model.RoleCIFollowup {
+		return "", fmt.Errorf("use address_pr_feedback (not spawn_session) for PR follow-ups: it provisions the PR-branch checkout the follow-up must push its fix from")
+	}
 	agentHint := model.AgentKind(mcp.StringArg(args, "agent_hint"))
 	meta := model.JSONMap{}
 	if repo := mcp.StringArg(args, "repo"); repo != "" {
@@ -137,7 +159,7 @@ func (o *Orchestrator) mcpSpawnSession(ctx context.Context, args map[string]any)
 		meta = nil
 	}
 	sess, err := o.SpawnSession(mgr.ID, SpawnSpec{
-		Role:         model.SessionRole(mcp.StringArg(args, "role")),
+		Role:         role,
 		Title:        mcp.StringArg(args, "title"),
 		Goal:         mcp.StringArg(args, "goal"),
 		Agent:        agentHint,
@@ -175,6 +197,10 @@ func (o *Orchestrator) mcpPublishPR(ctx context.Context, args map[string]any) (s
 }
 
 func (o *Orchestrator) mcpUpdatePR(ctx context.Context, args map[string]any) (string, error) {
+	pr, err := o.resolvePR(ctx, mcp.StringArg(args, "pr_id"))
+	if err != nil {
+		return "", err
+	}
 	// Default the pushing session to the caller (e.g. a follow-up pushing its own
 	// checkout), so the agent need not know its own session/workspace id.
 	sessionID := mcp.StringArg(args, "session_id")
@@ -192,7 +218,7 @@ func (o *Orchestrator) mcpUpdatePR(ctx context.Context, args map[string]any) (st
 		// so an agent that force-pushes after a rebase isn't blocked on wording.
 		reason = "force update after history rewrite (e.g. rebase to resolve conflicts)"
 	}
-	pr, err := o.UpdatePR(ctx, mcp.StringArg(args, "pr_id"), UpdateSpec{
+	updated, err := o.UpdatePR(ctx, pr.ID, UpdateSpec{
 		SessionID:     sessionID,
 		WorkspaceID:   workspaceID,
 		Title:         mcp.StringArg(args, "title"),
@@ -204,14 +230,91 @@ func (o *Orchestrator) mcpUpdatePR(ctx context.Context, args map[string]any) (st
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("updated PR #%d (head %s)", pr.Number, pr.HeadSHA), nil
+	return fmt.Sprintf("updated PR #%d (head %s)", updated.Number, updated.HeadSHA), nil
 }
 
 func (o *Orchestrator) mcpCommentPR(ctx context.Context, args map[string]any) (string, error) {
-	if err := o.CommentPR(ctx, mcp.StringArg(args, "pr_id"), mcp.StringArg(args, "body")); err != nil {
+	pr, err := o.resolvePR(ctx, mcp.StringArg(args, "pr_id"))
+	if err != nil {
+		return "", err
+	}
+	if err := o.CommentPR(ctx, pr.ID, mcp.StringArg(args, "body")); err != nil {
 		return "", err
 	}
 	return "comment posted.", nil
+}
+
+func (o *Orchestrator) mcpAddressPRFeedback(ctx context.Context, args map[string]any) (string, error) {
+	pr, err := o.resolvePR(ctx, mcp.StringArg(args, "pr_id"))
+	if err != nil {
+		return "", err
+	}
+	role := model.RolePRFollowup
+	if mcp.StringArg(args, "role") == string(model.RoleCIFollowup) {
+		role = model.RoleCIFollowup
+	}
+	sess, err := o.spawnPRFollowup(ctx, pr, role, mcp.StringArg(args, "instructions"))
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("spawned %s session %s for PR #%d on a checkout of branch %q; it will push its fix back to the PR.",
+		role, sess.ID, pr.Number, pr.Branch), nil
+}
+
+// resolvePR resolves a pr_id tool argument to a PR. It accepts either the
+// internal Orcha PR id (a UUID) or the GitHub PR number (e.g. "17"): the number
+// is the identifier agents see on GitHub and in PR comments, so accepting it
+// avoids the confusing "store: not found" an agent hits when it passes the number
+// it knows. A bare number is resolved within the caller's objective.
+func (o *Orchestrator) resolvePR(ctx context.Context, idArg string) (*model.PullRequest, error) {
+	idArg = strings.TrimSpace(idArg)
+	if idArg == "" {
+		return nil, fmt.Errorf("pr_id is required")
+	}
+	if pr, err := o.st.GetPR(idArg); err == nil {
+		return pr, nil
+	}
+	objID := o.callerObjective(ctx)
+	if n, convErr := strconv.Atoi(idArg); convErr == nil && n > 0 && objID != "" {
+		prs, _ := o.st.ListPRsByObjective(objID)
+		var match *model.PullRequest
+		for _, pr := range prs {
+			if pr.Number != n {
+				continue
+			}
+			// Prefer an open/draft PR if a number somehow appears more than once.
+			if match == nil || pr.Status == model.PROpen || pr.Status == model.PRDraft {
+				match = pr
+			}
+		}
+		if match != nil {
+			return match, nil
+		}
+	}
+	// Help the agent recover by listing the objective's PRs and their ids.
+	if objID != "" {
+		if prs, _ := o.st.ListPRsByObjective(objID); len(prs) > 0 {
+			var b strings.Builder
+			for _, pr := range prs {
+				fmt.Fprintf(&b, "\n  #%d -> pr_id %s (%s)", pr.Number, pr.ID, pr.Status)
+			}
+			return nil, fmt.Errorf("no PR found for pr_id %q; this objective's PRs:%s", idArg, b.String())
+		}
+	}
+	return nil, fmt.Errorf("no PR found for pr_id %q (pass the Orcha pr_id or the GitHub PR number)", idArg)
+}
+
+// callerObjective returns the objective of the session bound to the MCP request,
+// or "" if none is bound.
+func (o *Orchestrator) callerObjective(ctx context.Context) string {
+	id := mcp.SessionFromContext(ctx)
+	if id == "" {
+		return ""
+	}
+	if s, err := o.st.GetSession(id); err == nil {
+		return s.ObjectiveID
+	}
+	return ""
 }
 
 func (o *Orchestrator) mcpCreateNote(ctx context.Context, args map[string]any) (string, error) {

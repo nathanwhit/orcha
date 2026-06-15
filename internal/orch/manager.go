@@ -10,7 +10,7 @@ import (
 )
 
 // The manager tool surface. These methods back the manager agent's tools
-// (spawn_session, ask_user, publish_pr, update_pr, comment_pr, create_note,
+// (spawn_session, ask_user, publish_pr, update_pr, comment_pr, address_pr_feedback, create_note,
 // mark_objective_done, cancel_session). Each acquires the objective_manager
 // lock so only one manager mutation per objective happens at a time.
 
@@ -176,8 +176,8 @@ func (o *Orchestrator) MarkObjectiveDone(managerSessionID, summary string) error
 		if len(open) > 0 {
 			return fmt.Errorf("objective is not done: %d open PR(s) %v are not merged yet. "+
 				"It completes when its PRs merge — you are steered automatically then. If a PR "+
-				"needs review replies, CI fixes, or conflict resolution, push fixes with update_pr "+
-				"or spawn a follow-up; do NOT mark the objective done now", len(open), open)
+				"needs review replies, CI fixes, or conflict resolution, call address_pr_feedback "+
+				"to push fixes; do NOT mark the objective done now", len(open), open)
 		}
 	}
 	if err := o.withManagerLock(mgr.ObjectiveID, managerSessionID, func() error {

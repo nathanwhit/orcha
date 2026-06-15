@@ -1749,3 +1749,141 @@ func TestRecordUsage_IncrementsSessionAndProviderBucket(t *testing.T) {
 		t.Fatalf("session used=%d after no-op calls, want 150", got)
 	}
 }
+
+// ---- PR follow-up wiring (manager-spawned follow-ups & id resolution) ----
+
+// update_pr/comment_pr must accept the GitHub PR number, not just the internal
+// Orcha pr_id — agents naturally pass the number they see on GitHub. Regression
+// for "store: not found" when a follow-up passed pr_id="17".
+func TestUpdatePR_AcceptsGitHubNumber(t *testing.T) {
+	o, st := newTestOrch(t)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	f := forge.NewFake()
+	o.SetForge(f)
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+
+	ws := &model.Workspace{ObjectiveID: obj.ID, Kind: model.WorkspacePRBranch, ProjectPath: "octo/repo",
+		VCS: model.VCSGit, BranchName: "orcha/impl-x", Path: "/tmp/pr-7", Status: model.WorkspaceReady}
+	_ = st.CreateWorkspace(ws)
+	fu := &model.Session{ObjectiveID: obj.ID, Role: model.RolePRFollowup, Agent: model.AgentClaude,
+		Status: model.SessionRunning, WorkspaceID: ws.ID}
+	_ = st.CreateSession(fu)
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "octo/repo", Number: 7, Branch: "orcha/impl-x",
+		BaseBranch: "main", Status: model.PROpen}
+	_ = st.CreatePR(pr)
+
+	// Pass the GitHub number, not the UUID.
+	ctx := mcp.WithSession(context.Background(), fu.ID)
+	if _, err := o.mcpUpdatePR(ctx, map[string]any{"pr_id": "7"}); err != nil {
+		t.Fatalf("update_pr by GitHub number: %v", err)
+	}
+	if len(f.Pushes) == 0 {
+		t.Fatal("update_pr by GitHub number should have pushed the branch")
+	}
+}
+
+// A bare unknown number returns a helpful error listing the objective's PRs.
+func TestResolvePR_UnknownNumberListsPRs(t *testing.T) {
+	o, st := newTestOrch(t)
+	o.SetForge(forge.NewFake())
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	mgr := &model.Session{ObjectiveID: obj.ID, Role: model.RoleManager, Status: model.SessionRunning}
+	_ = st.CreateSession(mgr)
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "octo/repo", Number: 7, Branch: "b", BaseBranch: "main", Status: model.PROpen}
+	_ = st.CreatePR(pr)
+
+	ctx := mcp.WithSession(context.Background(), mgr.ID)
+	_, err := o.resolvePR(ctx, "999")
+	if err == nil {
+		t.Fatal("unknown number should error")
+	}
+	if !strings.Contains(err.Error(), "#7") || !strings.Contains(err.Error(), pr.ID) {
+		t.Fatalf("error should list the objective's PRs, got: %v", err)
+	}
+}
+
+// spawn_session must refuse PR/CI follow-up roles: it can't provision the
+// PR-branch checkout those roles need, so they must go through
+// address_pr_feedback. This is the root-cause guard for the stranded-commit bug.
+func TestSpawnSession_RejectsFollowupRoles(t *testing.T) {
+	o, st := newTestOrch(t)
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	mgr := &model.Session{ObjectiveID: obj.ID, Role: model.RoleManager, Status: model.SessionRunning}
+	_ = st.CreateSession(mgr)
+
+	ctx := mcp.WithSession(context.Background(), mgr.ID)
+	for _, role := range []string{"pr_followup", "ci_followup"} {
+		_, err := o.mcpSpawnSession(ctx, map[string]any{"role": role, "title": "t", "goal": "g"})
+		if err == nil {
+			t.Fatalf("spawn_session must reject role %q", role)
+		}
+		if !strings.Contains(err.Error(), "address_pr_feedback") {
+			t.Fatalf("rejection should point at address_pr_feedback, got: %v", err)
+		}
+	}
+}
+
+// address_pr_feedback provisions the PR-branch workspace and attaches the
+// follow-up to the PR, accepting the GitHub number for pr_id.
+func TestAddressPRFeedback_ProvisionsPRBranchWorkspace(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	o.SetForge(forge.NewFake())
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	mgr := &model.Session{ObjectiveID: obj.ID, Role: model.RoleManager, Status: model.SessionRunning}
+	_ = st.CreateSession(mgr)
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "octo/repo", Number: 5, Branch: "feature",
+		BaseBranch: "main", HeadSHA: "sha1", Status: model.PROpen}
+	_ = st.CreatePR(pr)
+
+	ctx := mcp.WithSession(context.Background(), mgr.ID)
+	if _, err := o.mcpAddressPRFeedback(ctx, map[string]any{"pr_id": "5", "instructions": "preserve unchanged fields"}); err != nil {
+		t.Fatalf("address_pr_feedback: %v", err)
+	}
+
+	sessions, _ := st.ListSessionsByObjective(obj.ID)
+	var fu *model.Session
+	for _, s := range sessions {
+		if s.Role == model.RolePRFollowup {
+			fu = s
+		}
+	}
+	if fu == nil {
+		t.Fatal("address_pr_feedback should spawn a pr_followup session")
+	}
+	if fu.Metadata["pr_id"] != pr.ID {
+		t.Fatalf("follow-up must be attached to the PR, got pr_id=%v", fu.Metadata["pr_id"])
+	}
+	if !strings.Contains(fu.Goal, "preserve unchanged fields") || !strings.Contains(fu.Goal, pr.ID) {
+		t.Fatalf("goal should carry the instructions and the pr_id, got: %q", fu.Goal)
+	}
+	ws, _ := st.GetWorkspace(fu.WorkspaceID)
+	if ws == nil || ws.Kind != model.WorkspacePRBranch || ws.BranchName != pr.Branch {
+		t.Fatalf("follow-up should use a PR-branch checkout, got %+v", ws)
+	}
+}
+
+// UpdatePR must refuse to push when no checkout holds the PR branch, rather than
+// running git in the orchestrator's own cwd. This is what turned a manager-spawned
+// follow-up's stranded commit into a silent no-op.
+func TestUpdatePR_NoCheckoutRefuses(t *testing.T) {
+	o, st := newTestOrch(t)
+	f := forge.NewFake()
+	o.SetForge(f)
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "octo/repo", Number: 4, Branch: "b",
+		BaseBranch: "main", Status: model.PROpen}
+	_ = st.CreatePR(pr)
+
+	_, err := o.UpdatePR(context.Background(), pr.ID, UpdateSpec{SessionID: "x"})
+	if err == nil {
+		t.Fatal("update_pr with no PR-branch checkout must error")
+	}
+	if !strings.Contains(err.Error(), "no PR-branch checkout") {
+		t.Fatalf("error should explain the missing checkout, got: %v", err)
+	}
+	if len(f.Pushes) != 0 {
+		t.Fatalf("no push should have happened, got %d", len(f.Pushes))
+	}
+}
