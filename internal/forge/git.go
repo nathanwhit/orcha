@@ -110,6 +110,38 @@ func (g *GitForge) HasDiff(ctx context.Context, workspacePath string) (bool, err
 	return n > 0, nil
 }
 
+// Diff returns the workspace's change relative to its base, led by a `--stat`
+// summary followed by the full unified patch. Comparing the working tree to the
+// base (a two-dot `git diff <base>`) captures both committed and still-uncommitted
+// changes, so it reflects everything the worker did. When no base can be resolved
+// (e.g. a brand-new repo), it falls back to the uncommitted working-tree diff.
+func (g *GitForge) Diff(ctx context.Context, workspacePath string) (string, error) {
+	base, err := g.resolveBase(ctx, workspacePath)
+	if err != nil {
+		base = ""
+	}
+	target := base
+	if target == "" {
+		target = "HEAD" // no base: show only what is not yet committed
+	}
+	stat, err := g.git(ctx, workspacePath, "diff", "--stat", target)
+	if err != nil {
+		return "", err
+	}
+	patch, err := g.git(ctx, workspacePath, "diff", target)
+	if err != nil {
+		return "", err
+	}
+	out := strings.TrimSpace(stat)
+	if p := strings.TrimSpace(patch); p != "" {
+		if out != "" {
+			out += "\n\n"
+		}
+		out += p
+	}
+	return out, nil
+}
+
 // resolveBase finds a ref to diff the branch against: the current branch's
 // upstream if set, else the remote's default branch (origin/HEAD).
 func (g *GitForge) resolveBase(ctx context.Context, dir string) (string, error) {

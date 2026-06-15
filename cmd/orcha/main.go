@@ -182,6 +182,12 @@ func main() {
 	// Manager tool surface (MCP). Manager sessions' Claude connects to
 	// /mcp/<sessionID> to drive the orchestrator.
 	mux.Handle("/mcp/", http.StripPrefix("/mcp", o.ManagerMCPHandler()))
+	// Worker tool surface (MCP): the smaller report_result/create_note/ask_user
+	// subset. Coding workers connect to /wmcp/<sessionID> to hand their result back.
+	mux.Handle("/wmcp/", http.StripPrefix("/wmcp", o.WorkerMCPHandler()))
+	// Follow-up tool surface (MCP): the PR-response tools (update_pr/comment_pr/…)
+	// plus report_result, but not the manager's spawn/publish/mark-done tools.
+	mux.Handle("/fmcp/", http.StripPrefix("/fmcp", o.FollowupMCPHandler()))
 	// The dashboard SPA (built from ui/, embedded at compile time).
 	mux.Handle("/", webui.Handler())
 

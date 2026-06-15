@@ -16,100 +16,149 @@ import (
 // "/mcp/<sessionID>", and tool calls are scoped to that session/objective. This
 // is what turns "the manager session runs" into "the manager actually manages":
 // its tool calls drive the orchestrator.
+//
+// The manager gets the full surface. Workers get strict subsets (see
+// WorkerMCPHandler / FollowupMCPHandler) so a worker cannot, say, mark the
+// objective done or spawn more workers — those are the manager's to decide.
 func (o *Orchestrator) ManagerMCPHandler() http.Handler {
+	return mcpServer(
+		o.toolSpawnSession(),
+		o.toolAskUser(),
+		o.toolPublishPR(),
+		o.toolUpdatePR(),
+		o.toolCommentPR(),
+		o.toolAddressPRFeedback(),
+		o.toolCreateNote(),
+		o.toolMarkDone(),
+		o.toolCancelSession(),
+	)
+}
+
+// mcpServer builds an MCP HTTP handler exposing exactly the given tools.
+func mcpServer(tools ...mcp.Tool) http.Handler {
 	s := mcp.NewServer("orcha", "0.1")
-
-	obj := func(props map[string]any, required ...string) map[string]any {
-		return map[string]any{"type": "object", "properties": props, "required": required}
+	for _, t := range tools {
+		s.AddTool(t)
 	}
-	str := map[string]any{"type": "string"}
+	return s.Handler()
+}
 
-	s.AddTool(mcp.Tool{
+// mcpObj/mcpStr are tiny JSON-schema builders shared by the tool constructors.
+func mcpObj(props map[string]any, required ...string) map[string]any {
+	return map[string]any{"type": "object", "properties": props, "required": required}
+}
+
+var mcpStr = map[string]any{"type": "string"}
+
+func (o *Orchestrator) toolSpawnSession() mcp.Tool {
+	return mcp.Tool{
 		Name:        "spawn_session",
 		Description: "Spawn a scoped worker session under this objective. Returns the new session id. Use dependencies to make a session wait for others to succeed. To address feedback or push a fix to an existing PR, use address_pr_feedback instead — not spawn_session.",
-		InputSchema: obj(map[string]any{
+		InputSchema: mcpObj(map[string]any{
 			"role":          map[string]any{"type": "string", "enum": []string{"implementer", "reviewer", "validator", "researcher", "custom"}},
-			"title":         str,
-			"goal":          str,
+			"title":         mcpStr,
+			"goal":          mcpStr,
 			"agent_hint":    map[string]any{"type": "string", "enum": []string{"claude", "codex"}},
-			"dependencies":  map[string]any{"type": "array", "items": str},
+			"dependencies":  map[string]any{"type": "array", "items": mcpStr},
 			"repo":          map[string]any{"type": "string", "description": "override the objective's repo for this worker's checkout (owner/repo, the upstream)"},
 			"push_repo":     map[string]any{"type": "string", "description": "fork to push branches to (owner/repo); omit to push to repo itself"},
 			"base_branch":   map[string]any{"type": "string", "description": "base branch for the checkout (default main)"},
 			"target":        map[string]any{"type": "string", "description": "pin this worker to a target machine (name or id), e.g. a remote SSH box"},
-			"target_labels": map[string]any{"type": "array", "items": str, "description": "require a target with these labels"},
+			"target_labels": map[string]any{"type": "array", "items": mcpStr, "description": "require a target with these labels"},
 		}, "role", "title", "goal"),
 		Handler: o.mcpSpawnSession,
-	})
-	s.AddTool(mcp.Tool{
+	}
+}
+
+func (o *Orchestrator) toolAskUser() mcp.Tool {
+	return mcp.Tool{
 		Name:        "ask_user",
 		Description: "Ask the user a question and block on their input. Use when requirements, credentials, setup, or direction are unclear.",
-		InputSchema: obj(map[string]any{"question": str, "context": str}, "question"),
+		InputSchema: mcpObj(map[string]any{"question": mcpStr, "context": mcpStr}, "question"),
 		Handler:     o.mcpAskUser,
-	})
-	s.AddTool(mcp.Tool{
+	}
+}
+
+func (o *Orchestrator) toolPublishPR() mcp.Tool {
+	return mcp.Tool{
 		Name:        "publish_pr",
 		Description: "Publish a PR from a worker session's committed changes. The orchestrator verifies mechanical safety, pushes the branch, and opens the PR.",
-		InputSchema: obj(map[string]any{
-			"session_id":     str,
-			"title":          str,
-			"body":           str,
-			"commit_message": str,
+		InputSchema: mcpObj(map[string]any{
+			"session_id":     mcpStr,
+			"title":          mcpStr,
+			"body":           mcpStr,
+			"commit_message": mcpStr,
 		}, "session_id", "title", "body"),
 		Handler: o.mcpPublishPR,
-	})
-	s.AddTool(mcp.Tool{
+	}
+}
+
+func (o *Orchestrator) toolUpdatePR() mcp.Tool {
+	return mcp.Tool{
 		Name:        "update_pr",
 		Description: "Push follow-up changes to an existing PR (branch-safe: never pushes to a merged PR). After a rebase (which rewrites history) set force=true, or the push is rejected as non-fast-forward.",
-		InputSchema: obj(map[string]any{
-			"pr_id":          str,
-			"session_id":     str,
-			"title":          str,
-			"body":           str,
+		InputSchema: mcpObj(map[string]any{
+			"pr_id":          mcpStr,
+			"session_id":     mcpStr,
+			"title":          mcpStr,
+			"body":           mcpStr,
 			"commit_message": map[string]any{"type": "string", "description": "used only if you left changes uncommitted; prefer committing yourself with git"},
 			"force":          map[string]any{"type": "boolean", "description": "force-push (--force-with-lease); required after a rebase or any history rewrite"},
 			"force_reason":   map[string]any{"type": "string", "description": "why a force push is needed (e.g. 'rebased onto main to resolve conflicts')"},
 		}, "pr_id"),
 		Handler: o.mcpUpdatePR,
-	})
-	s.AddTool(mcp.Tool{
+	}
+}
+
+func (o *Orchestrator) toolCommentPR() mcp.Tool {
+	return mcp.Tool{
 		Name:        "comment_pr",
 		Description: "Leave a comment on a PR. pr_id accepts the Orcha pr_id or the GitHub PR number.",
-		InputSchema: obj(map[string]any{"pr_id": str, "body": str}, "pr_id", "body"),
+		InputSchema: mcpObj(map[string]any{"pr_id": mcpStr, "body": mcpStr}, "pr_id", "body"),
 		Handler:     o.mcpCommentPR,
-	})
-	s.AddTool(mcp.Tool{
+	}
+}
+
+func (o *Orchestrator) toolAddressPRFeedback() mcp.Tool {
+	return mcp.Tool{
 		Name: "address_pr_feedback",
 		Description: "Spawn a follow-up worker to address review feedback or push a fix to an existing PR. " +
 			"Use this for any PR follow-up instead of spawn_session: the worker gets a checkout of the PR " +
 			"branch and pushes its fix back to the same PR. pr_id accepts the Orcha pr_id or the GitHub PR number.",
-		InputSchema: obj(map[string]any{
-			"pr_id":        str,
+		InputSchema: mcpObj(map[string]any{
+			"pr_id":        mcpStr,
 			"instructions": map[string]any{"type": "string", "description": "what the follow-up should do: the review comments to address or the fix to make"},
 			"role":         map[string]any{"type": "string", "enum": []string{"pr_followup", "ci_followup"}, "description": "ci_followup for CI/check failures; pr_followup (default) for review feedback"},
 		}, "pr_id", "instructions"),
 		Handler: o.mcpAddressPRFeedback,
-	})
-	s.AddTool(mcp.Tool{
+	}
+}
+
+func (o *Orchestrator) toolCreateNote() mcp.Tool {
+	return mcp.Tool{
 		Name:        "create_note",
 		Description: "Record a note in the objective's shared memory (not stdout).",
-		InputSchema: obj(map[string]any{"title": str, "body": str}, "title", "body"),
+		InputSchema: mcpObj(map[string]any{"title": mcpStr, "body": mcpStr}, "title", "body"),
 		Handler:     o.mcpCreateNote,
-	})
-	s.AddTool(mcp.Tool{
+	}
+}
+
+func (o *Orchestrator) toolMarkDone() mcp.Tool {
+	return mcp.Tool{
 		Name:        "mark_objective_done",
 		Description: "Mark the objective complete with a concise summary.",
-		InputSchema: obj(map[string]any{"summary": str}, "summary"),
+		InputSchema: mcpObj(map[string]any{"summary": mcpStr}, "summary"),
 		Handler:     o.mcpMarkDone,
-	})
-	s.AddTool(mcp.Tool{
+	}
+}
+
+func (o *Orchestrator) toolCancelSession() mcp.Tool {
+	return mcp.Tool{
 		Name:        "cancel_session",
 		Description: "Cancel a session (and its children).",
-		InputSchema: obj(map[string]any{"session_id": str}, "session_id"),
+		InputSchema: mcpObj(map[string]any{"session_id": mcpStr}, "session_id"),
 		Handler:     o.mcpCancelSession,
-	})
-
-	return s.Handler()
+	}
 }
 
 // managerSession resolves the calling manager session from the request context.

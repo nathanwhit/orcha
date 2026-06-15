@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     goal               TEXT NOT NULL DEFAULT '',
     current_activity   TEXT NOT NULL DEFAULT '',
     latest_summary     TEXT NOT NULL DEFAULT '',
+    handoff_summary    TEXT NOT NULL DEFAULT '',
     target_id          TEXT,
     workspace_id       TEXT,
     usage_provider     TEXT,

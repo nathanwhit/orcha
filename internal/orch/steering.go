@@ -135,10 +135,12 @@ func (o *Orchestrator) buildSpec(sess *model.Session, ws *model.Workspace, tgt *
 			spec.Prompt = managerSystemPreamble + o.managerContext(sess) + "\n\n" + spec.Prompt
 		}
 	// PR/CI follow-up: the agent itself decides how to respond, using its tools
-	// (update_pr to push a fix, comment_pr to reply, ask_user, create_note).
+	// (update_pr to push a fix, comment_pr to reply, ask_user, create_note,
+	// report_result). It gets the follow-up surface — the PR-response tools, NOT
+	// the manager's spawn/publish/mark-done tools.
 	case sess.Role == model.RolePRFollowup || sess.Role == model.RoleCIFollowup:
 		if o.cfg.ManagerMCPBaseURL != "" {
-			spec.MCP = map[string]string{"orcha": o.mcpBaseFor(tgt) + "/mcp/" + sess.ID}
+			spec.MCP = map[string]string{"orcha": o.mcpBaseFor(tgt) + "/fmcp/" + sess.ID}
 			spec.AllowedTools = []string{"mcp__orcha"}
 		}
 		spec.PermissionMode = o.cfg.WorkerPermissionMode // shell so it can commit
@@ -146,8 +148,14 @@ func (o *Orchestrator) buildSpec(sess *model.Session, ws *model.Workspace, tgt *
 		if spec.Prompt != "" {
 			spec.Prompt = followupSystemPreamble + completionInstruction + "\n\n" + spec.Prompt
 		}
-	// Other coding workers run one-shot in a checkout and do not publish.
+	// Other coding workers run one-shot in a checkout and do not publish. They get
+	// the small worker tool surface (report_result/create_note/ask_user) so they
+	// choose what to hand back to the manager instead of leaving it to a pane scrape.
 	case isCodingWorker(sess.Role):
+		if o.cfg.ManagerMCPBaseURL != "" {
+			spec.MCP = map[string]string{"orcha": o.mcpBaseFor(tgt) + "/wmcp/" + sess.ID}
+			spec.AllowedTools = []string{"mcp__orcha"}
+		}
 		spec.PermissionMode = o.cfg.WorkerPermissionMode
 		spec.OneShot = true
 		if spec.Prompt != "" {
@@ -180,7 +188,10 @@ orcha MCP tools (named mcp__orcha*):
 - If you are blocked or need a decision: call ask_user.
 Always leave at least a comment so the reviewer knows the outcome. Commit with
 git, but do not "git push" or use the gh CLI directly and do not change the git
-author/identity — push and comment through the tools.`
+author/identity — push and comment through the tools.
+When you are done, call report_result with what you did (the fix you pushed, the
+reply you posted, or why no action was warranted) — that is what your manager
+sees. Call it before printing the done marker.`
 
 // workerSystemPreamble orients a one-shot worker.
 const workerSystemPreamble = `You are a worker on an engineering team, running in an
@@ -195,7 +206,14 @@ A long build or test run is expected and fine — let it finish; do not abandon 
 just because it is slow. Only if a command is genuinely hung (no progress for a
 long time) in code unrelated to your change should you stop waiting on it, say so,
 and proceed.
-Finish with a brief summary of what you changed.`
+When you are done, call the report_result tool (one of your orcha MCP tools) with
+the result your manager needs: the actual outcome — what you changed and why, or,
+for a review, every finding with concrete file:line references — not a teaser like
+"I'm preparing the review". This tool call IS your handoff; whatever you put there
+is what the manager sees, so do not rely on your scrollback surviving. Set
+include_diff: true to attach your diff. For a long write-up, create_note it and
+pass its id in report_result's notes. Call report_result BEFORE printing the done
+marker.`
 
 // managerSystemPreamble orients the manager agent toward the tool surface and
 // the operating rules from the spec.

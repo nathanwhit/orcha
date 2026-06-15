@@ -79,6 +79,50 @@ func TestGitForge_HasDiff(t *testing.T) {
 	}
 }
 
+func TestGitForge_Diff(t *testing.T) {
+	work, _ := setupRepo(t)
+	g := NewGit()
+	ctx := context.Background()
+
+	// Clean checkout equal to origin/main -> empty diff.
+	if d, err := g.Diff(ctx, work); err != nil || d != "" {
+		t.Fatalf("clean checkout: diff=%q err=%v", d, err)
+	}
+
+	// A committed change on a feature branch shows up vs the base, with the
+	// changed file named in the leading --stat (so a truncated diff still
+	// identifies it) and the added line in the patch body.
+	mustGit(t, work, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(work, "feature.txt"), []byte("hello world\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "commit", "-m", "add feature")
+
+	d, err := g.Diff(ctx, work)
+	if err != nil {
+		t.Fatalf("diff: %v", err)
+	}
+	if !strings.Contains(d, "feature.txt") {
+		t.Fatalf("diff should name the changed file:\n%s", d)
+	}
+	if !strings.Contains(d, "+hello world") {
+		t.Fatalf("diff should include the added line:\n%s", d)
+	}
+
+	// An uncommitted edit is also captured (working tree vs base).
+	if err := os.WriteFile(filepath.Join(work, "feature.txt"), []byte("hello world\nmore\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err = g.Diff(ctx, work)
+	if err != nil {
+		t.Fatalf("diff after edit: %v", err)
+	}
+	if !strings.Contains(d, "+more") {
+		t.Fatalf("diff should include the uncommitted line:\n%s", d)
+	}
+}
+
 func TestGitForge_PushBranch(t *testing.T) {
 	work, bare := setupRepo(t)
 	g := NewGit()

@@ -68,6 +68,11 @@ type Forge interface {
 	// HasDiff reports whether a workspace path has uncommitted/branch changes
 	// worth publishing.
 	HasDiff(ctx context.Context, workspacePath string) (bool, error)
+	// Diff returns the workspace's full change relative to its base (committed and
+	// uncommitted), led by a --stat summary so a truncated diff still shows which
+	// files changed. Used to attach a worker's changes to its result handoff.
+	// Empty (no error) when there is nothing to show or no base to compare against.
+	Diff(ctx context.Context, workspacePath string) (string, error)
 	// PushBranch pushes the workspace branch to the repo. force must be
 	// explicitly requested and is recorded with a reason by the caller.
 	PushBranch(ctx context.Context, repo, workspacePath, branch string, force bool) (headSHA string, err error)
@@ -132,6 +137,7 @@ type Fake struct {
 	mu            sync.Mutex
 	repos         map[string]bool
 	diffs         map[string]bool     // workspacePath -> has diff
+	diffText      map[string]string   // workspacePath -> Diff() output
 	prs           map[string]*PRState // repo#number -> state
 	openByBranch  map[string]*PRState // repo\x00branch -> open PR (for FindOpenPR)
 	nextNum       int
@@ -170,6 +176,7 @@ func NewFake() *Fake {
 	return &Fake{
 		repos:        map[string]bool{},
 		diffs:        map[string]bool{},
+		diffText:     map[string]string{},
 		prs:          map[string]*PRState{},
 		openByBranch: map[string]*PRState{},
 		issues:       map[string]Issue{},
@@ -184,6 +191,9 @@ func (f *Fake) SetRepo(repo string, exists bool) { f.mu.Lock(); f.repos[repo] = 
 
 // SetDiff marks whether a workspace path has a diff.
 func (f *Fake) SetDiff(path string, has bool) { f.mu.Lock(); f.diffs[path] = has; f.mu.Unlock() }
+
+// SetDiffText seeds the patch text Diff returns for a workspace path.
+func (f *Fake) SetDiffText(path, diff string) { f.mu.Lock(); f.diffText[path] = diff; f.mu.Unlock() }
 
 // SetPRState seeds/overrides the host state for a PR.
 func (f *Fake) SetPRState(repo string, number int, st PRState) {
@@ -213,6 +223,12 @@ func (f *Fake) HasDiff(_ context.Context, workspacePath string) (bool, error) {
 		return v, nil
 	}
 	return true, nil // default: has changes
+}
+
+func (f *Fake) Diff(_ context.Context, workspacePath string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.diffText[workspacePath], nil
 }
 
 func (f *Fake) CommitAll(_ context.Context, workspacePath, message string) (bool, error) {
