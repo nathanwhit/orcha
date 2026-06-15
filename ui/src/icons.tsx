@@ -25,6 +25,7 @@ const PATHS = {
   target: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z",
   stethoscope: "M5 3v6a5 5 0 0 0 10 0V3 M3 3h4 M13 3h4 M15 14v2a5 5 0 0 0 10 0v-1 M20 13.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z",
   folder: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z",
+  edit: "M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7 M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4Z",
 } as const;
 
 export type IconName = keyof typeof PATHS;

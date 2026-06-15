@@ -235,6 +235,62 @@ func TestSessionScreen_NoLiveScreenReturns204(t *testing.T) {
 	}
 }
 
+func putJSON(t *testing.T, url string, body any) *http.Response {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(b))
+	if err != nil {
+		t.Fatalf("new PUT request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT %s: %v", url, err)
+	}
+	return resp
+}
+
+func TestUpdateProject_Endpoint(t *testing.T) {
+	srv, _, st := newTestServer(t)
+	p := &model.Project{Repo: "octo/repo", BaseBranch: "main"}
+	if err := st.UpsertProject(p); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// 200: editing name and base branch persists and is returned.
+	resp := putJSON(t, srv.URL+"/api/projects/"+p.ID, map[string]any{
+		"repo": "octo/repo", "name": "Edited", "base_branch": "develop",
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("update status=%d, want 200", resp.StatusCode)
+	}
+	var got model.Project
+	_ = json.NewDecoder(resp.Body).Decode(&got)
+	if got.Name != "Edited" || got.BaseBranch != "develop" {
+		t.Fatalf("response did not reflect edit: %+v", got)
+	}
+	var listed []model.Project
+	getJSON(t, srv.URL+"/api/projects", &listed)
+	if len(listed) != 1 || listed[0].Name != "Edited" || listed[0].BaseBranch != "develop" {
+		t.Fatalf("edit not reflected in list: %+v", listed)
+	}
+
+	// 404: unknown id.
+	resp404 := putJSON(t, srv.URL+"/api/projects/missing", map[string]any{"repo": "x/y"})
+	resp404.Body.Close()
+	if resp404.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing project status=%d, want 404", resp404.StatusCode)
+	}
+
+	// 400: repo is required.
+	resp400 := putJSON(t, srv.URL+"/api/projects/"+p.ID, map[string]any{"name": "x"})
+	resp400.Body.Close()
+	if resp400.StatusCode != http.StatusBadRequest {
+		t.Fatalf("missing repo status=%d, want 400", resp400.StatusCode)
+	}
+}
+
 func TestCreateTarget_RegistersAndHealthChecks(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	// A local target health-checks instantly and comes up online.

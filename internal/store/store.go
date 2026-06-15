@@ -26,6 +26,10 @@ var ErrNotFound = errors.New("store: not found")
 // holder owns it.
 var ErrLockHeld = errors.New("store: lock already held")
 
+// ErrConflict is returned when a write violates a uniqueness constraint, e.g.
+// updating a project's repo to one another project already owns.
+var ErrConflict = errors.New("store: conflict")
+
 // Clock returns the current time. It is injectable for deterministic tests.
 type Clock func() time.Time
 

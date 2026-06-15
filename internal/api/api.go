@@ -65,6 +65,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/projects", s.listProjects)
 	mux.HandleFunc("POST /api/projects", s.upsertProject)
+	mux.HandleFunc("PUT /api/projects/{id}", s.updateProject)
 	mux.HandleFunc("DELETE /api/projects/{id}", s.deleteProject)
 
 	mux.HandleFunc("GET /api/questions", s.listQuestions)
@@ -146,7 +147,8 @@ func httpStatusFor(err error) int {
 	case errors.Is(err, store.ErrNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, store.ErrNoCapacity), errors.Is(err, orch.ErrNoTarget),
-		errors.Is(err, store.ErrLockHeld), errors.Is(err, orch.ErrUnsafePublish):
+		errors.Is(err, store.ErrLockHeld), errors.Is(err, orch.ErrUnsafePublish),
+		errors.Is(err, store.ErrConflict):
 		return http.StatusConflict
 	default:
 		return http.StatusInternalServerError
@@ -253,6 +255,31 @@ func (s *Server) upsertProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, p)
+}
+
+// updateProject edits an existing project by id. Unlike upsertProject (keyed by
+// repo, empty fields keep old values), this is a full update: empty fields clear,
+// and the repo itself can change. ErrNotFound → 404, a repo-unique collision with
+// another project → 409.
+func (s *Server) updateProject(w http.ResponseWriter, r *http.Request) {
+	var req upsertProjectReq
+	if err := decode(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Repo == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("repo is required (owner/repo)"))
+		return
+	}
+	p := &model.Project{
+		ID: r.PathValue("id"), Name: req.Name, Repo: req.Repo, PushRepo: req.PushRepo,
+		BaseBranch: req.BaseBranch, CloneURL: req.CloneURL,
+	}
+	if err := s.st.UpdateProject(p); err != nil {
+		writeErr(w, httpStatusFor(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
 }
 
 func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {

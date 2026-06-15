@@ -340,6 +340,49 @@ func TestDeduplicatePRs(t *testing.T) {
 	}
 }
 
+func TestUpdateProject(t *testing.T) {
+	st := newTestStore(t)
+	p := &model.Project{Repo: "octo/repo", PushRepo: "me/repo", BaseBranch: "main"}
+	if err := st.UpsertProject(p); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Success: change every editable field, including clearing push_repo.
+	p.Name = "Renamed"
+	p.Repo = "octo/renamed"
+	p.PushRepo = ""
+	p.BaseBranch = "develop"
+	if err := st.UpdateProject(p); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	got, err := st.GetProject(p.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Name != "Renamed" || got.Repo != "octo/renamed" || got.BaseBranch != "develop" {
+		t.Fatalf("update did not persist: %+v", got)
+	}
+	// An emptied field actually clears (unlike UpsertProject).
+	if got.PushRepo != "" {
+		t.Fatalf("push_repo should have cleared, got %q", got.PushRepo)
+	}
+
+	// Not found.
+	if err := st.UpdateProject(&model.Project{ID: "nope", Repo: "x/y"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+
+	// Repo conflict: another project already owns the target repo.
+	other := &model.Project{Repo: "other/repo"}
+	if err := st.UpsertProject(other); err != nil {
+		t.Fatalf("seed other: %v", err)
+	}
+	got.Repo = "other/repo"
+	if err := st.UpdateProject(got); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict on repo collision, got %v", err)
+	}
+}
+
 func TestHasOpenQuestionBySession(t *testing.T) {
 	st := newTestStore(t)
 	if st.HasOpenQuestionBySession("s1") {

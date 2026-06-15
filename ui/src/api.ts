@@ -257,6 +257,14 @@ export function post<T>(url: string, body?: unknown): Promise<T> {
   }).then(parse);
 }
 
+export function put<T>(url: string, body?: unknown): Promise<T> {
+  return fetch(url, {
+    method: "PUT",
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  }).then(parse);
+}
+
 export function del<T>(url: string): Promise<T> {
   return fetch(url, { method: "DELETE" }).then(parse);
 }

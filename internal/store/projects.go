@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"strings"
 
 	"github.com/nathanwhit/orcha/internal/model"
 )
@@ -45,6 +46,37 @@ func (s *Store) UpsertProject(p *model.Project) error {
 		 VALUES(?,?,?,?,?,?,?,?)`,
 		p.ID, p.Name, p.Repo, p.PushRepo, p.CloneURL, p.BaseBranch, now, now)
 	return err
+}
+
+// UpdateProject performs a full update of an existing project by id, setting
+// every editable field explicitly so empty fields actually clear — unlike
+// UpsertProject, which is keyed by repo and preserves empty values. This is the
+// editing path: it can also change the repo. If name is empty it defaults to the
+// repo (consistent with UpsertProject). It returns ErrNotFound when no project
+// has the given id, and ErrConflict when the new repo collides with another
+// project (the repo column is UNIQUE).
+func (s *Store) UpdateProject(p *model.Project) error {
+	if p.Name == "" {
+		p.Name = p.Repo
+	}
+	p.UpdatedAt = s.Now()
+	res, err := s.db.Exec(
+		`UPDATE projects SET name=?, repo=?, push_repo=?, clone_url=?, base_branch=?, updated_at=? WHERE id=?`,
+		p.Name, p.Repo, p.PushRepo, p.CloneURL, p.BaseBranch, p.UpdatedAt, p.ID)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrConflict
+		}
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 var projectCols = `id, name, repo, push_repo, clone_url, base_branch, created_at, updated_at`

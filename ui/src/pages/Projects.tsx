@@ -18,6 +18,7 @@ import {
 export function ProjectsPage() {
   const projects = usePoll(() => api.get<api.Project[]>("/api/projects"), 5000);
   const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState<api.Project | null>(null);
   const ps = projects.data ?? [];
 
   return (
@@ -68,6 +69,11 @@ export function ProjectsPage() {
                 </div>
                 <TimeAgo iso={p.updated_at} />
                 <IconButton
+                  name="edit"
+                  title="Edit project"
+                  onClick={() => setEditing(p)}
+                />
+                <IconButton
                   name="x"
                   title="Remove project"
                   onClick={() => {
@@ -87,10 +93,20 @@ export function ProjectsPage() {
       )}
 
       {adding && (
-        <AddProjectModal
+        <ProjectModal
           onClose={() => setAdding(false)}
-          onAdded={() => {
+          onSaved={() => {
             setAdding(false);
+            projects.reload();
+          }}
+        />
+      )}
+      {editing && (
+        <ProjectModal
+          project={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            setEditing(null);
             projects.reload();
           }}
         />
@@ -99,17 +115,23 @@ export function ProjectsPage() {
   );
 }
 
-function AddProjectModal({
+// ProjectModal both adds and edits a project. With no `project` it POSTs a new
+// one ("Add project"); with one it pre-fills the fields and PUTs the edit
+// ("Edit project").
+function ProjectModal({
+  project,
   onClose,
-  onAdded,
+  onSaved,
 }: {
+  project?: api.Project;
   onClose: () => void;
-  onAdded: () => void;
+  onSaved: () => void;
 }) {
-  const [name, setName] = useState("");
-  const [repo, setRepo] = useState("");
-  const [pushRepo, setPushRepo] = useState("");
-  const [base, setBase] = useState("");
+  const editing = project != null;
+  const [name, setName] = useState(project?.name ?? "");
+  const [repo, setRepo] = useState(project?.repo ?? "");
+  const [pushRepo, setPushRepo] = useState(project?.push_repo ?? "");
+  const [base, setBase] = useState(project?.base_branch ?? "");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -119,13 +141,18 @@ function AddProjectModal({
     setBusy(true);
     setErr(null);
     try {
-      await api.post("/api/projects", {
+      const body = {
         name,
         repo,
         push_repo: pushRepo,
         base_branch: base,
-      });
-      onAdded();
+      };
+      if (editing) {
+        await api.put(`/api/projects/${project.id}`, body);
+      } else {
+        await api.post("/api/projects", body);
+      }
+      onSaved();
     } catch (ex) {
       setErr(ex instanceof Error ? ex.message : String(ex));
       setBusy(false);
@@ -133,7 +160,7 @@ function AddProjectModal({
   };
 
   return (
-    <Modal title="Add project" onClose={onClose}>
+    <Modal title={editing ? "Edit project" : "Add project"} onClose={onClose}>
       <form onSubmit={submit} className="space-y-4">
         <div className="grid grid-cols-2 gap-3">
           <Field label="Name" hint="optional">
