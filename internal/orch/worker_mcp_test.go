@@ -63,11 +63,20 @@ func TestMCPSurfaces_ToolScoping(t *testing.T) {
 		t.Fatalf("followup surface = %v, want %v", followup, wantFollowup)
 	}
 
+	// The operator surface drives orcha from the top, but must NOT expose the
+	// manager's in-objective tools (spawn_session/publish_pr/mark_objective_done).
+	operator := listTools(t, o.OperatorMCPHandler())
+	wantOperator := []string{"answer_question", "cancel_objective", "create_objective",
+		"get_objective", "list_objectives", "list_open_questions", "message_manager"}
+	if strings.Join(operator, ",") != strings.Join(wantOperator, ",") {
+		t.Fatalf("operator surface = %v, want %v", operator, wantOperator)
+	}
+
 	// The escalation tools must never leak into a non-manager surface.
 	for _, banned := range []string{"spawn_session", "publish_pr", "mark_objective_done", "cancel_session"} {
-		for _, n := range append(append([]string{}, worker...), followup...) {
+		for _, n := range append(append(append([]string{}, worker...), followup...), operator...) {
 			if n == banned {
-				t.Fatalf("%q must not be exposed to workers/follow-ups", banned)
+				t.Fatalf("%q must not be exposed to workers/follow-ups/operators", banned)
 			}
 		}
 	}
