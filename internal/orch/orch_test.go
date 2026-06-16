@@ -1864,6 +1864,133 @@ func TestAddressPRFeedback_ProvisionsPRBranchWorkspace(t *testing.T) {
 	}
 }
 
+// A second address_pr_feedback for a PR that already has a live follow-up must
+// NOT spawn another follow-up — it steers the existing one in place. This is the
+// fix for managers piling up duplicate follow-up workers on a single PR.
+func TestAddressPRFeedback_ReusesActiveFollowup(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	fake := agent.NewFake(model.AgentClaude, true, nil)
+	o.RegisterProvider(fake)
+	o.SetForge(forge.NewFake())
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	mgr := &model.Session{ObjectiveID: obj.ID, Role: model.RoleManager, Status: model.SessionRunning}
+	_ = st.CreateSession(mgr)
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "octo/repo", Number: 9, Branch: "feature",
+		BaseBranch: "main", HeadSHA: "sha1", Status: model.PROpen}
+	_ = st.CreatePR(pr)
+
+	ctx := mcp.WithSession(context.Background(), mgr.ID)
+	if _, err := o.mcpAddressPRFeedback(ctx, map[string]any{"pr_id": "9", "instructions": "first pass"}); err != nil {
+		t.Fatalf("first address_pr_feedback: %v", err)
+	}
+	msg, err := o.mcpAddressPRFeedback(ctx, map[string]any{"pr_id": "9", "instructions": "also handle the edge case"})
+	if err != nil {
+		t.Fatalf("second address_pr_feedback: %v", err)
+	}
+	if !strings.Contains(msg, "steered") {
+		t.Fatalf("second call should report steering the existing follow-up, got: %q", msg)
+	}
+
+	var followups []*model.Session
+	sessions, _ := st.ListSessionsByObjective(obj.ID)
+	for _, s := range sessions {
+		if s.Role == model.RolePRFollowup {
+			followups = append(followups, s)
+		}
+	}
+	if len(followups) != 1 {
+		t.Fatalf("expected exactly one follow-up after a repeat call, got %d", len(followups))
+	}
+	if resumed := fake.Resumed(); len(resumed) != 1 || resumed[0] != followups[0].ID {
+		t.Fatalf("the existing follow-up should have been steered (resumed), got resumed=%v", resumed)
+	}
+}
+
+// list_children surfaces the objective's worker/follow-up session ids so the
+// manager can recover them for message_session/cancel_session, excludes the
+// manager itself, and hides terminal sessions unless asked.
+func TestListChildren_ListsAndFilters(t *testing.T) {
+	o, st := newTestOrch(t)
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	mgr := &model.Session{ObjectiveID: obj.ID, Role: model.RoleManager, Status: model.SessionRunning}
+	_ = st.CreateSession(mgr)
+	running := &model.Session{ObjectiveID: obj.ID, Role: model.RoleImplementer, Status: model.SessionRunning, Title: "do the thing"}
+	_ = st.CreateSession(running)
+	done := &model.Session{ObjectiveID: obj.ID, Role: model.RoleReviewer, Status: model.SessionSucceeded, Title: "old review"}
+	_ = st.CreateSession(done)
+	ctx := mcp.WithSession(context.Background(), mgr.ID)
+
+	out, err := o.mcpListChildren(ctx, map[string]any{})
+	if err != nil {
+		t.Fatalf("list_children: %v", err)
+	}
+	if !strings.Contains(out, running.ID) {
+		t.Fatalf("running child should be listed, got: %q", out)
+	}
+	if strings.Contains(out, mgr.ID) {
+		t.Fatalf("the manager must not list itself, got: %q", out)
+	}
+	if strings.Contains(out, done.ID) {
+		t.Fatalf("terminal child should be hidden by default, got: %q", out)
+	}
+
+	full, err := o.mcpListChildren(ctx, map[string]any{"include_finished": true})
+	if err != nil {
+		t.Fatalf("list_children include_finished: %v", err)
+	}
+	if !strings.Contains(full, done.ID) || !strings.Contains(full, running.ID) {
+		t.Fatalf("include_finished should list both children, got: %q", full)
+	}
+}
+
+// message_session lets the manager steer a running child in place, and confines
+// that power to its own non-manager children.
+func TestMessageSession_SteersChildAndGuards(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	fake := agent.NewFake(model.AgentClaude, true, nil)
+	o.RegisterProvider(fake)
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	mgr := &model.Session{ObjectiveID: obj.ID, Role: model.RoleManager, Status: model.SessionRunning}
+	_ = st.CreateSession(mgr)
+	worker := &model.Session{ObjectiveID: obj.ID, Role: model.RoleImplementer, Agent: model.AgentClaude, Status: model.SessionRunning}
+	_ = st.CreateSession(worker)
+	ctx := mcp.WithSession(context.Background(), mgr.ID)
+
+	// Happy path: steer the worker in place.
+	out, err := o.mcpMessageSession(ctx, map[string]any{"session_id": worker.ID, "message": "that port IS doable — grind through it"})
+	if err != nil {
+		t.Fatalf("message_session: %v", err)
+	}
+	if !strings.Contains(out, worker.ID) {
+		t.Fatalf("reply should name the steered session, got: %q", out)
+	}
+	if resumed := fake.Resumed(); len(resumed) != 1 || resumed[0] != worker.ID {
+		t.Fatalf("worker should have been steered (resumed), got resumed=%v", resumed)
+	}
+
+	// Guard: cannot steer yourself.
+	if _, err := o.mcpMessageSession(ctx, map[string]any{"session_id": mgr.ID, "message": "x"}); err == nil {
+		t.Fatal("message_session must reject steering the manager itself")
+	}
+
+	// Guard: cannot steer a session in another objective.
+	other, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "y", Prompt: "q"})
+	stranger := &model.Session{ObjectiveID: other.ID, Role: model.RoleImplementer, Status: model.SessionRunning}
+	_ = st.CreateSession(stranger)
+	if _, err := o.mcpMessageSession(ctx, map[string]any{"session_id": stranger.ID, "message": "x"}); err == nil {
+		t.Fatal("message_session must reject a session outside the objective")
+	}
+
+	// Guard: cannot steer a finished session.
+	doneWorker := &model.Session{ObjectiveID: obj.ID, Role: model.RoleImplementer, Status: model.SessionSucceeded}
+	_ = st.CreateSession(doneWorker)
+	if _, err := o.mcpMessageSession(ctx, map[string]any{"session_id": doneWorker.ID, "message": "x"}); err == nil {
+		t.Fatal("message_session must reject a terminal session")
+	}
+}
+
 // UpdatePR must refuse to push when no checkout holds the PR branch, rather than
 // running git in the orchestrator's own cwd. This is what turned a manager-spawned
 // follow-up's stranded commit into a silent no-op.

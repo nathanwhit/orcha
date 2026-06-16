@@ -28,6 +28,8 @@ func (o *Orchestrator) ManagerMCPHandler() http.Handler {
 		o.toolUpdatePR(),
 		o.toolCommentPR(),
 		o.toolAddressPRFeedback(),
+		o.toolListChildren(),
+		o.toolMessageSession(),
 		o.toolCreateNote(),
 		o.toolMarkDone(),
 		o.toolCancelSession(),
@@ -131,6 +133,35 @@ func (o *Orchestrator) toolAddressPRFeedback() mcp.Tool {
 			"role":         map[string]any{"type": "string", "enum": []string{"pr_followup", "ci_followup"}, "description": "ci_followup for CI/check failures; pr_followup (default) for review feedback"},
 		}, "pr_id", "instructions"),
 		Handler: o.mcpAddressPRFeedback,
+	}
+}
+
+func (o *Orchestrator) toolListChildren() mcp.Tool {
+	return mcp.Tool{
+		Name: "list_children",
+		Description: "List the worker and PR/CI follow-up sessions under this objective, with their " +
+			"session ids, roles, statuses, and current activity. Use it to recover a session id you need " +
+			"for message_session, cancel_session, or publish_pr — e.g. after you were resumed and lost track " +
+			"of what is running. Set include_finished: true to also see completed/failed/canceled sessions.",
+		InputSchema: mcpObj(map[string]any{
+			"include_finished": map[string]any{"type": "boolean", "description": "include terminal (finished/failed/canceled) sessions; default false"},
+		}),
+		Handler: o.mcpListChildren,
+	}
+}
+
+func (o *Orchestrator) toolMessageSession() mcp.Tool {
+	return mcp.Tool{
+		Name: "message_session",
+		Description: "Steer one of your running child sessions — a worker or a PR/CI follow-up — in place, " +
+			"WITHOUT canceling and respawning it. The message is delivered mid-flight: the session picks up " +
+			"your new direction and keeps its work and context. Use this to redirect, add context, correct " +
+			"course, or push back (e.g. a worker that wrongly claims a task can't be done) whenever the " +
+			"existing session can still reach the right answer — it is almost always better than cancel_session + " +
+			"spawn_session, which throws away progress. session_id is the id returned by spawn_session or " +
+			"address_pr_feedback.",
+		InputSchema: mcpObj(map[string]any{"session_id": mcpStr, "message": mcpStr}, "session_id", "message"),
+		Handler:     o.mcpMessageSession,
 	}
 }
 
@@ -302,7 +333,20 @@ func (o *Orchestrator) mcpAddressPRFeedback(ctx context.Context, args map[string
 	if mcp.StringArg(args, "role") == string(model.RoleCIFollowup) {
 		role = model.RoleCIFollowup
 	}
-	sess, err := o.spawnPRFollowup(ctx, pr, role, mcp.StringArg(args, "instructions"))
+	instructions := mcp.StringArg(args, "instructions")
+	// If a follow-up is already working this PR, steer it with the new
+	// instructions rather than spawning another. Two follow-ups on one PR-branch
+	// checkout stomp each other and the team loses track of which is authoritative;
+	// this is the bug where repeated address_pr_feedback calls pile up duplicate
+	// workers. A fresh follow-up spawns naturally once the prior one finishes.
+	if existing := o.activePRFollowup(pr.ObjectiveID, pr.ID); existing != nil {
+		if err := o.Steer(ctx, existing.ID, "Additional instructions for this PR follow-up:\n"+instructions); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("a %s (session %s) is already working PR #%d; steered it with your new instructions instead of spawning a duplicate.",
+			existing.Role, existing.ID, pr.Number), nil
+	}
+	sess, err := o.spawnPRFollowup(ctx, pr, role, instructions)
 	if err != nil {
 		return "", err
 	}
@@ -364,6 +408,83 @@ func (o *Orchestrator) callerObjective(ctx context.Context) string {
 		return s.ObjectiveID
 	}
 	return ""
+}
+
+func (o *Orchestrator) mcpListChildren(ctx context.Context, args map[string]any) (string, error) {
+	mgr, err := o.managerSession(ctx)
+	if err != nil {
+		return "", err
+	}
+	includeFinished := mcp.BoolArg(args, "include_finished")
+	sessions, err := o.st.ListSessionsByObjective(mgr.ObjectiveID)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	n := 0
+	for _, s := range sessions {
+		if s.ID == mgr.ID || s.Role == model.RoleManager {
+			continue // children only, not the manager(s)
+		}
+		if s.Status.IsTerminal() && !includeFinished {
+			continue
+		}
+		n++
+		fmt.Fprintf(&b, "\n- %s [%s] %s", s.ID, s.Status, s.Role)
+		if s.Title != "" {
+			fmt.Fprintf(&b, " %q", s.Title)
+		}
+		if prID, _ := s.Metadata["pr_id"].(string); prID != "" {
+			fmt.Fprintf(&b, " (pr_id %s)", prID)
+		}
+		if act := strings.TrimSpace(s.CurrentActivity); act != "" {
+			fmt.Fprintf(&b, " — %s", act)
+		}
+	}
+	if n == 0 {
+		if includeFinished {
+			return "This objective has no child sessions yet.", nil
+		}
+		return "No running child sessions. (Pass include_finished: true to see completed ones.)", nil
+	}
+	return fmt.Sprintf("%d child session(s):%s", n, b.String()), nil
+}
+
+func (o *Orchestrator) mcpMessageSession(ctx context.Context, args map[string]any) (string, error) {
+	mgr, err := o.managerSession(ctx)
+	if err != nil {
+		return "", err
+	}
+	id := strings.TrimSpace(mcp.StringArg(args, "session_id"))
+	if id == "" {
+		return "", fmt.Errorf("session_id is required")
+	}
+	msg := strings.TrimSpace(mcp.StringArg(args, "message"))
+	if msg == "" {
+		return "", fmt.Errorf("message is required")
+	}
+	target, err := o.st.GetSession(id)
+	if err != nil {
+		return "", err
+	}
+	// Confine steering to this manager's own children: same objective, not the
+	// manager itself, not a peer manager.
+	if target.ID == mgr.ID {
+		return "", fmt.Errorf("cannot message yourself; this tool steers your child sessions")
+	}
+	if target.ObjectiveID != mgr.ObjectiveID {
+		return "", fmt.Errorf("session %s is not part of this objective", id)
+	}
+	if target.Role == model.RoleManager {
+		return "", fmt.Errorf("cannot steer another manager session")
+	}
+	if target.Status.IsTerminal() {
+		return "", fmt.Errorf("session %s already finished (%s) — spawn or address_pr_feedback a new one instead of steering", id, target.Status)
+	}
+	if err := o.Steer(ctx, id, msg); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("delivered your message to %s session %s; it will act on it in place.", target.Role, id), nil
 }
 
 func (o *Orchestrator) mcpCreateNote(ctx context.Context, args map[string]any) (string, error) {
