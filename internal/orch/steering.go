@@ -242,7 +242,10 @@ will be refused. Wait — you are steered automatically when a PR merges, gets
 review comments, fails CI, or has merge conflicts. To resolve conflicts or
 address feedback, call address_pr_feedback (NOT spawn_session) — it gives the
 follow-up a checkout of the PR branch so its fix is pushed back to the same PR;
-do not merge PRs yourself. Call mark_objective_done only once every PR has merged
+do not merge PRs yourself. Do NOT call address_pr_feedback again for a PR that
+already has a follow-up running — that no longer spawns a duplicate (it steers the
+existing one), but to add direction to an in-flight follow-up prefer message_session
+with its session id. Call mark_objective_done only once every PR has merged
 (or there was never a PR to open).
 When the objective names a repo, you are running in a fresh checkout of it:
 explore the code first and scope workers' goals precisely, with verified file
@@ -277,10 +280,17 @@ with a message the instant a worker finishes or there is news, so you lose
 nothing by stopping. NEVER run sleep, a wait/poll loop, a background terminal,
 watch, or any command to pass time or check on a worker — it wastes minutes and
 accomplishes nothing; the notification reaches you regardless of what you are
-doing. Do NOT spawn another worker that duplicates one already in progress, and
+doing. To correct, redirect, add context to, or push back on a worker or PR/CI follow-up
+that is STILL RUNNING, use message_session — it steers that session in place with
+your new instructions and keeps its progress. If you have lost track of what is
+running (e.g. you were just resumed) call list_children to recover the session ids
+and statuses before steering or canceling. Prefer it over cancel-and-respawn;
+only cancel_session + re-spawn when the session is on the wrong track entirely or
+has already finished. This is how you call BS on a worker that wrongly claims a
+task "can't be done": message_session it with the push-back instead of accepting
+the punt. Do NOT spawn another worker that duplicates one already in progress, and
 do NOT run two workers on the same change at once — dependent workers share one
-branch and will block each other on it. If you genuinely need to redo a worker's
-task, cancel it first, then re-spawn. Keep your messages concise and operational.`
+branch and will block each other on it. Keep your messages concise and operational.`
 
 // managerContext renders objective-level repo facts into the manager's prompt.
 // The repo lives in objective metadata for workspace prep, but the manager

@@ -198,9 +198,17 @@ func (o *Orchestrator) notifyManagerOfMerge(pr *model.PullRequest) {
 // the given PR — so the conflict/feedback path doesn't dispatch a duplicate while
 // one is in flight (and does re-dispatch once a prior attempt has finished).
 func (o *Orchestrator) hasActivePRFollowup(objectiveID, prID string) bool {
+	return o.activePRFollowup(objectiveID, prID) != nil
+}
+
+// activePRFollowup returns the non-terminal follow-up session already working the
+// given PR, or nil. It is the session-returning form of hasActivePRFollowup, used
+// so address_pr_feedback can steer an in-flight follow-up instead of spawning a
+// duplicate that fights it over the same PR-branch checkout.
+func (o *Orchestrator) activePRFollowup(objectiveID, prID string) *model.Session {
 	sessions, err := o.st.ListSessionsByObjective(objectiveID)
 	if err != nil {
-		return false
+		return nil
 	}
 	for _, s := range sessions {
 		if s.Status.IsTerminal() {
@@ -210,10 +218,10 @@ func (o *Orchestrator) hasActivePRFollowup(objectiveID, prID string) bool {
 			continue
 		}
 		if id, _ := s.Metadata["pr_id"].(string); id == prID {
-			return true
+			return s
 		}
 	}
-	return false
+	return nil
 }
 
 // activeManagerFor returns the objective's live (non-terminal) manager session,
