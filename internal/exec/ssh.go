@@ -95,9 +95,15 @@ func remoteCommand(cmd Command) string {
 }
 
 // Start launches a remote command via ssh and returns the local ssh process.
+//
+// A command carrying stdin (cmd.Stdin != "") is a feed-and-wait write — e.g.
+// `tee`-ing a file. Those need a clean EOF on stdin, which a forced pty swallows:
+// under -tt the remote reader never sees the close and blocks forever. So a pty is
+// allocated ONLY for the interactive/steered case (no initial stdin), where -tt is
+// also what delivers SIGHUP to the remote process group on disconnect.
 func (s *SSHExecutor) Start(ctx context.Context, cmd Command) (Process, error) {
 	remote := remoteCommand(cmd)
-	args := append(s.sshArgs(true), remote)
+	args := append(s.sshArgs(cmd.Stdin == ""), remote)
 	// The remote command carries Dir/Env/Stdin semantics, so the local ssh
 	// command needs only the initial stdin forwarded.
 	return s.local.Start(ctx, Command{Name: "ssh", Args: args, Stdin: cmd.Stdin})

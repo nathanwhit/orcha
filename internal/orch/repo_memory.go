@@ -3,10 +3,8 @@ package orch
 import (
 	"context"
 	"fmt"
-	"io"
 	"path"
 	"strings"
-	"sync"
 
 	"github.com/nathanwhit/orcha/internal/agent"
 	"github.com/nathanwhit/orcha/internal/exec"
@@ -141,7 +139,7 @@ func (o *Orchestrator) seedRepoMemory(ctx context.Context, sess *model.Session, 
 	}
 	// Keep the whole .orcha/ dir out of `git status`/diffs locally (the checkout is
 	// fresh each run, so a one-time append never accumulates duplicates).
-	_ = runWithStdin(ctx, ex, exec.Command{Name: "tee", Args: []string{"-a", gitLocalExclude}, Dir: ws.Path}, repoMemoryRoot+"/\n")
+	_, _ = exec.RunCapture(ctx, ex, exec.Command{Name: "tee", Args: []string{"-a", gitLocalExclude}, Dir: ws.Path, Stdin: repoMemoryRoot + "/\n"})
 }
 
 // mergeBackRepoMemory folds a finished session's edits to .orcha/memory/ back
@@ -318,36 +316,16 @@ func writeMemoryFile(ctx context.Context, ex exec.Executor, wsPath, baseDir, rel
 // target's executor, piping the content through `tee`'s stdin. Content goes over
 // stdin (not an env var or argv) because memory grows unbounded and those have
 // hard size limits (~128KB per env string on Linux, ARG_MAX over SSH); a pipe
-// does not. Works local or over SSH.
+// does not. The executor delivers Command.Stdin and closes it, so tee sees EOF and
+// exits — over SSH this runs without a pty so the EOF actually reaches the remote
+// tee (a forced -tt pty would swallow it and hang). Works local or over SSH.
 func writeWorkspaceFile(ctx context.Context, ex exec.Executor, dir, rel, content string) error {
-	return runWithStdin(ctx, ex, exec.Command{Name: "tee", Args: []string{rel}, Dir: dir}, content)
+	_, err := exec.RunCapture(ctx, ex, exec.Command{Name: "tee", Args: []string{rel}, Dir: dir, Stdin: content})
+	return err
 }
 
 // readWorkspaceFile returns the contents of a checkout-relative path, or an
 // error if it does not exist.
 func readWorkspaceFile(ctx context.Context, ex exec.Executor, dir, rel string) (string, error) {
 	return exec.Capture(ctx, ex, exec.Command{Name: "cat", Args: []string{rel}, Dir: dir})
-}
-
-// runWithStdin starts a command, feeds it input, and — crucially — CLOSES stdin
-// so a reader like `tee`/`cat` sees EOF and exits. The executor deliberately
-// leaves its stdin pipe open for steering long-lived agent sessions, so the
-// normal Command.Stdin + RunCapture path would block forever on a read-to-EOF
-// command. stdout/stderr are drained concurrently to avoid a full-pipe deadlock
-// (tee echoes stdin to stdout).
-func runWithStdin(ctx context.Context, ex exec.Executor, cmd exec.Command, input string) error {
-	proc, err := ex.Start(ctx, cmd)
-	if err != nil {
-		return err
-	}
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); _, _ = io.Copy(io.Discard, proc.Stdout()) }()
-	go func() { defer wg.Done(); _, _ = io.Copy(io.Discard, proc.Stderr()) }()
-	if sin := proc.Stdin(); sin != nil {
-		_, _ = io.WriteString(sin, input)
-		_ = sin.Close()
-	}
-	wg.Wait()
-	return proc.Wait()
 }

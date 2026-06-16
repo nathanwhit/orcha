@@ -149,6 +149,33 @@ func TestLocal_StdinSteering(t *testing.T) {
 	}
 }
 
+// A command carrying Command.Stdin is a feed-and-wait write: the executor must
+// deliver the content AND close the pipe so a read-to-EOF command (cat/tee) sees
+// EOF and exits. Before the fix the pipe was left open, so this hung forever —
+// which is exactly what wedged a manager whose memory seed tee'd a file over SSH.
+func TestLocal_StdinClosedForFeedAndWait(t *testing.T) {
+	l := NewLocal()
+	done := make(chan struct{})
+	var out string
+	var err error
+	go func() {
+		defer close(done)
+		// `cat` reads stdin to EOF and echoes it; it only exits if it sees EOF.
+		out, err = RunCapture(context.Background(), l, Command{Name: "cat", Stdin: "memory contents\n"})
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunCapture with Command.Stdin hung — stdin pipe was not closed")
+	}
+	if err != nil {
+		t.Fatalf("RunCapture: %v", err)
+	}
+	if !strings.Contains(out, "memory contents") {
+		t.Fatalf("stdin not delivered, stdout=%q", out)
+	}
+}
+
 func TestRemoteCommandRendering(t *testing.T) {
 	got := remoteCommand(Command{
 		Dir:  "/home/bot/work/sess",

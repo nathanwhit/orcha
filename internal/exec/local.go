@@ -88,8 +88,10 @@ func (l *LocalExecutor) Start(ctx context.Context, cmd Command) (Process, error)
 	if cmd.Stdin != "" {
 		go func() {
 			_, _ = io.WriteString(stdin, cmd.Stdin)
-			// Leave the pipe open for further steering input; callers close via
-			// Stdin().Close() when done.
+			// Command.Stdin is the complete input: close the pipe so a read-to-EOF
+			// command (tee, cat, git apply) sees EOF and exits. Only the
+			// no-initial-stdin branch leaves the pipe open, for steering via Stdin().
+			_ = stdin.Close()
 		}()
 	}
 
