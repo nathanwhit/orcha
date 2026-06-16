@@ -221,3 +221,17 @@ CREATE TABLE IF NOT EXISTS projects (
     created_at  TIMESTAMP NOT NULL,
     updated_at  TIMESTAMP NOT NULL
 );
+
+-- Durable, repo-wide agent memory, shared across every objective on the same
+-- repo. A repo's memory is a small set of linked markdown files (an index plus
+-- topic files), one row each, seeded into each fresh checkout under
+-- .orcha/memory/ and merged back file-by-file when a session finishes, so
+-- learnings survive the disposable workspaces. Keyed by a normalized repo
+-- identifier (see repoMemoryKey) and the file path relative to .orcha/memory/.
+CREATE TABLE IF NOT EXISTS repo_memory (
+    repo       TEXT NOT NULL,
+    path       TEXT NOT NULL,
+    content    TEXT NOT NULL DEFAULT '',
+    updated_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (repo, path)
+);

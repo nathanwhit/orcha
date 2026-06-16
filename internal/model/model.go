@@ -435,3 +435,17 @@ type Project struct {
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
 }
+
+// RepoMemoryFile is one durable, repo-wide memory file shared across every
+// objective that touches the same repo. Workers run in fresh isolated checkouts,
+// so anything they would normally leave in a CLAUDE.md dies with the workspace;
+// memory lives in the store instead, is seeded into each checkout as a directory
+// of linked markdown files under .orcha/memory/ (an index plus topic files), and
+// is merged back file-by-file when a session finishes. Keyed by a normalized
+// repo identifier plus the file's path relative to the memory directory.
+type RepoMemoryFile struct {
+	Repo      string    `json:"repo"`
+	Path      string    `json:"path"` // relative to .orcha/memory/, e.g. "MEMORY.md" or "gotchas.md"
+	Content   string    `json:"content"`
+	UpdatedAt time.Time `json:"updated_at"`
+}

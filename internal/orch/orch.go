@@ -96,6 +96,8 @@ type Orchestrator struct {
 	lastPoke map[string]time.Time // per-objective last supervisor re-poke time (cooldown)
 
 	gcMu sync.Mutex // held during a workspace-reclaim pass so passes don't overlap
+
+	repoMemMu sync.Mutex // serializes repo-memory read-merge-write so concurrent sessions on one repo can't clobber each other
 }
 
 // SetNotify installs a hook called whenever schedulable state changes (a

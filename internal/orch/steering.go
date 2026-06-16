@@ -159,7 +159,7 @@ func (o *Orchestrator) buildSpec(sess *model.Session, ws *model.Workspace, tgt *
 		spec.PermissionMode = o.cfg.WorkerPermissionMode
 		spec.OneShot = true
 		if spec.Prompt != "" {
-			spec.Prompt = workerSystemPreamble + completionInstruction + "\n\n" + spec.Prompt
+			spec.Prompt = workerSystemPreamble + repoMemoryNote + completionInstruction + "\n\n" + spec.Prompt
 		}
 	}
 	return spec
@@ -278,6 +278,7 @@ func (o *Orchestrator) managerContext(sess *model.Session) string {
 			fmt.Fprintf(&b, "; branches push to the fork %s", pushRepo)
 		}
 		b.WriteString(". Workers inherit this repo automatically — spawn_session's repo field is only for overriding it.")
+		b.WriteString(repoMemoryNote)
 		return b.String()
 	}
 	projs, err := o.st.ListProjects()
