@@ -167,6 +167,10 @@ func (o *Orchestrator) StartRun(ctx context.Context, sessionID string) (*Run, er
 		ws, _ = o.st.GetWorkspace(sess.WorkspaceID)
 	}
 
+	// Seed repo-wide memory into the checkout (as .orcha/MEMORY.md) before the
+	// agent starts, so it reads past learnings on its first turn.
+	o.seedRepoMemory(ctx, sess, ws, tgt)
+
 	spec := o.buildSpec(sess, ws, tgt)
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -331,6 +335,14 @@ func (o *Orchestrator) finishRun(r *run, success bool) {
 		return
 	}
 	_ = o.emit(r.sessionID, model.MsgSystem, model.KindStatus, "session "+string(next), nil)
+	// Fold any edits the agent made to .orcha/MEMORY.md back into repo-wide
+	// memory before the manager re-engages, so it sees the latest learnings. Only
+	// on success — a failed run's notes are unreliable.
+	if success {
+		if sess, err := o.st.GetSession(r.sessionID); err == nil {
+			o.mergeBackRepoMemory(sess)
+		}
+	}
 	o.notifyManagerOfChild(r.sessionID, success)
 }
 
