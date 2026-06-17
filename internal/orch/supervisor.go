@@ -105,11 +105,16 @@ func (o *Orchestrator) superviseDecisions(now time.Time) []supervisorAction {
 		if now.Sub(mgr.UpdatedAt) < superviseIdleAfter {
 			continue
 		}
-		// Don't churn a manager whose only outstanding work is an open PR waiting
-		// on a human to review/merge: it has no next action (it cannot merge its
-		// own PR), so repeatedly poking it just makes it re-ask or re-state status.
-		// A real merge/feedback/CI event steers it the moment something changes.
-		if o.objectiveAwaitingHumanOnPR(obj.ID) {
+		// Don't timer-poke a manager whose objective has an open PR. Re-engagement
+		// there is driven entirely by PR lifecycle events — a merge notifies the
+		// manager, and new review/CI feedback spawns a follow-up automatically — so
+		// the idle poke has no next action to offer; it only makes the manager
+		// re-ask the human to merge or re-state status. (An earlier version carved
+		// out failing-CI / unhandled-feedback PRs as still pokeable, but those are
+		// handled by the follow-up pipeline too, and a feedback item arriving one
+		// tick before its follow-up spawned let a pointless poke through — which is
+		// exactly what drove the redundant "can you merge?" asks.)
+		if o.objectiveHasOpenPR(obj.ID) {
 			continue
 		}
 		if !o.markPoked(obj.ID, now) {
@@ -120,34 +125,27 @@ func (o *Orchestrator) superviseDecisions(now time.Time) []supervisorAction {
 	return out
 }
 
-// objectiveAwaitingHumanOnPR reports whether the objective's only outstanding
-// work is one or more open PRs that the team cannot advance on its own — each is
-// healthy (checks not failing) and carries no unhandled feedback, so it is simply
-// waiting for a human to review and merge. In that state an idle manager has no
-// action to take (it must not merge its own PR), and a merge/feedback/CI event
-// steers it the instant something changes — so the timer re-poke is pure churn.
+// objectiveHasOpenPR reports whether the objective has at least one open or
+// draft PR. When it does, every next step is driven by PR lifecycle events: a
+// merge notifies the manager (notifyManagerOfMerge), and new review/CI feedback
+// is turned into a follow-up automatically (ProcessFeedback). The idle timer-
+// poke plays no part in any of that, so the supervisor leaves such an objective
+// alone and lets the PR machinery steer it the instant its state changes.
 //
-// An open PR that is failing CI or has unhandled review feedback is NOT a passive
-// wait: that path spawns a follow-up, so it does not suppress the poke.
-func (o *Orchestrator) objectiveAwaitingHumanOnPR(objectiveID string) bool {
+// This deliberately covers failing-CI and feedback-bearing PRs too: the follow-
+// up pipeline owns them, and poking the manager in the gap before a follow-up
+// spawns just yields a redundant question.
+func (o *Orchestrator) objectiveHasOpenPR(objectiveID string) bool {
 	prs, err := o.st.ListPRsByObjective(objectiveID)
 	if err != nil {
 		return false
 	}
-	awaiting := false
 	for _, pr := range prs {
-		if pr.Status != model.PROpen && pr.Status != model.PRDraft {
-			continue // merged/closed PRs need no waiting
+		if pr.Status == model.PROpen || pr.Status == model.PRDraft {
+			return true
 		}
-		if pr.ChecksState == model.ChecksFailing {
-			return false
-		}
-		if pending, _ := o.st.UnhandledFeedback(pr.ID); len(pending) > 0 {
-			return false
-		}
-		awaiting = true
 	}
-	return awaiting
+	return false
 }
 
 // markPoked records a supervisor action for an objective and reports whether

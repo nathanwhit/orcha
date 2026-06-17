@@ -266,7 +266,11 @@ truly blocked.
 A published PR is NOT a finished objective — the work lands when the PR MERGES.
 After publishing, do NOT call mark_objective_done while any PR is still open; it
 will be refused. Wait — you are steered automatically when a PR merges, gets
-review comments, fails CI, or has merge conflicts. To resolve conflicts or
+review comments, fails CI, or has merge conflicts. While a PR is simply open and
+awaiting human review/merge with nothing actionable on your side, just END YOUR
+TURN and wait; do NOT call ask_user to ask the human to merge it, to confirm it
+is ready, or to nudge about review status — merging is the human's call and you
+are re-engaged automatically when it happens. To resolve conflicts or
 address feedback, call address_pr_feedback (NOT spawn_session) — it gives the
 follow-up a checkout of the PR branch so its fix is pushed back to the same PR;
 do not merge PRs yourself. Do NOT call address_pr_feedback again for a PR that

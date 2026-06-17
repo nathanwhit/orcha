@@ -1632,15 +1632,28 @@ func TestSupervisor_DoesNotPokeWhenAwaitingHumanMerge(t *testing.T) {
 		t.Fatalf("idle manager awaiting a human merge must not be poked, got %+v", acts)
 	}
 
-	// Unhandled feedback on that PR makes it actionable again -> poke resumes.
+	// Even unhandled feedback on the PR does NOT resume the timer-poke: the
+	// follow-up pipeline (ProcessFeedback) owns that work, and poking the manager
+	// in the gap before the follow-up spawns just yields a redundant "can you
+	// merge?" question. The manager is re-engaged by PR events, not the timer.
 	if err := o.IngestFeedback(context.Background(), pr.ID, []model.PRFeedback{
 		{Kind: model.FeedbackReviewComment, ExternalID: "c-1", Body: "please rename", Actionable: true},
 	}); err != nil {
 		t.Fatalf("ingest: %v", err)
 	}
 	cooled2 := cooled.Add(supervisePokeCooldown + time.Second)
-	if acts := o.superviseDecisions(cooled2); len(acts) != 1 || acts[0].kind != "poke" || acts[0].manager.ID != mgr.ID {
-		t.Fatalf("an open PR with unhandled feedback should not suppress the poke, got %+v", acts)
+	if acts := o.superviseDecisions(cooled2); len(acts) != 0 {
+		t.Fatalf("an open PR must suppress the poke regardless of feedback, got %+v", acts)
+	}
+
+	// Once the PR merges there is no open PR left, so a still-active objective is
+	// pokeable again (latent unfinished work with nothing else driving it).
+	if _, err := st.UpdatePR(pr.ID, func(p *model.PullRequest) { p.Status = model.PRMerged }); err != nil {
+		t.Fatalf("merge pr: %v", err)
+	}
+	cooled3 := cooled2.Add(supervisePokeCooldown + time.Second)
+	if acts := o.superviseDecisions(cooled3); len(acts) != 1 || acts[0].kind != "poke" || acts[0].manager.ID != mgr.ID {
+		t.Fatalf("with the PR merged and the objective still active, the manager should be pokeable, got %+v", acts)
 	}
 }
 
