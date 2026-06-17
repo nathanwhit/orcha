@@ -386,6 +386,34 @@ func TestPublishPR_RejectsWhenNoDiff(t *testing.T) {
 	}
 }
 
+// CommentPR tags comments with the orcha-bot marker, but agents frequently copy
+// that marker into their own body (they see it on prior comments). The marker
+// must not be doubled.
+func TestCommentPR_DoesNotDoubleMarker(t *testing.T) {
+	o, st := newTestOrch(t)
+	f := forge.NewFake()
+	o.SetForge(f)
+
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "octo/repo", Number: 9, Branch: "b",
+		BaseBranch: "main", Status: model.PROpen}
+	_ = st.CreatePR(pr)
+
+	// Body already carries the marker (as an agent's would).
+	if err := o.CommentPR(context.Background(), pr.ID, "addressed the review\n\n"+orchaBotMarker); err != nil {
+		t.Fatalf("comment: %v", err)
+	}
+	// A clean body gets the marker appended exactly once.
+	if err := o.CommentPR(context.Background(), pr.ID, "explained the new commit"); err != nil {
+		t.Fatalf("comment: %v", err)
+	}
+	for _, c := range f.Comments {
+		if n := strings.Count(c.Body, orchaBotMarker); n != 1 {
+			t.Fatalf("comment has %d markers, want exactly 1: %q", n, c.Body)
+		}
+	}
+}
+
 func TestUpdatePR_MergedCannotPush(t *testing.T) {
 	o, st := newTestOrch(t)
 	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
