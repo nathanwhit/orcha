@@ -1312,6 +1312,35 @@ func TestEnsureSharedScratch_Idempotent(t *testing.T) {
 	}
 }
 
+// Finishing an objective reaps its shared scratch (archives the row; the dir is
+// rm -rf'd on the target when a preparer is installed) so WorkRoot/scratch does
+// not grow without bound. Isolated checkouts are left to their own lifecycle.
+func TestReapSharedScratch_OnDone(t *testing.T) {
+	o, st := newTestOrch(t)
+	tgt := addTarget(t, st, "local", model.TargetLocal, 4)
+
+	scratch, err := o.EnsureSharedScratch(context.Background(), "obj1", tgt)
+	if err != nil {
+		t.Fatalf("ensure scratch: %v", err)
+	}
+	iso := &model.Workspace{
+		ObjectiveID: "obj1", TargetID: tgt.ID, Kind: model.WorkspaceIsolated,
+		Path: tgt.WorkRoot + "/sess1", Status: model.WorkspaceReady,
+	}
+	if err := st.CreateWorkspace(iso); err != nil {
+		t.Fatalf("create isolated ws: %v", err)
+	}
+
+	o.reapSharedScratch(context.Background(), "obj1")
+
+	if got, _ := st.GetWorkspace(scratch.ID); got.Status != model.WorkspaceArchived {
+		t.Fatalf("shared scratch status = %q, want archived", got.Status)
+	}
+	if got, _ := st.GetWorkspace(iso.ID); got.Status != model.WorkspaceReady {
+		t.Fatalf("isolated workspace should be untouched, status = %q", got.Status)
+	}
+}
+
 // A manager whose objective names a repo runs in its own fresh checkout —
 // grounded managers scope work from the code instead of asking about it.
 func TestManagerGetsCheckout(t *testing.T) {

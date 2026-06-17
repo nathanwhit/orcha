@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/nathanwhit/orcha/internal/agent"
 	"github.com/nathanwhit/orcha/internal/exec"
@@ -187,8 +188,44 @@ func (o *Orchestrator) MarkObjectiveDone(managerSessionID, summary string) error
 	}); err != nil {
 		return err
 	}
+	// The objective is finished, so its shared scratch — throwaway cross-worker
+	// artifacts with no value past the objective — can go. Reaping here keeps
+	// WorkRoot/scratch from growing without bound.
+	o.reapSharedScratch(context.Background(), mgr.ObjectiveID)
 	o.finalizeSession(managerSessionID, model.SessionSucceeded)
 	return nil
+}
+
+// reapSharedScratch removes a finished objective's shared scratch directories.
+// The scratch holds throwaway artifacts (harnesses, repro scripts, generated
+// data) that have no value once the objective is done, so leaving them would let
+// WorkRoot/scratch grow without bound. Best-effort: a failure is audited, not
+// surfaced, since the objective has already succeeded. Only shared scratch is
+// touched — isolated checkouts are reaped on their own lifecycle.
+func (o *Orchestrator) reapSharedScratch(ctx context.Context, objectiveID string) {
+	wss, err := o.st.ListWorkspacesByObjective(objectiveID)
+	if err != nil {
+		return
+	}
+	for _, ws := range wss {
+		if ws.Kind != model.WorkspaceShared || ws.Status == model.WorkspaceArchived {
+			continue
+		}
+		// Defensive: never rm -rf a path that is not a scratch dir.
+		if ws.Path == "" || !strings.Contains(ws.Path, "/scratch/") {
+			continue
+		}
+		if o.preparer != nil {
+			if tgt, terr := o.st.GetTarget(ws.TargetID); terr == nil {
+				ex := agent.NewExecutor(tgt)
+				if _, rerr := exec.RunCapture(ctx, ex, exec.Command{Name: "rm", Args: []string{"-rf", ws.Path}}); rerr != nil {
+					o.audit(objectiveID, "", "shared_scratch_reap_failed", rerr.Error(), model.JSONMap{"workspace_id": ws.ID})
+					continue
+				}
+			}
+		}
+		_ = o.st.SetWorkspaceStatus(ws.ID, model.WorkspaceArchived)
+	}
 }
 
 // finalizeSession drives a session to a terminal status and tears down its live
