@@ -182,6 +182,12 @@ orcha MCP tools (named mcp__orcha*):
 - If a code change is warranted: edit the files here, then COMMIT it yourself
   with a clear, descriptive commit message (conventional-commits style) using
   "git add -A && git commit", and then call update_pr to push to the PR branch.
+  If validating the change needs a reusable artifact (a benchmark or profiling
+  harness, a repro script, a test fixture), COMMIT it to the PR branch too so the
+  reviewer can re-run it — do not leave it as uncommitted scratch that dies with
+  this checkout. You only see what was committed to the PR: if an earlier worker
+  built such an artifact but never committed it, it is NOT in this tree, so
+  recreate and commit it rather than claiming it cannot be reproduced.
 - To reply to the reviewer: call comment_pr with a clear, specific message.
 - If the feedback is a question: answer it with comment_pr.
 - If it is non-actionable or you disagree: explain why with comment_pr.
@@ -202,6 +208,14 @@ is complete, COMMIT it yourself with a clear, descriptive commit message
 explains what changed and why — run "git add -A && git commit". Do NOT push or
 open a PR and do NOT amend the git author/identity — the orchestrator publishes
 your commit.
+If you create a reusable artifact to do the task — a benchmark or profiling
+harness, a repro script, a test fixture, a generated data file, a one-off tool —
+COMMIT it into the tree alongside your change, in a sensible location, so the
+reviewer and any later worker can re-run it and reproduce your results. Your
+checkout is torn down the moment you finish: anything you leave uncommitted is
+lost for good, and "I built a harness but it isn't in the tree" is a dead end for
+whoever comes next. If an artifact genuinely should not be committed, say so in
+report_result and spell out exactly how to recreate it.
 A long build or test run is expected and fine — let it finish; do not abandon it
 just because it is slow. Only if a command is genuinely hung (no progress for a
 long time) in code unrelated to your change should you stop waiting on it, say so,
