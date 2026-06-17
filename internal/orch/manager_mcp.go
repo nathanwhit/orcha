@@ -114,8 +114,11 @@ func (o *Orchestrator) toolUpdatePR() mcp.Tool {
 
 func (o *Orchestrator) toolCommentPR() mcp.Tool {
 	return mcp.Tool{
-		Name:        "comment_pr",
-		Description: "Leave a comment on a PR. pr_id accepts the Orcha pr_id or the GitHub PR number.",
+		Name: "comment_pr",
+		Description: "Leave a PUBLIC comment on a PR, visible to the human reviewers. Use only when a " +
+			"reviewer would find it useful — to answer a question or explain a change you pushed. Do NOT " +
+			"use it for status, progress, or CI/build updates (e.g. \"N checks passing\", \"CI pending\", " +
+			"\"no changes needed\"); those are noise. pr_id accepts the Orcha pr_id or the GitHub PR number.",
 		InputSchema: mcpObj(map[string]any{"pr_id": mcpStr, "body": mcpStr}, "pr_id", "body"),
 		Handler:     o.mcpCommentPR,
 	}

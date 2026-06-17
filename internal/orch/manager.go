@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/nathanwhit/orcha/internal/model"
 	"github.com/nathanwhit/orcha/internal/store"
@@ -140,8 +141,13 @@ func (o *Orchestrator) CommentPR(ctx context.Context, prID, body string) error {
 		return err
 	}
 	// Tag orcha-posted comments so the feedback monitor never reacts to its own
-	// (or the manager's) replies as if they were new user feedback.
-	if err := o.forge.Comment(ctx, pr.Repo, pr.Number, body+"\n\n"+orchaBotMarker); err != nil {
+	// (or the manager's) replies as if they were new user feedback. Agents often
+	// copy the marker into their own body (they see it on prior comments), so add
+	// it only when absent — otherwise the comment ends with a doubled marker.
+	if !strings.Contains(body, orchaBotMarker) {
+		body = body + "\n\n" + orchaBotMarker
+	}
+	if err := o.forge.Comment(ctx, pr.Repo, pr.Number, body); err != nil {
 		return err
 	}
 	o.audit(pr.ObjectiveID, "", "pr_comment", "manager comment", model.JSONMap{"pr_id": prID})

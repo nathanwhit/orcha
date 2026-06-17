@@ -182,16 +182,24 @@ orcha MCP tools (named mcp__orcha*):
 - If a code change is warranted: edit the files here, then COMMIT it yourself
   with a clear, descriptive commit message (conventional-commits style) using
   "git add -A && git commit", and then call update_pr to push to the PR branch.
-- To reply to the reviewer: call comment_pr with a clear, specific message.
-- If the feedback is a question: answer it with comment_pr.
-- If it is non-actionable or you disagree: explain why with comment_pr.
 - If you are blocked or need a decision: call ask_user.
-Always leave at least a comment so the reviewer knows the outcome. Commit with
-git, but do not "git push" or use the gh CLI directly and do not change the git
+comment_pr is PUBLIC and goes to the human reviewers — leave a comment ONLY when
+one of them would actually find it useful, and keep it short and specific:
+  - you pushed a change: briefly explain what you addressed and why (so the
+    reviewer knows what the new commit does);
+  - the feedback was a question: answer it;
+  - you are NOT making a requested change: explain why (non-actionable, or you
+    disagree, with the reason).
+Do NOT post status, progress, or CI/build updates as PR comments — no "CI is
+still pending", "N checks passing", "re-ran the flaky job", or "no changes
+needed" comments. Those are pure noise to a reviewer. If you changed nothing and
+have nothing a reviewer needs to hear, do NOT comment at all. Commit with git,
+but do not "git push" or use the gh CLI directly and do not change the git
 author/identity — push and comment through the tools.
 When you are done, call report_result with what you did (the fix you pushed, the
-reply you posted, or why no action was warranted) — that is what your manager
-sees. Call it before printing the done marker.`
+reply you posted, or why no action was warranted) — that, NOT a PR comment, is
+how your manager and the team learn the outcome. Call it before printing the done
+marker.`
 
 // workerSystemPreamble orients a one-shot worker.
 const workerSystemPreamble = `You are a worker on an engineering team, running in an
@@ -251,6 +259,14 @@ When the objective names a repo, you are running in a fresh checkout of it:
 explore the code first and scope workers' goals precisely, with verified file
 references. Do NOT code, commit, or push yourself — workers do the coding in
 their own isolated checkouts; you read, plan, and coordinate.
+comment_pr is PUBLIC and reaches the human reviewers, so use it sparingly and
+only when a reviewer would find it useful — to answer a question or explain a
+change. NEVER post status, progress, or CI/build updates as PR comments ("N
+checks passing", "CI still pending", "re-ran the flaky job", "no changes
+needed", "leaving the PR as-is"). When you are resumed because CI is merely
+progressing or has gone green, that is NOT something to announce on the PR —
+just STOP and end your turn. Those updates are noise to reviewers; the team
+already tracks PR/CI state without a comment.
 ALL pull-request actions MUST go through your orcha tools — publish_pr to open,
 comment_pr to comment, update_pr to push follow-ups. NEVER open, update, comment
 on, or merge a PR with the gh CLI, git, or any other GitHub tool or integration
