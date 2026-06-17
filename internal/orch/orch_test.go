@@ -1260,6 +1260,58 @@ func TestManagerPromptCarriesObjectiveRepo(t *testing.T) {
 	}
 }
 
+// A coding worker's prompt points it at the objective's shared scratch dir, so
+// task artifacts (harnesses, repro scripts) have a home that survives its
+// torn-down checkout without polluting the PR. The note is omitted with no
+// target (offline/test path), leaving the prompt unchanged.
+func TestBuildSpec_InjectsSharedScratch(t *testing.T) {
+	o, _ := newTestOrch(t)
+	tgt := &model.Target{ID: "tg1", WorkRoot: "/home/bot/work"}
+	wantPath := "/home/bot/work/scratch/obj1"
+
+	for _, role := range []model.SessionRole{model.RoleImplementer, model.RolePRFollowup} {
+		sess := &model.Session{ID: "s1", ObjectiveID: "obj1", Role: role, Goal: "do the thing"}
+		spec := o.buildSpec(sess, nil, tgt)
+		if !strings.Contains(spec.Prompt, wantPath) {
+			t.Fatalf("%s prompt missing shared scratch path %q:\n%s", role, wantPath, spec.Prompt)
+		}
+		if !strings.Contains(spec.Prompt, "SHARED SCRATCH") {
+			t.Fatalf("%s prompt missing scratch guidance", role)
+		}
+	}
+
+	// No placed target → no scratch note.
+	sess := &model.Session{ID: "s2", ObjectiveID: "obj1", Role: model.RoleImplementer, Goal: "do the thing"}
+	if got := o.buildSpec(sess, nil, nil); strings.Contains(got.Prompt, "SHARED SCRATCH") {
+		t.Fatalf("scratch note should be absent without a target:\n%s", got.Prompt)
+	}
+}
+
+// EnsureSharedScratch is idempotent: one shared workspace per objective+target,
+// returned again (not duplicated) on a second call, at the deterministic path.
+func TestEnsureSharedScratch_Idempotent(t *testing.T) {
+	o, st := newTestOrch(t)
+	tgt := addTarget(t, st, "local", model.TargetLocal, 4)
+
+	a, err := o.EnsureSharedScratch(context.Background(), "obj1", tgt)
+	if err != nil {
+		t.Fatalf("first ensure: %v", err)
+	}
+	b, err := o.EnsureSharedScratch(context.Background(), "obj1", tgt)
+	if err != nil {
+		t.Fatalf("second ensure: %v", err)
+	}
+	if a.ID != b.ID {
+		t.Fatalf("expected the same shared scratch workspace, got %s vs %s", a.ID, b.ID)
+	}
+	if want := tgt.WorkRoot + "/scratch/obj1"; a.Path != want {
+		t.Fatalf("scratch path = %q, want %q", a.Path, want)
+	}
+	if a.Kind != model.WorkspaceShared {
+		t.Fatalf("scratch kind = %q, want %q", a.Kind, model.WorkspaceShared)
+	}
+}
+
 // A manager whose objective names a repo runs in its own fresh checkout —
 // grounded managers scope work from the code instead of asking about it.
 func TestManagerGetsCheckout(t *testing.T) {

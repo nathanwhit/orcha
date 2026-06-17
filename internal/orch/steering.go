@@ -146,7 +146,7 @@ func (o *Orchestrator) buildSpec(sess *model.Session, ws *model.Workspace, tgt *
 		spec.PermissionMode = o.cfg.WorkerPermissionMode // shell so it can commit
 		spec.OneShot = true
 		if spec.Prompt != "" {
-			spec.Prompt = followupSystemPreamble + completionInstruction + "\n\n" + spec.Prompt
+			spec.Prompt = followupSystemPreamble + o.scratchNote(sess, tgt) + completionInstruction + "\n\n" + spec.Prompt
 		}
 	// Other coding workers run one-shot in a checkout and do not publish. They get
 	// the small worker tool surface (report_result/create_note/ask_user) so they
@@ -159,10 +159,29 @@ func (o *Orchestrator) buildSpec(sess *model.Session, ws *model.Workspace, tgt *
 		spec.PermissionMode = o.cfg.WorkerPermissionMode
 		spec.OneShot = true
 		if spec.Prompt != "" {
-			spec.Prompt = workerSystemPreamble + repoMemoryNote + completionInstruction + "\n\n" + spec.Prompt
+			spec.Prompt = workerSystemPreamble + repoMemoryNote + o.scratchNote(sess, tgt) + completionInstruction + "\n\n" + spec.Prompt
 		}
 	}
 	return spec
+}
+
+// scratchNote points a coding worker or PR follow-up at the objective's shared
+// scratch directory: the one place a task-scoped artifact (a benchmark harness,
+// a repro script, generated data) both survives the worker's torn-down checkout
+// AND stays out of the PR. It is injected per-session because the path is
+// objective- and target-specific; it is empty when there is no placed target
+// (offline/test runs), so the prompt is unchanged there.
+func (o *Orchestrator) scratchNote(sess *model.Session, tgt *model.Target) string {
+	if tgt == nil || sess.ObjectiveID == "" {
+		return ""
+	}
+	return "\n\nSHARED SCRATCH: " + sharedScratchPath(tgt, sess.ObjectiveID) + " is a directory " +
+		"that persists across every worker on this objective and is NOT part of any git checkout. Put " +
+		"task-scoped artifacts there — a benchmark or profiling harness, a repro script, generated data, " +
+		"scratch notes — anything you need to do or validate the work but that must NOT ship in the PR. " +
+		"Your own checkout is torn down the moment you finish, so an artifact left there is lost unless you " +
+		"commit it; do NOT commit scratch into the repo just to keep it — put it here instead, where it " +
+		"survives for the next worker. If a later worker needs something an earlier one built, look here first."
 }
 
 // completionInstruction is appended to one-shot worker preambles. A worker runs

@@ -171,6 +171,16 @@ func (o *Orchestrator) StartRun(ctx context.Context, sessionID string) (*Run, er
 	// agent starts, so it reads past learnings on its first turn.
 	o.seedRepoMemory(ctx, sess, ws, tgt)
 
+	// Materialize the objective's shared scratch dir so a coding worker / follow-up
+	// has a persistent, non-git place for task artifacts (harnesses, repro scripts)
+	// that must outlive its torn-down checkout but must NOT ship in a PR. The path
+	// is injected into the prompt by buildSpec.
+	if tgt != nil && sess.ObjectiveID != "" && isCodingWorker(sess.Role) {
+		if _, serr := o.EnsureSharedScratch(ctx, sess.ObjectiveID, tgt); serr != nil {
+			o.audit(sess.ObjectiveID, sessionID, "shared_scratch_failed", serr.Error(), nil)
+		}
+	}
+
 	spec := o.buildSpec(sess, ws, tgt)
 
 	runCtx, cancel := context.WithCancel(ctx)

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/nathanwhit/orcha/internal/agent"
+	"github.com/nathanwhit/orcha/internal/exec"
 	"github.com/nathanwhit/orcha/internal/model"
 	"github.com/nathanwhit/orcha/internal/store"
 )
@@ -212,28 +214,46 @@ func (o *Orchestrator) finalizeSession(sessionID string, status model.SessionSta
 	_ = o.st.CancelOpenQuestionsBySession(sessionID)
 }
 
-// EnsureSharedScratch returns the objective's shared scratch workspace on a
-// target, creating it if absent. Each objective may have one shared scratch per
-// target.
-func (o *Orchestrator) EnsureSharedScratch(objectiveID, targetID string) (*model.Workspace, error) {
-	if ws, err := o.st.SharedScratchFor(objectiveID, targetID); err == nil {
-		return ws, nil
-	}
-	tgt, err := o.st.GetTarget(targetID)
+// sharedScratchPath is where an objective's shared scratch dir lives on a
+// target: a plain directory (no git tree) beside the per-session checkouts.
+func sharedScratchPath(tgt *model.Target, objectiveID string) string {
+	return tgt.WorkRoot + "/scratch/" + objectiveID
+}
+
+// EnsureSharedScratch returns the objective's shared scratch directory on a
+// target, creating both the workspace row and the on-disk directory if absent.
+// Each objective has one shared scratch per target.
+//
+// Unlike an isolated checkout — which is a fresh git tree, single-writer, and
+// rm -rf'd and re-cloned per session — the shared scratch is plain and is NEVER
+// torn down between worker sessions. It is where workers keep task-scoped
+// artifacts (a benchmark or profiling harness, a repro script, generated data)
+// that must survive across the objective's workers but must NOT ship in any PR.
+// Without it such artifacts die with the worker's checkout, so a later worker
+// reports "the harness isn't in the tree" and cannot reproduce the result.
+func (o *Orchestrator) EnsureSharedScratch(ctx context.Context, objectiveID string, tgt *model.Target) (*model.Workspace, error) {
+	ws, err := o.st.SharedScratchFor(objectiveID, tgt.ID)
 	if err != nil {
-		return nil, err
+		ws = &model.Workspace{
+			ObjectiveID: objectiveID,
+			TargetID:    tgt.ID,
+			Kind:        model.WorkspaceShared,
+			ProjectPath: tgt.WorkRoot,
+			VCS:         model.VCSNone,
+			Path:        sharedScratchPath(tgt, objectiveID),
+			Status:      model.WorkspaceReady,
+		}
+		if err := o.st.CreateWorkspace(ws); err != nil {
+			return nil, err
+		}
 	}
-	ws := &model.Workspace{
-		ObjectiveID: objectiveID,
-		TargetID:    targetID,
-		Kind:        model.WorkspaceShared,
-		ProjectPath: tgt.WorkRoot,
-		VCS:         model.VCSNone,
-		Path:        tgt.WorkRoot + "/scratch/" + objectiveID,
-		Status:      model.WorkspaceReady,
-	}
-	if err := o.st.CreateWorkspace(ws); err != nil {
-		return nil, err
+	// Materialize the directory on the target (idempotent). Gated on a preparer
+	// like the isolated checkout is, so offline/test runs don't touch disk.
+	if o.preparer != nil {
+		ex := agent.NewExecutor(tgt)
+		if _, err := exec.RunCapture(ctx, ex, exec.Command{Name: "mkdir", Args: []string{"-p", ws.Path}}); err != nil {
+			return ws, fmt.Errorf("orch: mkdir shared scratch: %w", err)
+		}
 	}
 	return ws, nil
 }
