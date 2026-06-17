@@ -105,12 +105,49 @@ func (o *Orchestrator) superviseDecisions(now time.Time) []supervisorAction {
 		if now.Sub(mgr.UpdatedAt) < superviseIdleAfter {
 			continue
 		}
+		// Don't churn a manager whose only outstanding work is an open PR waiting
+		// on a human to review/merge: it has no next action (it cannot merge its
+		// own PR), so repeatedly poking it just makes it re-ask or re-state status.
+		// A real merge/feedback/CI event steers it the moment something changes.
+		if o.objectiveAwaitingHumanOnPR(obj.ID) {
+			continue
+		}
 		if !o.markPoked(obj.ID, now) {
 			continue
 		}
 		out = append(out, supervisorAction{kind: "poke", objectiveID: obj.ID, manager: mgr})
 	}
 	return out
+}
+
+// objectiveAwaitingHumanOnPR reports whether the objective's only outstanding
+// work is one or more open PRs that the team cannot advance on its own — each is
+// healthy (checks not failing) and carries no unhandled feedback, so it is simply
+// waiting for a human to review and merge. In that state an idle manager has no
+// action to take (it must not merge its own PR), and a merge/feedback/CI event
+// steers it the instant something changes — so the timer re-poke is pure churn.
+//
+// An open PR that is failing CI or has unhandled review feedback is NOT a passive
+// wait: that path spawns a follow-up, so it does not suppress the poke.
+func (o *Orchestrator) objectiveAwaitingHumanOnPR(objectiveID string) bool {
+	prs, err := o.st.ListPRsByObjective(objectiveID)
+	if err != nil {
+		return false
+	}
+	awaiting := false
+	for _, pr := range prs {
+		if pr.Status != model.PROpen && pr.Status != model.PRDraft {
+			continue // merged/closed PRs need no waiting
+		}
+		if pr.ChecksState == model.ChecksFailing {
+			return false
+		}
+		if pending, _ := o.st.UnhandledFeedback(pr.ID); len(pending) > 0 {
+			return false
+		}
+		awaiting = true
+	}
+	return awaiting
 }
 
 // markPoked records a supervisor action for an objective and reports whether

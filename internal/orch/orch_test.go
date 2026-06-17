@@ -1494,6 +1494,47 @@ func TestSupervisor_RepokesIdleManagerOnlyWhenNoWorkers(t *testing.T) {
 	}
 }
 
+// An idle manager whose only outstanding work is a healthy open PR is waiting on
+// a human to merge — it must NOT be poked (that just makes it re-ask "can you
+// merge?"). But an open PR that is failing CI or carries unhandled feedback is
+// actionable, so the poke still fires.
+func TestSupervisor_DoesNotPokeWhenAwaitingHumanMerge(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+
+	obj, mgr, err := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	if err != nil {
+		t.Fatalf("create objective: %v", err)
+	}
+	future := st.Now().Add(superviseIdleAfter + time.Minute)
+
+	// Sanity: with no PR, an idle manager IS poked (latent work to drive).
+	if acts := o.superviseDecisions(future); len(acts) != 1 || acts[0].kind != "poke" {
+		t.Fatalf("expected a poke with no PR, got %+v", acts)
+	}
+
+	// A healthy open PR awaiting merge suppresses the poke.
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "octo/repo", Number: 12, Branch: "feature",
+		BaseBranch: "main", HeadSHA: "sha1", Status: model.PROpen, ChecksState: model.ChecksPassing}
+	_ = st.CreatePR(pr)
+	cooled := future.Add(supervisePokeCooldown + time.Second)
+	if acts := o.superviseDecisions(cooled); len(acts) != 0 {
+		t.Fatalf("idle manager awaiting a human merge must not be poked, got %+v", acts)
+	}
+
+	// Unhandled feedback on that PR makes it actionable again -> poke resumes.
+	if err := o.IngestFeedback(context.Background(), pr.ID, []model.PRFeedback{
+		{Kind: model.FeedbackReviewComment, ExternalID: "c-1", Body: "please rename", Actionable: true},
+	}); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	cooled2 := cooled.Add(supervisePokeCooldown + time.Second)
+	if acts := o.superviseDecisions(cooled2); len(acts) != 1 || acts[0].kind != "poke" || acts[0].manager.ID != mgr.ID {
+		t.Fatalf("an open PR with unhandled feedback should not suppress the poke, got %+v", acts)
+	}
+}
+
 func TestSupervisor_RespawnsManagerThenEscalates(t *testing.T) {
 	o, st := newTestOrch(t)
 	addTarget(t, st, "local", model.TargetLocal, 4)
