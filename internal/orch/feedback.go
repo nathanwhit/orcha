@@ -19,6 +19,7 @@ func (o *Orchestrator) IngestFeedback(ctx context.Context, prID string, items []
 	if err != nil {
 		return err
 	}
+	inserted := 0
 	for i := range items {
 		f := items[i]
 		f.PRID = prID
@@ -34,12 +35,21 @@ func (o *Orchestrator) IngestFeedback(ctx context.Context, prID string, items []
 			_, _ = o.st.UpdatePR(prID, func(p *model.PullRequest) { p.Status = model.PRClosed })
 			f.Actionable = false
 		}
-		if _, err := o.st.RecordFeedback(&f); err != nil {
+		ins, err := o.st.RecordFeedback(&f)
+		if err != nil {
 			return err
 		}
+		if ins {
+			inserted++
+		}
 	}
-	o.audit(pr.ObjectiveID, "", "pr_feedback_ingested",
-		fmt.Sprintf("ingested %d feedback items for PR #%d", len(items), pr.Number), model.JSONMap{"pr_id": prID})
+	// Only announce genuinely new feedback. A PR monitor re-polls the same
+	// comments every tick; without this the no-op polls would emit a steady
+	// stream of "ingested N" events (and read as activity) when nothing changed.
+	if inserted > 0 {
+		o.audit(pr.ObjectiveID, "", "pr_feedback_ingested",
+			fmt.Sprintf("ingested %d feedback items for PR #%d", inserted, pr.Number), model.JSONMap{"pr_id": prID})
+	}
 	return nil
 }
 
