@@ -32,22 +32,23 @@ const Version = version.Version
 
 func main() {
 	var (
-		dbPath      = flag.String("db", "orcha.db", "path to SQLite database")
-		addr        = flag.String("addr", ":8080", "HTTP listen address")
-		fakeAgents  = flag.Bool("fake-agents", false, "use in-process fake agents instead of the real claude/codex CLIs")
-		tmuxAgents  = flag.Bool("tmux", false, "run agents as interactive TUIs inside attachable tmux sessions (tmux attach -t orcha-<id>)")
-		claudeBin   = flag.String("claude-bin", "claude", "path to the claude CLI")
-		codexBin    = flag.String("codex-bin", "codex", "path to the codex CLI")
-		realForge   = flag.Bool("real-forge", false, "use the real git+gh forge (needs real workspace checkouts) instead of the in-memory fake")
-		maxConc     = flag.Int("max-concurrent", 8, "max simultaneously active sessions across all targets")
-		schedEvery  = flag.Duration("schedule-interval", 2*time.Second, "scheduler idle tick interval")
-		mcpBase     = flag.String("mcp-base-url", "http://127.0.0.1:8080", "base URL where the manager MCP tool surface is reachable by agent CLIs")
-		showVersion = flag.Bool("version", false, "print version and exit")
-		workerPerm  = flag.String("agent-permissions", "bypassPermissions", "permission/sandbox mode for all agents: bypassPermissions (no prompts/sandbox — safe in a VM) or acceptEdits (edits only, prompts for shell)")
-		prMonitor   = flag.Duration("pr-monitor", 0, "poll open PRs for new comments/checks/merges this often and spawn follow-ups / notify the manager (0 = auto: on at 60s with -real-forge, off otherwise)")
-		issueBot    = flag.String("issue-bot-login", "", "GitHub login orcha runs as; @-mentioning or assigning it on an issue in a registered project creates an objective (needs -real-forge and -issue-allow)")
-		issueAllow  = flag.String("issue-allow", "", "comma-separated GitHub logins permitted to summon work via an issue @-mention/assignment (empty disables the issue trigger)")
-		idleBgWork  = flag.Duration("idle-bg-work-timeout", 4*time.Hour, "tmux mode: max time a one-shot worker may sit on a static pane that still shows live background shells (a build it yielded to await) before it is reaped; must exceed the longest build+wait")
+		dbPath       = flag.String("db", "orcha.db", "path to SQLite database")
+		addr         = flag.String("addr", ":8080", "HTTP listen address")
+		fakeAgents   = flag.Bool("fake-agents", false, "use in-process fake agents instead of the real claude/codex CLIs")
+		tmuxAgents   = flag.Bool("tmux", false, "run agents as interactive TUIs inside attachable tmux sessions (tmux attach -t orcha-<id>)")
+		claudeBin    = flag.String("claude-bin", "claude", "path to the claude CLI")
+		codexBin     = flag.String("codex-bin", "codex", "path to the codex CLI")
+		realForge    = flag.Bool("real-forge", false, "use the real git+gh forge (needs real workspace checkouts) instead of the in-memory fake")
+		maxConc      = flag.Int("max-concurrent", 8, "max simultaneously active sessions across all targets")
+		schedEvery   = flag.Duration("schedule-interval", 2*time.Second, "scheduler idle tick interval")
+		mcpBase      = flag.String("mcp-base-url", "http://127.0.0.1:8080", "base URL where the manager MCP tool surface is reachable by agent CLIs")
+		showVersion  = flag.Bool("version", false, "print version and exit")
+		workerPerm   = flag.String("agent-permissions", "bypassPermissions", "permission/sandbox mode for all agents: bypassPermissions (no prompts/sandbox — safe in a VM) or acceptEdits (edits only, prompts for shell)")
+		prMonitor    = flag.Duration("pr-monitor", 0, "poll open PRs for new comments/checks/merges this often and spawn follow-ups / notify the manager (0 = auto: on at 60s with -real-forge, off otherwise)")
+		issueBot     = flag.String("issue-bot-login", "", "GitHub login orcha runs as; @-mentioning or assigning it on an issue in a registered project creates an objective (needs -real-forge and -issue-allow)")
+		issueAllow   = flag.String("issue-allow", "", "comma-separated GitHub logins permitted to summon work via an issue @-mention/assignment (empty disables the issue trigger)")
+		idleBgWork   = flag.Duration("idle-bg-work-timeout", 4*time.Hour, "tmux mode: max time a one-shot worker may sit on a static pane that still shows live background shells (a build it yielded to await) before it is reaped; must exceed the longest build+wait")
+		usageMonitor = flag.Duration("usage-monitor", 0, "scrape each provider's real subscription usage (claude /usage, codex /status) via a tmux pty this often, so provider selection load-balances on actual remaining usage (0 = auto: on at 5m unless -fake-agents, off with fake)")
 	)
 	flag.Parse()
 
@@ -56,6 +57,13 @@ func main() {
 	// objective never wraps up. An explicit -pr-monitor still wins.
 	if *prMonitor == 0 && *realForge {
 		*prMonitor = 60 * time.Second
+	}
+
+	// Usage monitoring needs a real provider CLI to scrape; it makes no sense
+	// with fake agents. Default it on (every 5m) otherwise so provider selection
+	// load-balances on actual remaining usage out of the box.
+	if *usageMonitor == 0 && !*fakeAgents {
+		*usageMonitor = 5 * time.Minute
 	}
 
 	if *showVersion {
@@ -91,12 +99,16 @@ func main() {
 		// (the attach command is recorded on each session).
 		o.RegisterProvider(agent.NewTmuxClaude(agent.ClaudeConfig{Binary: *claudeBin, CompletionGate: o.CompletionAllowed, MaxIdleWithBgWork: *idleBgWork}))
 		o.RegisterProvider(agent.NewTmuxCodex(agent.CodexConfig{Binary: *codexBin, CompletionGate: o.CompletionAllowed, MaxIdleWithBgWork: *idleBgWork}))
+		o.SetUsageBin(model.AgentClaude, *claudeBin)
+		o.SetUsageBin(model.AgentCodex, *codexBin)
 		log.Println("using tmux interactive TUIs (attach: tmux attach -t orcha-<sessionID>)")
 	default:
 		// Real CLIs, headless. Claude runs as a persistent interactive stream-json
 		// session; Codex runs `codex exec` and is steered via resume.
 		o.RegisterProvider(agent.NewClaude(agent.ClaudeConfig{Binary: *claudeBin}))
 		o.RegisterProvider(agent.NewCodex(agent.CodexConfig{Binary: *codexBin}))
+		o.SetUsageBin(model.AgentClaude, *claudeBin)
+		o.SetUsageBin(model.AgentCodex, *codexBin)
 		log.Println("using real claude + codex CLIs (headless)")
 	}
 	// Workspace preparation is always real: any coding worker whose objective
@@ -160,6 +172,28 @@ func main() {
 			log.Printf("issue trigger on (every %s, bot=@%s, %d allowed login(s))",
 				monitorEvery, *issueBot, len(splitCSV(*issueAllow)))
 		}
+	}
+
+	// Usage monitor: scrape each provider's real subscription usage (claude
+	// /usage, codex /status) on its own cadence and record the weekly percentage
+	// that defaultAgent()/SelectProvider balance on. Slow-moving, so it ticks
+	// independently of the PR/issue monitor. Runs an immediate first pass so the
+	// scheduler isn't balancing blind for the first interval.
+	if *usageMonitor > 0 {
+		go func() {
+			o.SyncUsage(ctx)
+			t := time.NewTicker(*usageMonitor)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					o.SyncUsage(ctx)
+				}
+			}
+		}()
+		log.Printf("usage monitor on (every %s)", *usageMonitor)
 	}
 
 	srv := api.New(o)
