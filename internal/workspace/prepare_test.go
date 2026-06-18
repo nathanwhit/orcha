@@ -112,6 +112,52 @@ func TestPrepareIsolated_ForkBaseWithoutForkNamesOrigin(t *testing.T) {
 	}
 }
 
+// TestPrepareIsolated_InitsSubmodules: a repo with a submodule (e.g.
+// denoland/deno's vendored test fixtures) must come up with the submodule
+// CHECKED OUT, not an empty directory, or the build fails. Uses git's
+// env-config to allow local-path submodules in the test (production submodules
+// are https and unaffected) so the code under test's `submodule update` works.
+func TestPrepareIsolated_InitsSubmodules(t *testing.T) {
+	hermeticGit(t)
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
+	t.Setenv("GIT_CONFIG_VALUE_0", "always")
+
+	bare, seed := seedBare(t)
+	root := t.TempDir()
+
+	// A second repo to serve as the submodule.
+	subBare := filepath.Join(root, "sub.git")
+	git(t, root, "init", "--bare", "-b", "main", subBare)
+	subSeed := filepath.Join(root, "subseed")
+	git(t, root, "init", "-b", "main", subSeed)
+	write(t, subSeed, "lib.txt", "from submodule\n")
+	git(t, subSeed, "add", ".")
+	git(t, subSeed, "commit", "-m", "sub commit")
+	git(t, subSeed, "remote", "add", "origin", subBare)
+	git(t, subSeed, "push", "-u", "origin", "main")
+
+	// Wire the submodule into the main repo and publish.
+	git(t, seed, "submodule", "add", subBare, "vendor/sub")
+	git(t, seed, "commit", "-m", "add submodule")
+	git(t, seed, "push", "origin", "main")
+
+	work := filepath.Join(t.TempDir(), "work")
+	ws := filepath.Join(work, "ws")
+	if err := New().PrepareIsolated(context.Background(), exec.NewLocal(), Spec{
+		WorkRoot: work, RepoURL: bare, Dir: ws, Base: "main", Branch: "feat-sub",
+	}); err != nil {
+		t.Fatalf("prepare with submodule: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(ws, "vendor", "sub", "lib.txt"))
+	if err != nil {
+		t.Fatalf("submodule not checked out (vendor/sub/lib.txt missing): %v", err)
+	}
+	if string(got) != "from submodule\n" {
+		t.Fatalf("submodule content = %q, want %q", string(got), "from submodule\n")
+	}
+}
+
 // TestPrepareIsolated_BranchesOffFreshUpstream is the central guarantee: a
 // workspace prepared after upstream advances is based on the *new* commit, even
 // though the cache was first populated earlier.

@@ -73,8 +73,23 @@ func (p *Preparer) PrepareIsolated(ctx context.Context, ex exec.Executor, spec S
 	if err != nil {
 		return err
 	}
+	return p.checkoutBranch(ctx, ex, spec, start)
+}
+
+// checkoutBranch creates spec.Branch at start and initializes submodules. Every
+// prepare path funnels through here so the tree is always complete however the
+// start point was resolved (an isolated base, or a PR head off the fork). Repos
+// like denoland/deno keep test fixtures and vendored deps in submodules; without
+// the submodule step those paths are empty and the build fails. It runs after
+// the checkout so .gitmodules reflects this ref, and after base() restored the
+// real origin so relative submodule URLs (../foo) resolve against upstream, not
+// the local cache. A repo with no .gitmodules makes the submodule step a no-op.
+func (p *Preparer) checkoutBranch(ctx context.Context, ex exec.Executor, spec Spec, start string) error {
 	if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "checkout", "-B", spec.Branch, start); err != nil {
-		return fmt.Errorf("workspace: branch %s off %s: %w", spec.Branch, start, err)
+		return fmt.Errorf("workspace: check out %s at %s: %w", spec.Branch, start, err)
+	}
+	if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "submodule", "update", "--init", "--recursive", "--checkout"); err != nil {
+		return fmt.Errorf("workspace: init submodules for %s: %w", spec.Branch, err)
 	}
 	return nil
 }
@@ -115,15 +130,9 @@ func (p *Preparer) PreparePRBranch(ctx context.Context, ex exec.Executor, spec S
 		if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "fetch", spec.PushURL, spec.Branch); err != nil {
 			return fmt.Errorf("workspace: fetch PR branch %s from fork: %w", spec.Branch, err)
 		}
-		if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "checkout", "-B", spec.Branch, "FETCH_HEAD"); err != nil {
-			return fmt.Errorf("workspace: checkout PR branch %s: %w", spec.Branch, err)
-		}
-		return nil
+		return p.checkoutBranch(ctx, ex, spec, "FETCH_HEAD")
 	}
-	if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "checkout", "-B", spec.Branch, "origin/"+spec.Branch); err != nil {
-		return fmt.Errorf("workspace: checkout PR branch %s: %w", spec.Branch, err)
-	}
-	return nil
+	return p.checkoutBranch(ctx, ex, spec, "origin/"+spec.Branch)
 }
 
 // base performs the shared, freshness-guaranteeing steps up to (but not
