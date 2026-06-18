@@ -69,10 +69,38 @@ func (p *Preparer) PrepareIsolated(ctx context.Context, ex exec.Executor, spec S
 	if base == "" {
 		base = "HEAD"
 	}
-	if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "checkout", "-B", spec.Branch, "origin/"+base); err != nil {
-		return fmt.Errorf("workspace: branch %s off origin/%s: %w", spec.Branch, base, err)
+	start, err := p.isolatedStartPoint(ctx, ex, spec, base)
+	if err != nil {
+		return err
+	}
+	if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "checkout", "-B", spec.Branch, start); err != nil {
+		return fmt.Errorf("workspace: branch %s off %s: %w", spec.Branch, start, err)
 	}
 	return nil
+}
+
+// isolatedStartPoint resolves the revision a fresh isolated branch starts from.
+// The base is normally an upstream branch on origin (e.g. main). But orcha's
+// own worker branches are pushed to the fork (PushURL), never upstream — so a
+// worker asked to build on another worker's branch (e.g. validating a published
+// PR's branch) has a base that lives only on the fork. Prefer origin when it
+// has the base; otherwise, when a fork is configured, fetch the base from there
+// and start from the fetched head. Without a fork to fall back to, keep
+// origin/<base> so the resulting checkout error names exactly what was missing.
+func (p *Preparer) isolatedStartPoint(ctx context.Context, ex exec.Executor, spec Spec, base string) (string, error) {
+	if base == "HEAD" {
+		return "HEAD", nil
+	}
+	if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "rev-parse", "--verify", "--quiet", "origin/"+base); err == nil {
+		return "origin/" + base, nil
+	}
+	if spec.PushURL != "" {
+		if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "fetch", spec.PushURL, base); err != nil {
+			return "", fmt.Errorf("workspace: base %q is not on origin and could not be fetched from the fork: %w", base, err)
+		}
+		return "FETCH_HEAD", nil
+	}
+	return "origin/" + base, nil
 }
 
 // PreparePRBranch creates a checkout tracking an existing PR branch at its

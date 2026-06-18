@@ -55,6 +55,63 @@ func write(t *testing.T, dir, name, content string) {
 	}
 }
 
+// TestPrepareIsolated_FetchesForkHostedBase covers a worker that builds on
+// another worker's branch (e.g. validating a published PR): orcha pushes worker
+// branches to the fork, never upstream, so the base lives only on the fork and
+// must be fetched from there rather than origin.
+func TestPrepareIsolated_FetchesForkHostedBase(t *testing.T) {
+	bare, _ := seedBare(t) // origin: main = commit A
+	root := t.TempDir()
+	fork := filepath.Join(root, "fork.git")
+	git(t, root, "clone", "--bare", bare, fork) // a fork of origin
+
+	// Push an "implementer" branch to the FORK only (not origin), as orcha does.
+	impl := filepath.Join(root, "impl")
+	git(t, root, "clone", bare, impl)
+	write(t, impl, "feature.txt", "impl work\n")
+	git(t, impl, "add", ".")
+	git(t, impl, "commit", "-m", "impl change")
+	git(t, impl, "push", fork, "HEAD:refs/heads/orcha/impl-abc")
+	wantSHA := git(t, impl, "rev-parse", "HEAD")
+
+	// A validator branches off the fork-hosted implementer branch.
+	work := filepath.Join(t.TempDir(), "work")
+	ex := exec.NewLocal()
+	p := New()
+	ctx := context.Background()
+	ws := filepath.Join(work, "vali")
+	if err := p.PrepareIsolated(ctx, ex, Spec{
+		WorkRoot: work, RepoURL: bare, Dir: ws,
+		Base: "orcha/impl-abc", Branch: "orcha/vali-xyz", PushURL: fork,
+	}); err != nil {
+		t.Fatalf("PrepareIsolated off fork-hosted base: %v", err)
+	}
+	if got := git(t, ws, "rev-parse", "HEAD"); got != wantSHA {
+		t.Fatalf("HEAD = %s, want fork impl head %s", got, wantSHA)
+	}
+	if _, err := os.Stat(filepath.Join(ws, "feature.txt")); err != nil {
+		t.Fatalf("expected the implementer's feature.txt in the validator checkout: %v", err)
+	}
+}
+
+// TestPrepareIsolated_ForkBaseWithoutForkNamesOrigin: a base absent from origin
+// with no fork to try should still fail with an error that names origin/<base>,
+// so the missing ref is obvious.
+func TestPrepareIsolated_ForkBaseWithoutForkNamesOrigin(t *testing.T) {
+	bare, _ := seedBare(t)
+	work := filepath.Join(t.TempDir(), "work")
+	err := New().PrepareIsolated(context.Background(), exec.NewLocal(), Spec{
+		WorkRoot: work, RepoURL: bare, Dir: filepath.Join(work, "ws"),
+		Base: "orcha/impl-missing", Branch: "orcha/vali-1",
+	})
+	if err == nil {
+		t.Fatal("expected failure branching off a base absent from origin with no fork")
+	}
+	if !strings.Contains(err.Error(), "origin/orcha/impl-missing") {
+		t.Fatalf("error should name origin/<base>, got: %v", err)
+	}
+}
+
 // TestPrepareIsolated_BranchesOffFreshUpstream is the central guarantee: a
 // workspace prepared after upstream advances is based on the *new* commit, even
 // though the cache was first populated earlier.

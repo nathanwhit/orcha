@@ -233,16 +233,31 @@ func (o *Orchestrator) resolveRepo(sess *model.Session) (repo, pushRepo, cloneUR
 	pushRepo, _ = sess.Metadata["push_repo"].(string)
 	cloneURL, _ = sess.Metadata["clone_url"].(string)
 	base, _ = sess.Metadata["base_branch"].(string)
-	if (repo == "" && cloneURL == "") && sess.ObjectiveID != "" {
-		if obj, err := o.st.GetObjective(sess.ObjectiveID); err == nil {
-			repo, _ = obj.Metadata["repo"].(string)
-			cloneURL, _ = obj.Metadata["clone_url"].(string)
-			if pushRepo == "" {
-				pushRepo, _ = obj.Metadata["push_repo"].(string)
-			}
-			if base == "" {
-				base, _ = obj.Metadata["base_branch"].(string)
-			}
+	if sess.ObjectiveID == "" {
+		return repo, pushRepo, cloneURL, base
+	}
+	obj, err := o.st.GetObjective(sess.ObjectiveID)
+	if err != nil {
+		return repo, pushRepo, cloneURL, base
+	}
+	objRepo, _ := obj.Metadata["repo"].(string)
+	// Fill the repo source from the objective when the session names none.
+	if repo == "" && cloneURL == "" {
+		repo = objRepo
+		cloneURL, _ = obj.Metadata["clone_url"].(string)
+	}
+	// push_repo (the fork orcha pushes worker branches to) and base_branch are
+	// objective-wide settings, independent of which repo a worker checks out.
+	// Inherit them when the session left them unset and is working on the
+	// objective's repo. Without this, a worker that overrides only base_branch
+	// (e.g. to build on another worker's fork-hosted branch) redundantly passing
+	// the same repo would silently lose the fork and look for the base on origin.
+	if repo == "" || objRepo == "" || repo == objRepo {
+		if pushRepo == "" {
+			pushRepo, _ = obj.Metadata["push_repo"].(string)
+		}
+		if base == "" {
+			base, _ = obj.Metadata["base_branch"].(string)
 		}
 	}
 	return repo, pushRepo, cloneURL, base
