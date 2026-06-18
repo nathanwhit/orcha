@@ -47,6 +47,14 @@ func mcpServer(tools ...mcp.Tool) http.Handler {
 
 // mcpObj/mcpStr are tiny JSON-schema builders shared by the tool constructors.
 func mcpObj(props map[string]any, required ...string) map[string]any {
+	// A tool with no required fields gets a nil variadic slice, which marshals to
+	// JSON `null`. JSON Schema's "required" must be an array, and strict MCP
+	// clients (Claude Code's Zod validation) reject the ENTIRE tools/list when any
+	// tool has `"required": null` — silently leaving the agent with no tools. Emit
+	// an empty array instead.
+	if required == nil {
+		required = []string{}
+	}
 	return map[string]any{"type": "object", "properties": props, "required": required}
 }
 
