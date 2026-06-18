@@ -170,6 +170,60 @@ func TestDefaultAgent_BalancesByRemainingUsage(t *testing.T) {
 	})
 }
 
+// TestPickDefaultAgent exercises the scoring directly with a fixed clock so the
+// time-to-reset math (and the no-data guard) is deterministic.
+func TestPickDefaultAgent(t *testing.T) {
+	pct := func(v float64) *float64 { return &v }
+	now := time.Date(2026, time.June, 18, 12, 0, 0, 0, time.UTC)
+	reg := []model.AgentKind{model.AgentClaude, model.AgentCodex}
+	bucket := func(p model.AgentKind, used float64, reset time.Time, st model.UsageState) *model.UsageBucket {
+		return &model.UsageBucket{Provider: string(p), UsedPercent: pct(used), State: st, WindowEnd: reset}
+	}
+
+	t.Run("rate-aware: more headroom-per-hour wins", func(t *testing.T) {
+		// remaining/hours: claude 66/72=0.92, codex 95/144=0.66. claude can
+		// sustain more burn per hour because its window resets sooner (a soon
+		// reset is cheap to burn), so the formula deliberately prefers claude here
+		// even though codex has been used less.
+		buckets := []*model.UsageBucket{
+			bucket(model.AgentClaude, 34, now.Add(72*time.Hour), model.UsageOK),
+			bucket(model.AgentCodex, 5, now.Add(144*time.Hour), model.UsageOK),
+		}
+		if got := pickDefaultAgent(reg, buckets, now); got != model.AgentClaude {
+			t.Fatalf("got %s, want claude", got)
+		}
+	})
+
+	t.Run("imminent reset is cheap to burn", func(t *testing.T) {
+		// claude is 95% used but resets in 30 min; codex 40% used resets in 5d.
+		// The soon-resetting window is the better pick despite higher usage.
+		buckets := []*model.UsageBucket{
+			bucket(model.AgentClaude, 95, now.Add(30*time.Minute), model.UsageOK),
+			bucket(model.AgentCodex, 40, now.Add(120*time.Hour), model.UsageOK),
+		}
+		if got := pickDefaultAgent(reg, buckets, now); got != model.AgentClaude {
+			t.Fatalf("got %s, want claude (resets imminently)", got)
+		}
+	})
+
+	t.Run("a provider we cannot read is not treated as free", func(t *testing.T) {
+		// Only codex has a reading (heavily used). claude's probe failed so it has
+		// NO bucket — it must not be picked just because it is unmeasured.
+		buckets := []*model.UsageBucket{
+			bucket(model.AgentCodex, 70, now.Add(100*time.Hour), model.UsageOK),
+		}
+		if got := pickDefaultAgent(reg, buckets, now); got != model.AgentCodex {
+			t.Fatalf("got %s, want codex (the only measured provider)", got)
+		}
+	})
+
+	t.Run("no readings at all falls back to the default", func(t *testing.T) {
+		if got := pickDefaultAgent(reg, nil, now); got != model.AgentClaude {
+			t.Fatalf("got %s, want claude (registered default)", got)
+		}
+	})
+}
+
 // ---- steering ----
 
 func TestInteractiveSteering_ReachesSession(t *testing.T) {

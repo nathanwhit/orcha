@@ -27,13 +27,20 @@ import (
 // same exec.Executor as agents, so a probe works on the local host or a remote
 // SSH target.
 
+// usageReading is one parsed usage panel: the weekly used-percent and, when the
+// panel named one, the instant the window resets (zero otherwise).
+type usageReading struct {
+	usedPercent float64
+	resetAt     time.Time
+}
+
 // usageProbe describes how to read one provider's usage panel from its CLI.
 type usageProbe struct {
 	kind    model.AgentKind
-	launch  []string                          // argv that starts the interactive TUI
-	command string                            // the usage slash command to type
-	ready   string                            // pane substring proving the TUI finished booting
-	parse   func(pane string) (float64, bool) // pane text -> weekly used_percent
+	launch  []string                               // argv that starts the interactive TUI
+	command string                                 // the usage slash command to type
+	ready   string                                 // pane substring proving the TUI finished booting
+	parse   func(pane string) (usageReading, bool) // pane text -> weekly usage reading
 }
 
 // SetUsageBin tells the monitor which binary to launch for a provider's usage
@@ -59,18 +66,21 @@ func (o *Orchestrator) SyncUsage(ctx context.Context) {
 	}
 	ex, dir := o.usageExecutor()
 	for _, p := range probes {
-		pct, ok := o.probeUsage(ctx, ex, dir, p)
+		r, ok := o.probeUsage(ctx, ex, dir, p)
 		if !ok {
 			o.audit("", "", "usage_probe_failed",
 				string(p.kind)+": could not read usage panel", nil)
 			continue
 		}
-		if err := o.st.SetUsageWindow(string(p.kind), "", pct, usageStateFor(pct)); err != nil {
+		if err := o.st.SetUsageWindow(string(p.kind), "", r.usedPercent, r.resetAt, usageStateFor(r.usedPercent)); err != nil {
 			continue
 		}
+		data := model.JSONMap{"provider": string(p.kind), "used_percent": r.usedPercent}
+		if !r.resetAt.IsZero() {
+			data["resets_at"] = r.resetAt.Format(time.RFC3339)
+		}
 		o.audit("", "", "usage_synced",
-			fmt.Sprintf("%s weekly usage %.0f%%", p.kind, pct),
-			model.JSONMap{"provider": string(p.kind), "used_percent": pct})
+			fmt.Sprintf("%s weekly usage %.0f%%", p.kind, r.usedPercent), data)
 	}
 }
 
@@ -115,7 +125,7 @@ func (o *Orchestrator) usageExecutor() (exec.Executor, string) {
 // TUI, wait for it to boot, type the usage command, then poll the pane until
 // the panel parses. Some TUIs (codex) open a slash-command autocomplete that
 // swallows the first Enter, so a second Enter is sent partway through.
-func (o *Orchestrator) probeUsage(ctx context.Context, ex exec.Executor, dir string, p usageProbe) (float64, bool) {
+func (o *Orchestrator) probeUsage(ctx context.Context, ex exec.Executor, dir string, p usageProbe) (usageReading, bool) {
 	ctrl := tmux.New(ex)
 	name := "orcha-usage-" + string(p.kind)
 	// Always tear the probe session down, even if ctx is already cancelled.
@@ -126,25 +136,27 @@ func (o *Orchestrator) probeUsage(ctx context.Context, ex exec.Executor, dir str
 	}()
 
 	if err := ctrl.NewSession(ctx, name, dir, p.launch); err != nil {
-		return 0, false
+		return usageReading{}, false
 	}
-	if !waitForPane(ctx, ctrl, name, func(pane string) bool {
-		return strings.Contains(pane, p.ready)
-	}, 30) {
-		return 0, false
+	// Wait for the TUI to boot, clearing any blocking startup dialog (folder
+	// trust, codex's update nudge) along the way — without this the probe sits
+	// behind the prompt until it times out, which silently starves the
+	// load-balancer of all usage data.
+	if !waitForReady(ctx, ctrl, name, p.ready, 60) {
+		return usageReading{}, false
 	}
 	// The pane can show its ready marker a beat before the TUI is actually
 	// accepting input, so an immediate paste is silently dropped. Settle first.
 	if !sleepCtx(ctx, 1500*time.Millisecond) {
-		return 0, false
+		return usageReading{}, false
 	}
 	if err := ctrl.SendKeys(ctx, name, p.command); err != nil {
-		return 0, false
+		return usageReading{}, false
 	}
 	for i := 0; i < 24; i++ {
 		if pane, err := ctrl.CapturePane(ctx, name); err == nil {
-			if pct, ok := p.parse(pane); ok {
-				return pct, true
+			if r, ok := p.parse(pane); ok {
+				return r, true
 			}
 		}
 		if i == 6 {
@@ -153,17 +165,25 @@ func (o *Orchestrator) probeUsage(ctx context.Context, ex exec.Executor, dir str
 			_ = ctrl.SendKeys(ctx, name, p.command)
 		}
 		if !sleepCtx(ctx, 500*time.Millisecond) {
-			return 0, false
+			return usageReading{}, false
 		}
 	}
-	return 0, false
+	return usageReading{}, false
 }
 
-// waitForPane polls a pane until cond holds or the attempt budget runs out.
-func waitForPane(ctx context.Context, ctrl *tmux.Controller, name string, cond func(string) bool, tries int) bool {
+// waitForReady polls a pane until the ready marker appears, dismissing any known
+// blocking startup dialog (shared with the live agent watchdog) it sees first.
+func waitForReady(ctx context.Context, ctrl *tmux.Controller, name, ready string, tries int) bool {
 	for i := 0; i < tries; i++ {
-		if pane, err := ctrl.CapturePane(ctx, name); err == nil && cond(pane) {
-			return true
+		if pane, err := ctrl.CapturePane(ctx, name); err == nil {
+			if strings.Contains(pane, ready) {
+				return true
+			}
+			if keys, ok := agent.DismissStartupDialog(pane); ok {
+				for _, k := range keys {
+					_ = ctrl.SendRaw(ctx, name, k)
+				}
+			}
 		}
 		if !sleepCtx(ctx, 500*time.Millisecond) {
 			return false
@@ -228,22 +248,66 @@ func claudeUsageProbe(bin string) usageProbe {
 
 var pctUsedRe = regexp.MustCompile(`(\d+(?:\.\d+)?)\s*%\s*used`)
 
-func parseClaudeUsage(pane string) (float64, bool) {
+func parseClaudeUsage(pane string) (usageReading, bool) {
 	lines := strings.Split(pane, "\n")
 	for i, l := range lines {
 		if !strings.Contains(l, "Current week (all models)") {
 			continue
 		}
-		// The percent sits on this line or one of the next couple of rows.
-		for j := i; j < len(lines) && j < i+3; j++ {
-			if m := pctUsedRe.FindStringSubmatch(lines[j]); m != nil {
-				if v, err := strconv.ParseFloat(m[1], 64); err == nil {
-					return v, true
+		// The percent — and a couple rows below it, the "Resets …" line — sit in
+		// the block opened by this header.
+		for j := i; j < len(lines) && j < i+4; j++ {
+			m := pctUsedRe.FindStringSubmatch(lines[j])
+			if m == nil {
+				continue
+			}
+			v, err := strconv.ParseFloat(m[1], 64)
+			if err != nil {
+				continue
+			}
+			r := usageReading{usedPercent: v}
+			for k := j; k < len(lines) && k < j+3; k++ {
+				if reset, ok := parseClaudeReset(lines[k], time.Now()); ok {
+					r.resetAt = reset
+					break
 				}
 			}
+			return r, true
 		}
 	}
-	return 0, false
+	return usageReading{}, false
+}
+
+// parseClaudeReset reads claude's weekly reset line into the next future reset
+// instant. The day-to-time separator varies — "Jun 21 at 6:59pm" and
+// "Jun 22, 2am" both occur — and a named zone ("America/Los_Angeles", "UTC")
+// may or may not be present; it is honoured when it loads, else the host's local
+// zone is used.
+var claudeResetRe = regexp.MustCompile(`Resets\s+([A-Za-z]{3,9})\s+(\d{1,2})(?:\s+at\s+|,\s*)(\d{1,2})(?::(\d{2}))?\s*([AaPp][Mm])(?:\s*\(([^)]+)\))?`)
+
+func parseClaudeReset(line string, now time.Time) (time.Time, bool) {
+	m := claudeResetRe.FindStringSubmatch(line)
+	if m == nil {
+		return time.Time{}, false
+	}
+	mon, ok := parseMonth(m[1])
+	if !ok {
+		return time.Time{}, false
+	}
+	day, _ := strconv.Atoi(m[2])
+	hour, _ := strconv.Atoi(m[3])
+	min := 0
+	if m[4] != "" {
+		min, _ = strconv.Atoi(m[4])
+	}
+	hour = to24Hour(hour, m[5])
+	loc := time.Local
+	if m[6] != "" {
+		if l, err := time.LoadLocation(strings.TrimSpace(m[6])); err == nil {
+			loc = l
+		}
+	}
+	return nextOccurrence(now, mon, day, hour, min, loc), true
 }
 
 // codexUsageProbe reads the first "Weekly limit" figure from codex's /status
@@ -259,14 +323,17 @@ func codexUsageProbe(bin string) usageProbe {
 		kind:    model.AgentCodex,
 		launch:  []string{bin},
 		command: "/status",
-		ready:   "Context",
-		parse:   parseCodexUsage,
+		// The welcome banner ("OpenAI Codex (vX.Y.Z)") is the stable proof the TUI
+		// finished booting and is accepting input — present once any startup
+		// dialog is cleared, across model/footer changes.
+		ready: "OpenAI Codex",
+		parse: parseCodexUsage,
 	}
 }
 
 var pctLeftRe = regexp.MustCompile(`(\d+(?:\.\d+)?)\s*%\s*left`)
 
-func parseCodexUsage(pane string) (float64, bool) {
+func parseCodexUsage(pane string) (usageReading, bool) {
 	for _, l := range strings.Split(pane, "\n") {
 		if !strings.Contains(l, "Weekly limit") {
 			continue
@@ -277,9 +344,67 @@ func parseCodexUsage(pane string) (float64, bool) {
 				if used < 0 {
 					used = 0
 				}
-				return used, true
+				r := usageReading{usedPercent: used}
+				if reset, ok := parseCodexReset(l, time.Now()); ok {
+					r.resetAt = reset
+				}
+				return r, true
 			}
 		}
 	}
+	return usageReading{}, false
+}
+
+// parseCodexReset reads the reset clause codex appends to a limit line —
+// "(resets 21:18 on 24 Jun)" — into the next future reset instant, interpreted
+// in the host's local zone (codex renders local time and names no zone).
+var codexResetRe = regexp.MustCompile(`resets\s+(\d{1,2}):(\d{2})\s+on\s+(\d{1,2})\s+([A-Za-z]{3,9})`)
+
+func parseCodexReset(line string, now time.Time) (time.Time, bool) {
+	m := codexResetRe.FindStringSubmatch(line)
+	if m == nil {
+		return time.Time{}, false
+	}
+	hour, _ := strconv.Atoi(m[1])
+	min, _ := strconv.Atoi(m[2])
+	day, _ := strconv.Atoi(m[3])
+	mon, ok := parseMonth(m[4])
+	if !ok {
+		return time.Time{}, false
+	}
+	return nextOccurrence(now, mon, day, hour, min, time.Local), true
+}
+
+// to24Hour converts a 12-hour clock reading plus "am"/"pm" to 24-hour.
+func to24Hour(hour12 int, meridiem string) int {
+	h := hour12 % 12
+	if strings.EqualFold(meridiem, "pm") {
+		h += 12
+	}
+	return h
+}
+
+// parseMonth maps a (possibly full) English month name to time.Month.
+func parseMonth(s string) (time.Month, bool) {
+	if len(s) < 3 {
+		return 0, false
+	}
+	for m := time.January; m <= time.December; m++ {
+		if strings.EqualFold(m.String()[:3], s[:3]) {
+			return m, true
+		}
+	}
 	return 0, false
+}
+
+// nextOccurrence resolves a year-less month/day/time (the panels omit the year)
+// to its next occurrence at or after now, in loc — rolling to next year when
+// that calendar date has already passed this year.
+func nextOccurrence(now time.Time, mon time.Month, day, hour, min int, loc *time.Location) time.Time {
+	year := now.In(loc).Year()
+	t := time.Date(year, mon, day, hour, min, 0, 0, loc)
+	if t.Before(now) {
+		t = time.Date(year+1, mon, day, hour, min, 0, 0, loc)
+	}
+	return t
 }
