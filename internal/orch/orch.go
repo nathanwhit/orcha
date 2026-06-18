@@ -83,6 +83,8 @@ type Orchestrator struct {
 	preparer  *workspace.Preparer
 	notify    func() // optional scheduler wake hook
 
+	usageBins map[model.AgentKind]string // CLI binary per provider for the usage monitor (guarded by mu)
+
 	mu     sync.Mutex
 	guards map[string]*guardState // keyed by session id
 	runs   map[string]*run        // active runs keyed by session id

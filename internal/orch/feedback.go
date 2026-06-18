@@ -399,18 +399,57 @@ func (o *Orchestrator) AdoptUntrackedPRs(ctx context.Context, objectiveID string
 	return adopted
 }
 
-// defaultAgent returns any registered provider kind (preferring claude) for
-// auto-spawned sessions.
+// defaultAgent picks the registered provider with the most remaining usage
+// headroom for an auto-spawned session, so load spreads across providers
+// instead of always landing on one. It skips providers whose usage window is
+// exhausted and treats a provider with no usage data as fully free, so a fresh
+// or just-reset provider is preferred. Explicit agent choices (a user- or
+// manager-named agent) bypass this entirely — it only fills the no-preference
+// case, and SelectProvider still applies exhaustion fallback at start time.
+// With no usage data at all, ties break toward claude (lexicographically
+// smallest kind), preserving the old default.
 func (o *Orchestrator) defaultAgent() model.AgentKind {
 	o.mu.Lock()
-	defer o.mu.Unlock()
-	if _, ok := o.providers[model.AgentClaude]; ok {
+	registered := make([]model.AgentKind, 0, len(o.providers))
+	for k := range o.providers {
+		registered = append(registered, k)
+	}
+	o.mu.Unlock()
+	if len(registered) == 0 {
 		return model.AgentClaude
 	}
-	for k := range o.providers {
-		return k
+
+	// Worst (highest) used_percent per provider, and whether any account is
+	// exhausted — mirrors ProviderState's "worst across accounts" semantics.
+	used := map[model.AgentKind]float64{}
+	exhausted := map[model.AgentKind]bool{}
+	if buckets, err := o.st.ListUsage(); err == nil {
+		for _, b := range buckets {
+			k := model.AgentKind(b.Provider)
+			if b.UsedPercent != nil && *b.UsedPercent > used[k] {
+				used[k] = *b.UsedPercent
+			}
+			if b.State == model.UsageExhausted {
+				exhausted[k] = true
+			}
+		}
 	}
-	return model.AgentClaude
+
+	var best model.AgentKind
+	var bestPct float64
+	for _, k := range registered {
+		if exhausted[k] {
+			continue
+		}
+		pct := used[k] // 0 when no usage data — treated as fully free
+		if best == "" || pct < bestPct || (pct == bestPct && k < best) {
+			best, bestPct = k, pct
+		}
+	}
+	if best == "" {
+		return model.AgentClaude // every provider exhausted; SelectProvider surfaces it
+	}
+	return best
 }
 
 // prWorkspaceMeta builds a PR-branch workspace's metadata; push_repo is only
