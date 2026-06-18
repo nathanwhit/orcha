@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"time"
 
 	"github.com/nathanwhit/orcha/internal/model"
 )
@@ -53,11 +54,13 @@ func (s *Store) AddUsageTokens(provider, account string, tokens int64, newState 
 }
 
 // SetUsageWindow records the rate-limit picture a usage monitor read from a
-// provider (its weekly used_percent and derived state) without disturbing the
-// locally accumulated used_tokens — the two are tracked independently, so a
-// monitor refresh must not reset the token counter AddUsageTokens maintains.
-// Creates the bucket if absent.
-func (s *Store) SetUsageWindow(provider, account string, usedPercent float64, state model.UsageState) error {
+// provider (its weekly used_percent, the window's reset time, and derived state)
+// without disturbing the locally accumulated used_tokens — the two are tracked
+// independently, so a monitor refresh must not reset the token counter
+// AddUsageTokens maintains. resetAt is when the window refreshes (stored as
+// window_end so the balancer can weigh headroom against time-to-reset); pass the
+// zero time when the panel gave no parseable reset. Creates the bucket if absent.
+func (s *Store) SetUsageWindow(provider, account string, usedPercent float64, resetAt time.Time, state model.UsageState) error {
 	id := provider + ":" + account
 	now := s.now()
 	if state == "" {
@@ -68,10 +71,11 @@ func (s *Store) SetUsageWindow(provider, account string, usedPercent float64, st
 		   used_tokens, used_percent, state, updated_at)
 		 VALUES(?,?,?,?,?,0,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET
+		   window_end=excluded.window_end,
 		   used_percent=excluded.used_percent,
 		   state=excluded.state,
 		   updated_at=excluded.updated_at`,
-		id, provider, account, now, now, usedPercent, string(state), now)
+		id, provider, account, now, resetAt, usedPercent, string(state), now)
 	return err
 }
 

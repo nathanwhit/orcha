@@ -23,12 +23,13 @@ type TmuxConfig struct {
 	// conversation back up in the same checkout). Nil falls back to Command —
 	// a cold start.
 	ResumeCommand func(spec Spec) []string
-	// AcceptDialog reports whether the screen shows a blocking startup dialog
-	// that should be accepted with Enter (e.g. claude's "Do you trust the files
-	// in this folder?"). The opening prompt is passed as a positional argument,
-	// which the TUI queues and submits itself once unblocked — so accepting a
-	// dialog can never eat the prompt.
-	AcceptDialog func(screen string) bool
+	// DismissDialogs enables the startup-dialog watchdog: while the TUI boots it
+	// clears known blocking prompts (folder trust, codex's update nudge) via
+	// DismissStartupDialog. The opening prompt is passed as a positional argument,
+	// which the TUI queues and submits itself once unblocked — so dismissing a
+	// dialog can never eat the prompt. Leave false for a plain shell, which has no
+	// such dialogs and must not receive phantom keystrokes.
+	DismissDialogs bool
 	// ExecutorFor selects the executor (local/SSH); defaults to ExecutorForTarget.
 	ExecutorFor func(spec Spec) exec.Executor
 	// CompletionGate, when set, vetoes quiescence-based completion: it is consulted
@@ -114,22 +115,22 @@ func (p *TmuxProvider) StartSession(ctx context.Context, spec Spec) (Handle, <-c
 	out := p.arm(runCtx, cancel, ctrl, name, spec,
 		"tmux session "+name+" — attach: "+attachCommand(spec.Target, name))
 
-	// Accept known blocking startup dialogs (e.g. the folder trust prompt a
-	// fresh checkout always triggers). The opening prompt rides in argv, so
-	// pressing Enter on a dialog cannot eat it — the TUI submits the queued
-	// prompt itself once unblocked.
-	if p.cfg.AcceptDialog != nil {
+	// Clear known blocking startup dialogs (e.g. the folder trust prompt a fresh
+	// checkout always triggers). The opening prompt rides in argv, so dismissing
+	// a dialog cannot eat it — the TUI submits the queued prompt itself once
+	// unblocked.
+	if p.cfg.DismissDialogs {
 		go p.watchDialogs(runCtx, ctrl, name)
 	}
 
 	return &tmuxHandle{sessionID: spec.SessionID}, out, nil
 }
 
-// watchDialogs polls the pane during startup and presses Enter whenever the
-// configured blocking dialog is visible. Bounded: these dialogs are a startup
-// phenomenon, so watching stops after a couple of minutes (covering slow
-// remote cold starts) — it is a watchdog for a known screen state, not a
-// delivery delay.
+// watchDialogs polls the pane during startup and clears any known blocking
+// dialog the moment it appears (see DismissStartupDialog for the catalogue).
+// Bounded: these dialogs are a startup phenomenon, so watching stops after a
+// couple of minutes (covering slow remote cold starts) — it is a watchdog for a
+// known screen state, not a delivery delay.
 func (p *TmuxProvider) watchDialogs(ctx context.Context, ctrl *tmux.Controller, name string) {
 	deadline := time.Now().Add(2 * time.Minute)
 	for time.Now().Before(deadline) {
@@ -142,8 +143,10 @@ func (p *TmuxProvider) watchDialogs(ctx context.Context, ctrl *tmux.Controller, 
 		if err != nil {
 			continue
 		}
-		if p.cfg.AcceptDialog(screen) {
-			_ = ctrl.SendRaw(ctx, name, "Enter")
+		if keys, ok := DismissStartupDialog(screen); ok {
+			for _, k := range keys {
+				_ = ctrl.SendRaw(ctx, name, k)
+			}
 		}
 	}
 }
@@ -177,7 +180,7 @@ func (p *TmuxProvider) ResumeSession(ctx context.Context, sessionID string, spec
 		}
 		out := p.arm(runCtx, cancel, ctrl, name, spec,
 			"tmux session "+name+" recreated, resuming the prior conversation — attach: "+attachCommand(spec.Target, name))
-		if p.cfg.AcceptDialog != nil {
+		if p.cfg.DismissDialogs {
 			go p.watchDialogs(runCtx, ctrl, name)
 		}
 		// The resumed conversation already contains the prompt; don't repass it.

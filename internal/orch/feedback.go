@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/nathanwhit/orcha/internal/agent"
 	"github.com/nathanwhit/orcha/internal/model"
@@ -399,15 +400,13 @@ func (o *Orchestrator) AdoptUntrackedPRs(ctx context.Context, objectiveID string
 	return adopted
 }
 
-// defaultAgent picks the registered provider with the most remaining usage
-// headroom for an auto-spawned session, so load spreads across providers
-// instead of always landing on one. It skips providers whose usage window is
-// exhausted and treats a provider with no usage data as fully free, so a fresh
-// or just-reset provider is preferred. Explicit agent choices (a user- or
-// manager-named agent) bypass this entirely — it only fills the no-preference
-// case, and SelectProvider still applies exhaustion fallback at start time.
-// With no usage data at all, ties break toward claude (lexicographically
-// smallest kind), preserving the old default.
+// defaultAgent picks the registered provider with the most usage headroom for
+// an auto-spawned session, so load spreads across providers instead of always
+// landing on one. Explicit agent choices (a user- or manager-named agent) bypass
+// this entirely — it only fills the no-preference case, and SelectProvider still
+// applies exhaustion fallback at start time. See pickDefaultAgent for the
+// scoring (headroom weighted by time-to-reset, and the deliberate refusal to
+// treat a provider we cannot read as free).
 func (o *Orchestrator) defaultAgent() model.AgentKind {
 	o.mu.Lock()
 	registered := make([]model.AgentKind, 0, len(o.providers))
@@ -418,36 +417,115 @@ func (o *Orchestrator) defaultAgent() model.AgentKind {
 	if len(registered) == 0 {
 		return model.AgentClaude
 	}
+	buckets, _ := o.st.ListUsage()
+	return pickDefaultAgent(registered, buckets, time.Now())
+}
 
-	// Worst (highest) used_percent per provider, and whether any account is
-	// exhausted — mirrors ProviderState's "worst across accounts" semantics.
-	used := map[model.AgentKind]float64{}
-	exhausted := map[model.AgentKind]bool{}
-	if buckets, err := o.st.ListUsage(); err == nil {
-		for _, b := range buckets {
-			k := model.AgentKind(b.Provider)
-			if b.UsedPercent != nil && *b.UsedPercent > used[k] {
-				used[k] = *b.UsedPercent
-			}
-			if b.State == model.UsageExhausted {
-				exhausted[k] = true
-			}
+// providerUsage is the worst-case usage picture for one provider, aggregated
+// across its accounts (mirroring ProviderState's "worst across accounts").
+type providerUsage struct {
+	used      float64
+	hasUsed   bool // we have at least one real used_percent reading
+	resetAt   time.Time
+	hasReset  bool
+	exhausted bool
+}
+
+// pickDefaultAgent scores each registered, non-exhausted provider by usage
+// headroom and returns the best. Headroom is time-aware: a window that resets
+// sooner is cheaper to burn, so the score is remaining-percent PER HOUR until
+// reset (remaining% ÷ hours-to-reset) — higher wins. When not every candidate
+// has a known reset time the score degrades to plain remaining%, so the
+// comparison stays on one scale.
+//
+// Crucially, a provider we have NO usage reading for is NOT treated as free: a
+// broken usage probe must never let an unmeasured provider look maximally
+// attractive and silently win all the work (the old behaviour, which pinned
+// everything to claude whenever the monitor was blind). Unmeasured providers are
+// chosen only when nobody has a reading, falling back to the registered default.
+func pickDefaultAgent(registered []model.AgentKind, buckets []*model.UsageBucket, now time.Time) model.AgentKind {
+	by := map[model.AgentKind]*providerUsage{}
+	for _, b := range buckets {
+		k := model.AgentKind(b.Provider)
+		pu := by[k]
+		if pu == nil {
+			pu = &providerUsage{}
+			by[k] = pu
 		}
+		if b.State == model.UsageExhausted {
+			pu.exhausted = true
+		}
+		if b.UsedPercent != nil && (!pu.hasUsed || *b.UsedPercent > pu.used) {
+			pu.used, pu.hasUsed = *b.UsedPercent, true
+		}
+		// window_end is a reset time only when it is meaningfully in the future;
+		// elsewhere (UpsertUsage, token accumulation) it is just a placeholder
+		// timestamp, so a past/near value is not treated as a reset.
+		if b.WindowEnd.After(now) && (!pu.hasReset || b.WindowEnd.Before(pu.resetAt)) {
+			pu.resetAt, pu.hasReset = b.WindowEnd, true
+		}
+	}
+
+	// Use the rate-aware score only when every eligible candidate has a reset
+	// time; otherwise remaining%-only keeps all scores comparable.
+	rateAware := true
+	eligible := false
+	for _, k := range registered {
+		pu := by[k]
+		if pu == nil || !pu.hasUsed || pu.exhausted {
+			continue
+		}
+		eligible = true
+		if !pu.hasReset {
+			rateAware = false
+		}
+	}
+	if !eligible {
+		// Nobody measurable (bootstrap, blind monitor, or all exhausted): fall
+		// back to the registered default so spawning still works.
+		return registeredDefault(registered)
 	}
 
 	var best model.AgentKind
-	var bestPct float64
+	var bestScore float64
 	for _, k := range registered {
-		if exhausted[k] {
+		pu := by[k]
+		if pu == nil || !pu.hasUsed || pu.exhausted {
 			continue
 		}
-		pct := used[k] // 0 when no usage data — treated as fully free
-		if best == "" || pct < bestPct || (pct == bestPct && k < best) {
-			best, bestPct = k, pct
+		remaining := 100 - pu.used
+		if remaining < 0 {
+			remaining = 0
+		}
+		score := remaining
+		if rateAware {
+			hours := pu.resetAt.Sub(now).Hours()
+			if hours < 0.1 { // imminent reset: avoid blow-up, still strongly preferred
+				hours = 0.1
+			}
+			score = remaining / hours
+		}
+		if best == "" || score > bestScore || (score == bestScore && k < best) {
+			best, bestScore = k, score
+		}
+	}
+	return best
+}
+
+// registeredDefault returns claude when registered, else the lexicographically
+// smallest kind — the stable fallback when no provider has measurable headroom.
+func registeredDefault(registered []model.AgentKind) model.AgentKind {
+	best := model.AgentKind("")
+	for _, k := range registered {
+		if k == model.AgentClaude {
+			return model.AgentClaude
+		}
+		if best == "" || k < best {
+			best = k
 		}
 	}
 	if best == "" {
-		return model.AgentClaude // every provider exhausted; SelectProvider surfaces it
+		return model.AgentClaude
 	}
 	return best
 }

@@ -130,12 +130,9 @@ func NewTmuxClaude(cfg ClaudeConfig) *TmuxProvider {
 		ResumeCommand: func(spec Spec) []string {
 			return base(spec, "--continue")
 		},
-		// The trust dialog's phrasing varies across claude versions; the accept
-		// option label is the stable marker.
-		AcceptDialog: func(screen string) bool {
-			return strings.Contains(screen, "Yes, I trust this folder") ||
-				strings.Contains(screen, "Do you trust the files in this folder?")
-		},
+		// A fresh checkout triggers the folder-trust dialog; the watchdog clears
+		// it (see DismissStartupDialog).
+		DismissDialogs: true,
 	})
 }
 

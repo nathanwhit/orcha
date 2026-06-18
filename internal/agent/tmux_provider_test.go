@@ -211,14 +211,12 @@ func TestTmuxProvider_AcceptsStartupDialog(t *testing.T) {
 		t.Skip("tmux not installed")
 	}
 	// A stand-in TUI: shows the trust question, blocks on Enter, then proceeds.
+	// DismissStartupDialog recognises this exact prompt and presses Enter.
 	script := `echo "Do you trust the files in this folder?"; read line; echo DIALOG-ACCEPTED; sleep 60`
 	p := NewTmux(TmuxConfig{
-		Kind:    model.AgentOther,
-		Command: func(Spec) []string { return []string{"sh", "-c", script} },
-		AcceptDialog: func(screen string) bool {
-			return strings.Contains(screen, "Do you trust the files in this folder?") &&
-				!strings.Contains(screen, "DIALOG-ACCEPTED")
-		},
+		Kind:           model.AgentOther,
+		Command:        func(Spec) []string { return []string{"sh", "-c", script} },
+		DismissDialogs: true,
 	})
 	h, events, err := p.StartSession(context.Background(), Spec{SessionID: "tmux-dialog-1"})
 	if err != nil {

@@ -89,12 +89,10 @@ func NewTmuxCodex(cfg CodexConfig) *TmuxProvider {
 		ResumeCommand: func(spec Spec) []string {
 			return base(spec, "resume", "--last")
 		},
-		// Codex shows a folder-trust dialog on a fresh checkout, like claude.
-		// The accept option label is the stable marker (wording varies).
-		AcceptDialog: func(screen string) bool {
-			return strings.Contains(screen, "Yes, continue") ||
-				strings.Contains(screen, "Do you trust the contents of this directory?")
-		},
+		// Codex shows a folder-trust dialog on a fresh checkout, like claude, and
+		// an "Update available" nudge whose default option would npm-install; the
+		// watchdog clears both (see DismissStartupDialog).
+		DismissDialogs: true,
 	})
 }
 
