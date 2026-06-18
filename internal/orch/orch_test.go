@@ -133,6 +133,43 @@ func TestUsageExhaustion_AsksUserWhenNoFallback(t *testing.T) {
 	}
 }
 
+func TestDefaultAgent_BalancesByRemainingUsage(t *testing.T) {
+	pct := func(v float64) *float64 { return &v }
+
+	t.Run("no usage data favors claude", func(t *testing.T) {
+		o, _ := newTestOrch(t)
+		o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+		o.RegisterProvider(agent.NewFake(model.AgentCodex, true, nil))
+		if got := o.defaultAgent(); got != model.AgentClaude {
+			t.Fatalf("expected claude with no usage data, got %s", got)
+		}
+	})
+
+	t.Run("picks the less-used provider", func(t *testing.T) {
+		o, st := newTestOrch(t)
+		o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+		o.RegisterProvider(agent.NewFake(model.AgentCodex, true, nil))
+		// claude is heavily used, codex barely — codex should win.
+		_ = st.UpsertUsage(&model.UsageBucket{Provider: string(model.AgentClaude), UsedPercent: pct(90), State: model.UsageOK, WindowStart: st.Now(), WindowEnd: st.Now()})
+		_ = st.UpsertUsage(&model.UsageBucket{Provider: string(model.AgentCodex), UsedPercent: pct(10), State: model.UsageOK, WindowStart: st.Now(), WindowEnd: st.Now()})
+		if got := o.defaultAgent(); got != model.AgentCodex {
+			t.Fatalf("expected codex (less used), got %s", got)
+		}
+	})
+
+	t.Run("skips an exhausted provider even if lower used_percent", func(t *testing.T) {
+		o, st := newTestOrch(t)
+		o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+		o.RegisterProvider(agent.NewFake(model.AgentCodex, true, nil))
+		// codex looks least-used but its window is exhausted; claude must win.
+		_ = st.UpsertUsage(&model.UsageBucket{Provider: string(model.AgentClaude), UsedPercent: pct(80), State: model.UsageOK, WindowStart: st.Now(), WindowEnd: st.Now()})
+		_ = st.UpsertUsage(&model.UsageBucket{Provider: string(model.AgentCodex), UsedPercent: pct(5), State: model.UsageExhausted, WindowStart: st.Now(), WindowEnd: st.Now()})
+		if got := o.defaultAgent(); got != model.AgentClaude {
+			t.Fatalf("expected claude (codex exhausted), got %s", got)
+		}
+	})
+}
+
 // ---- steering ----
 
 func TestInteractiveSteering_ReachesSession(t *testing.T) {
