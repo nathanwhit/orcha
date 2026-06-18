@@ -57,34 +57,46 @@ type Spec struct {
 }
 
 // PrepareIsolated creates a fresh isolated checkout with a new Branch based on
-// the latest origin/Base. Steps: ensure & refresh the mirror cache, clone from
-// the cache for speed, re-point origin at the real repo, fetch fresh, and create
-// the branch off the freshly-fetched base.
+// Base. Steps: ensure & refresh the mirror cache, clone from the cache for
+// speed, re-point origin at the real repo, fetch fresh, then create Branch off
+// the freshly-resolved base.
 func (p *Preparer) PrepareIsolated(ctx context.Context, ex exec.Executor, spec Spec) error {
 	if err := p.base(ctx, ex, spec); err != nil {
 		return err
 	}
-	// New branch off the freshly-fetched base.
 	base := spec.Base
 	if base == "" {
 		base = "HEAD"
 	}
-	start, err := p.isolatedStartPoint(ctx, ex, spec, base)
+	return p.checkoutNewBranch(ctx, ex, spec, base)
+}
+
+// PreparePRBranch creates a checkout tracking an existing PR branch at its fresh
+// head, so follow-up work updates the correct branch — the PR head is just the
+// branch's start point.
+func (p *Preparer) PreparePRBranch(ctx context.Context, ex exec.Executor, spec Spec) error {
+	if err := p.base(ctx, ex, spec); err != nil {
+		return err
+	}
+	return p.checkoutNewBranch(ctx, ex, spec, spec.Branch)
+}
+
+// checkoutNewBranch (re)creates spec.Branch pointing at startRef and initializes
+// submodules. Both callers share it: an isolated checkout starts from its base,
+// a PR-branch checkout from the PR head — in each case startRef is resolved from
+// wherever it actually lives (see resolveRef).
+//
+// Submodules are initialized after the checkout (so .gitmodules reflects this
+// ref) and after base() restored the real origin (so relative submodule URLs
+// like ../foo resolve against upstream, not the local mirror cache). Repos like
+// denoland/deno keep test fixtures and vendored deps in submodules; without this
+// the tree is missing those paths and the build fails. A repo with no
+// .gitmodules makes the submodule step a no-op.
+func (p *Preparer) checkoutNewBranch(ctx context.Context, ex exec.Executor, spec Spec, startRef string) error {
+	start, err := p.resolveRef(ctx, ex, spec, startRef)
 	if err != nil {
 		return err
 	}
-	return p.checkoutBranch(ctx, ex, spec, start)
-}
-
-// checkoutBranch creates spec.Branch at start and initializes submodules. Every
-// prepare path funnels through here so the tree is always complete however the
-// start point was resolved (an isolated base, or a PR head off the fork). Repos
-// like denoland/deno keep test fixtures and vendored deps in submodules; without
-// the submodule step those paths are empty and the build fails. It runs after
-// the checkout so .gitmodules reflects this ref, and after base() restored the
-// real origin so relative submodule URLs (../foo) resolve against upstream, not
-// the local cache. A repo with no .gitmodules makes the submodule step a no-op.
-func (p *Preparer) checkoutBranch(ctx context.Context, ex exec.Executor, spec Spec, start string) error {
 	if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "checkout", "-B", spec.Branch, start); err != nil {
 		return fmt.Errorf("workspace: check out %s at %s: %w", spec.Branch, start, err)
 	}
@@ -94,45 +106,26 @@ func (p *Preparer) checkoutBranch(ctx context.Context, ex exec.Executor, spec Sp
 	return nil
 }
 
-// isolatedStartPoint resolves the revision a fresh isolated branch starts from.
-// The base is normally an upstream branch on origin (e.g. main). But orcha's
-// own worker branches are pushed to the fork (PushURL), never upstream — so a
-// worker asked to build on another worker's branch (e.g. validating a published
-// PR's branch) has a base that lives only on the fork. Prefer origin when it
-// has the base; otherwise, when a fork is configured, fetch the base from there
-// and start from the fetched head. Without a fork to fall back to, keep
-// origin/<base> so the resulting checkout error names exactly what was missing.
-func (p *Preparer) isolatedStartPoint(ctx context.Context, ex exec.Executor, spec Spec, base string) (string, error) {
-	if base == "HEAD" {
+// resolveRef turns a branch name into a checkable start point: origin/<ref> when
+// origin has it (e.g. main), otherwise the head fetched from the fork (PushURL).
+// orcha's own worker branches and, in a fork workflow, PR heads are pushed to
+// the fork and never reach upstream, so a ref missing from origin is sought on
+// the fork. With no fork to try it returns origin/<ref> so a failed checkout
+// still names the missing ref. "HEAD" passes through (a base-less checkout).
+func (p *Preparer) resolveRef(ctx context.Context, ex exec.Executor, spec Spec, ref string) (string, error) {
+	if ref == "HEAD" {
 		return "HEAD", nil
 	}
-	if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "rev-parse", "--verify", "--quiet", "origin/"+base); err == nil {
-		return "origin/" + base, nil
+	if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "rev-parse", "--verify", "--quiet", "origin/"+ref); err == nil {
+		return "origin/" + ref, nil
 	}
 	if spec.PushURL != "" {
-		if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "fetch", spec.PushURL, base); err != nil {
-			return "", fmt.Errorf("workspace: base %q is not on origin and could not be fetched from the fork: %w", base, err)
+		if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "fetch", spec.PushURL, ref); err != nil {
+			return "", fmt.Errorf("workspace: ref %q is not on origin and could not be fetched from the fork: %w", ref, err)
 		}
 		return "FETCH_HEAD", nil
 	}
-	return "origin/" + base, nil
-}
-
-// PreparePRBranch creates a checkout tracking an existing PR branch at its
-// fresh head, so follow-up work updates the correct branch. In a fork workflow
-// the PR branch lives on the fork (PushURL), not upstream, so it is fetched
-// from there.
-func (p *Preparer) PreparePRBranch(ctx context.Context, ex exec.Executor, spec Spec) error {
-	if err := p.base(ctx, ex, spec); err != nil {
-		return err
-	}
-	if spec.PushURL != "" {
-		if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "fetch", spec.PushURL, spec.Branch); err != nil {
-			return fmt.Errorf("workspace: fetch PR branch %s from fork: %w", spec.Branch, err)
-		}
-		return p.checkoutBranch(ctx, ex, spec, "FETCH_HEAD")
-	}
-	return p.checkoutBranch(ctx, ex, spec, "origin/"+spec.Branch)
+	return "origin/" + ref, nil
 }
 
 // base performs the shared, freshness-guaranteeing steps up to (but not
