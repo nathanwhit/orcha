@@ -193,6 +193,7 @@ func (o *Orchestrator) MarkObjectiveDone(managerSessionID, summary string) error
 	}); err != nil {
 		return err
 	}
+	o.audit(mgr.ObjectiveID, managerSessionID, "objective_done", "objective complete: "+summary, nil)
 	// The objective is finished, so its shared scratch — throwaway cross-worker
 	// artifacts with no value past the objective — can go. Reaping here keeps
 	// WorkRoot/scratch from growing without bound.
