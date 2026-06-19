@@ -81,8 +81,19 @@ func (o *Orchestrator) superviseDecisions(now time.Time) []supervisorAction {
 
 		mgr := o.activeManagerFor(obj.ID)
 		if mgr == nil {
-			// No live manager: nothing can react to worker completions or PR events,
-			// so the objective is stuck. Respawn one — unless this objective has
+			// An objective parked on an open PR awaiting human review is NOT stuck —
+			// it is waiting, and the PR machinery owns every next step: a merge
+			// revives a manager (notifyManagerOfMerge) and new feedback spawns a
+			// follow-up (ProcessFeedback), neither of which needs a standing manager.
+			// Respawning one here just churns (and on a degraded host, fails to
+			// launch at all) and then escalates to the user for what is really
+			// "waiting for review" — the exact storm that minted dozens of bogus
+			// questions. So leave it alone, mirroring the live-manager poke path.
+			if o.objectiveHasOpenPR(obj.ID) {
+				continue
+			}
+			// No live manager and no open PR: nothing can react to worker
+			// completions, so the objective is stuck. Respawn one — unless it has
 			// already burned through too many managers, in which case ask the user.
 			if o.countManagers(obj.ID) >= maxManagerSessions {
 				if o.markPoked(obj.ID, now) {
@@ -227,6 +238,20 @@ func (o *Orchestrator) respawnManager(act supervisorAction) {
 // churned through its manager budget — repeatedly respawning would just burn
 // tokens, so a human should look.
 func (o *Orchestrator) escalateManagerDeaths(objectiveID string) {
+	// Idempotent: a stuck objective is escalated every supervisor tick that gets
+	// past the cooldown (90s), but the user only needs ONE standing "this is
+	// stuck" question — not a fresh one every cooldown until they look. Without
+	// this, an objective that can't progress (e.g. an open PR awaiting review, or
+	// a manager that can't even start) piled up dozens of identical questions.
+	// A supervisor escalation is the only question with no session id (worker and
+	// manager asks always carry one), so that's the dedup key.
+	if existing, err := o.st.ListQuestionsByObjective(objectiveID); err == nil {
+		for _, q := range existing {
+			if q.Status == model.QuestionOpen && q.SessionID == "" {
+				return
+			}
+		}
+	}
 	_ = o.st.CreateQuestion(&model.Question{
 		ObjectiveID: objectiveID,
 		Priority:    20,

@@ -204,6 +204,12 @@ func (o *Orchestrator) StartRun(ctx context.Context, sessionID string) (*Run, er
 		cancel()
 		o.releaseSessionLocks(sess)
 		o.releaseTargetSlot(sess)
+		// Record WHY before flipping to failed. A start failure (e.g. the remote
+		// `tmux new-session` erroring on a flaky SSH target) otherwise leaves a
+		// session with zero transcript and no DB reason — an undiagnosable black
+		// box. This is exactly what made repeated manager-launch failures on a
+		// degraded host impossible to explain after the fact.
+		_ = o.emit(sessionID, model.MsgSystem, model.KindError, "failed to start session: "+err.Error(), nil)
 		_, _ = o.st.UpdateSessionStatus(sessionID, model.SessionFailed)
 		return nil, err
 	}
