@@ -221,6 +221,53 @@ func TestURLParsing(t *testing.T) {
 	}
 }
 
+func TestParseLatestAssignment(t *testing.T) {
+	// Real-world shape from denoland/deno#35348: a human (nathanwhit) assigned the
+	// bot, but the event's `actor` is reported as the bot itself. Attribution must
+	// come from `assigner`, else an allowlisted human's assignment is dropped.
+	payload := `[
+		{"id":26971020917,"event":"assigned",
+		 "actor":{"login":"nathanwhitbot"},
+		 "assignee":{"login":"nathanwhitbot"},
+		 "assigner":{"login":"nathanwhit"}}
+	]`
+	who, id, err := parseLatestAssignment(payload, "nathanwhitbot")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if who != "nathanwhit" {
+		t.Errorf("assigner = %q, want nathanwhit", who)
+	}
+	if id != "26971020917" {
+		t.Errorf("eventID = %q, want 26971020917", id)
+	}
+
+	// Latest matching assignment wins; non-matching assignee and other event types
+	// are ignored. Missing assigner falls back to actor.
+	multi := `[
+		{"id":1,"event":"labeled","actor":{"login":"x"}},
+		{"id":2,"event":"assigned","actor":{"login":"a"},"assignee":{"login":"someoneelse"},"assigner":{"login":"a"}},
+		{"id":3,"event":"assigned","actor":{"login":"carol"},"assignee":{"login":"bot"}},
+		{"id":4,"event":"assigned","actor":{"login":"bot"},"assignee":{"login":"bot"},"assigner":{"login":"bob"}}
+	]`
+	who, id, err = parseLatestAssignment(multi, "bot")
+	if err != nil {
+		t.Fatalf("parse multi: %v", err)
+	}
+	if who != "bob" || id != "4" {
+		t.Errorf("multi = (%q,%q), want (bob,4)", who, id)
+	}
+
+	// No matching assignment yields an empty attribution (caller cannot authorize).
+	who, id, err = parseLatestAssignment(`[{"id":5,"event":"closed","actor":{"login":"z"}}]`, "bot")
+	if err != nil {
+		t.Fatalf("parse none: %v", err)
+	}
+	if who != "" || id != "" {
+		t.Errorf("no-match = (%q,%q), want empty", who, id)
+	}
+}
+
 // TestGitForge_GHLive exercises the real gh CLI read-only against a public repo.
 // Gated behind ORCHA_GH_LIVE=1 (requires gh auth + network).
 func TestGitForge_GHLive(t *testing.T) {

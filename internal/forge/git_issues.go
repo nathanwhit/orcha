@@ -81,7 +81,7 @@ func (g *GitForge) ListAssignedIssues(ctx context.Context, repo, assignee string
 // and that assignment event's id, by scanning the issue's events for the latest
 // "assigned" event whose assignee matches. Events are returned oldest-first, so
 // the last match wins; its id lets a later re-assignment (a new event) re-fire
-// instead of being deduped against the first. A missing actor yields "" (the
+// instead of being deduped against the first. A missing assigner yields "" (the
 // caller treats that as "cannot authorize yet").
 func (g *GitForge) LatestAssignment(ctx context.Context, repo string, number int, assignee string) (string, string, error) {
 	out, err := g.gh(ctx, "api",
@@ -90,6 +90,18 @@ func (g *GitForge) LatestAssignment(ctx context.Context, repo string, number int
 	if err != nil {
 		return "", "", err
 	}
+	return parseLatestAssignment(out, assignee)
+}
+
+// parseLatestAssignment scans an issue-events payload (oldest-first) for the last
+// "assigned" event whose assignee matches and returns its assigner and id.
+//
+// The attributed login is the event's `assigner` — the user who performed the
+// assignment — NOT `actor`. For assignment events GitHub's `actor` is unreliable:
+// when the bot is the assignee it can be reported as the actor even though a human
+// did the assigning, which would wrongly fail the allowlist check. `assigner` is
+// the authoritative "who assigned"; we fall back to `actor` only if it's absent.
+func parseLatestAssignment(out, assignee string) (string, string, error) {
 	var raw []struct {
 		ID    int64  `json:"id"`
 		Event string `json:"event"`
@@ -99,17 +111,24 @@ func (g *GitForge) LatestAssignment(ctx context.Context, repo string, number int
 		Assignee struct {
 			Login string `json:"login"`
 		} `json:"assignee"`
+		Assigner struct {
+			Login string `json:"login"`
+		} `json:"assigner"`
 	}
 	if err := json.Unmarshal([]byte(out), &raw); err != nil {
 		return "", "", err
 	}
-	actor, eventID := "", ""
+	who, eventID := "", ""
 	for _, e := range raw {
 		if e.Event == "assigned" && strings.EqualFold(e.Assignee.Login, assignee) {
-			actor, eventID = e.Actor.Login, strconv.FormatInt(e.ID, 10)
+			who = e.Assigner.Login
+			if who == "" {
+				who = e.Actor.Login
+			}
+			eventID = strconv.FormatInt(e.ID, 10)
 		}
 	}
-	return actor, eventID, nil
+	return who, eventID, nil
 }
 
 // CommentIssue posts an issue comment via gh.
