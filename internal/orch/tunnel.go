@@ -113,22 +113,41 @@ func (o *Orchestrator) ensureMCPTunnel(tgt *model.Target) (string, error) {
 	// the supervisor's reopen attempts defer to it until it is gone.
 }
 
+// Tunnel supervision timing. Vars (not consts) so tests can shrink them. A
+// reopened tunnel must stay up at least tunnelHealthyAfter to count as a real
+// reopen; one that dies faster never actually bound — almost always the remote
+// port is still held by an orphaned tunnel from a previous process, which
+// ExitOnForwardFailure turns into an exit within ~a second. In that case the
+// supervisor backs off (up to tunnelMaxBackoff) instead of relaunching every
+// second. The old code reset the backoff on every launch (treating ssh having
+// *started* as a successful reopen), so a permanently-held port hot-looped at
+// ~1/s and buried the event log — ~100k died/reopened events/day was observed,
+// which also drowned the orchestrator's own logs.
+var (
+	tunnelHealthyAfter  = 5 * time.Second
+	tunnelReopenBackoff = time.Second
+	tunnelMaxBackoff    = 30 * time.Second
+)
+
 // superviseTunnel keeps a tunnel up for its whole lifetime. When the ssh process
-// exits unexpectedly it reopens on the SAME port (so baked agent URLs stay
-// valid), backing off on repeated failure until the port frees or the network
-// returns. It exits only when CloseTunnels signals stop.
+// exits it reopens on the SAME port (so baked agent URLs stay valid). A drop
+// after a healthy run reopens promptly; a tunnel that never bound (the remote
+// port is held) is retried with exponential backoff. It exits only when
+// CloseTunnels signals stop.
 func (o *Orchestrator) superviseTunnel(t *mcpTunnel) {
 	defer close(t.dead)
-	backoff := time.Second
+	backoff := tunnelReopenBackoff
 	for {
 		t.mu.Lock()
 		proc := t.proc
 		t.mu.Unlock()
 
-		// Wait for the process to exit, but stay interruptible by shutdown: a
-		// reopen may have just swapped in a fresh proc, and CloseTunnels closes
-		// stop before killing — without this select the supervisor could block in
-		// Wait on a proc CloseTunnels never sees, and never reap.
+		// Time how long this tunnel stays up so a genuine blip (reopen promptly)
+		// can be told apart from a never-bound tunnel (back off). Stay interruptible
+		// by shutdown: a reopen may have swapped in a fresh proc, and CloseTunnels
+		// closes stop before killing — without this select the supervisor could
+		// block in Wait on a proc CloseTunnels never sees, and never reap.
+		start := time.Now()
 		waited := make(chan struct{})
 		go func() { _ = proc.Wait(); close(waited) }()
 		select {
@@ -145,31 +164,44 @@ func (o *Orchestrator) superviseTunnel(t *mcpTunnel) {
 		default:
 		}
 
-		o.audit("", "", "mcp_tunnel_died",
-			fmt.Sprintf("%s: reverse tunnel on 127.0.0.1:%d dropped; reopening", t.tgtName, t.port), nil)
-
-		// Reopen on the same port, attempting immediately (a clean drop frees the
-		// port right away). Back off only between FAILED retries: the remote sshd
-		// may still hold the listener (ExitOnForwardFailure makes a held port
-		// fatal), or the network may be briefly gone.
-		for {
-			next, err := t.open()
-			if err == nil {
-				t.mu.Lock()
-				t.proc = next
-				t.mu.Unlock()
-				o.audit("", "", "mcp_tunnel_reopened",
-					fmt.Sprintf("%s: remote 127.0.0.1:%d reopened", t.tgtName, t.port), nil)
-				backoff = time.Second
-				break
-			}
+		if time.Since(start) >= tunnelHealthyAfter {
+			// A drop after a healthy run is a genuine blip: reopen at once, fresh
+			// backoff.
+			backoff = tunnelReopenBackoff
+			o.audit("", "", "mcp_tunnel_died",
+				fmt.Sprintf("%s: reverse tunnel on 127.0.0.1:%d dropped; reopening", t.tgtName, t.port), nil)
+		} else {
+			// It died before it was healthy: it never bound (the remote port is held
+			// — ExitOnForwardFailure). Pause before retrying so a stuck port can't
+			// spin the supervisor (and the event log) at the flap rate.
+			o.audit("", "", "mcp_tunnel_died",
+				fmt.Sprintf("%s: reverse tunnel on 127.0.0.1:%d did not bind (remote port held?); retrying in %s",
+					t.tgtName, t.port, backoff), nil)
 			select {
 			case <-t.stop:
 				return
 			case <-time.After(backoff):
 			}
-			backoff = minDur(backoff*2, 30*time.Second)
+			backoff = minDur(backoff*2, tunnelMaxBackoff)
 		}
+
+		// Reopen on the same port. open() only launches ssh; whether it actually
+		// bound is judged next iteration by how long the process survives.
+		next, err := t.open()
+		if err != nil {
+			select {
+			case <-t.stop:
+				return
+			case <-time.After(backoff):
+			}
+			backoff = minDur(backoff*2, tunnelMaxBackoff)
+			continue
+		}
+		t.mu.Lock()
+		t.proc = next
+		t.mu.Unlock()
+		o.audit("", "", "mcp_tunnel_reopened",
+			fmt.Sprintf("%s: remote 127.0.0.1:%d reopened", t.tgtName, t.port), nil)
 	}
 }
 
