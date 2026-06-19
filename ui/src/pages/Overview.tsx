@@ -40,7 +40,12 @@ export function Overview({ nav }: { nav: (to: string) => void }) {
   const [creating, setCreating] = useState(false);
 
   const objs = objectives.data ?? [];
-  const activeObjs = objs.filter((o) => o.status !== "canceled");
+  const activeObjs = objs.filter(
+    (o) => o.status === "active" || o.status === "waiting_user",
+  );
+  const completedObjs = objs
+    .filter((o) => o.status === "succeeded" || o.status === "failed")
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   const canceledObjs = objs.filter((o) => o.status === "canceled");
   const running = (sessions.data ?? []).filter(
     (s) => s.status === "running",
@@ -93,6 +98,16 @@ export function Overview({ nav }: { nav: (to: string) => void }) {
           <p className="mt-2 text-xs text-rose-400">{objectives.error}</p>
         )}
       </section>
+
+      {completedObjs.length > 0 && (
+        <section>
+          <Collapsible title="Completed objectives" count={completedObjs.length}>
+            <Card className="overflow-x-auto">
+              <ObjectivesTable objectives={completedObjs} nav={nav} />
+            </Card>
+          </Collapsible>
+        </section>
+      )}
 
       {canceledObjs.length > 0 && (
         <section>
