@@ -2094,6 +2094,77 @@ func TestUpdatePR_ForcePushViaMCP(t *testing.T) {
 	}
 }
 
+// update_pr with a title/body must edit the PR on the HOST (gh pr edit), not
+// only mutate orcha's local mirror — otherwise a follow-up (the only thing a PR
+// comment can spawn when the manager is dead) can never change the GitHub PR's
+// title/description. Regression for "update_pr title/body never reaches GitHub".
+func TestUpdatePR_EditsTitleAndBodyOnHost(t *testing.T) {
+	o, st := newTestOrch(t)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	f := forge.NewFake()
+	o.SetForge(f)
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+
+	ws := &model.Workspace{ObjectiveID: obj.ID, Kind: model.WorkspacePRBranch, ProjectPath: "octo/repo",
+		VCS: model.VCSGit, BranchName: "orcha/impl-x", Path: "/tmp/pr-9", Status: model.WorkspaceReady}
+	_ = st.CreateWorkspace(ws)
+	fu := &model.Session{ObjectiveID: obj.ID, Role: model.RolePRFollowup, Agent: model.AgentClaude,
+		Status: model.SessionRunning, WorkspaceID: ws.ID}
+	_ = st.CreateSession(fu)
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "octo/repo", Number: 9, Branch: "orcha/impl-x",
+		BaseBranch: "main", Status: model.PROpen, Title: "old title", Summary: "old body"}
+	_ = st.CreatePR(pr)
+
+	ctx := mcp.WithSession(context.Background(), fu.ID)
+	if _, err := o.mcpUpdatePR(ctx, map[string]any{
+		"pr_id": "9", "title": "new title", "body": "new body",
+	}); err != nil {
+		t.Fatalf("update_pr title/body: %v", err)
+	}
+
+	// The host must have been told to edit the PR.
+	if len(f.Edits) != 1 {
+		t.Fatalf("expected 1 host EditPR call, got %d", len(f.Edits))
+	}
+	got := f.Edits[0]
+	if got.Repo != "octo/repo" || got.Number != 9 || got.Title != "new title" || got.Body != "new body" {
+		t.Fatalf("EditPR recorded %+v, want repo=octo/repo number=9 title=%q body=%q", got, "new title", "new body")
+	}
+	// And the local mirror reflects it too.
+	updated, _ := st.GetPR(pr.ID)
+	if updated.Title != "new title" || updated.Summary != "new body" {
+		t.Fatalf("local mirror title=%q body=%q, want updated", updated.Title, updated.Summary)
+	}
+}
+
+// A title/body-free update_pr (just a branch push) must NOT call EditPR — an
+// empty gh pr edit would be a pointless host round-trip.
+func TestUpdatePR_NoTitleBodySkipsHostEdit(t *testing.T) {
+	o, st := newTestOrch(t)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	f := forge.NewFake()
+	o.SetForge(f)
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+
+	ws := &model.Workspace{ObjectiveID: obj.ID, Kind: model.WorkspacePRBranch, ProjectPath: "octo/repo",
+		VCS: model.VCSGit, BranchName: "orcha/impl-x", Path: "/tmp/pr-11", Status: model.WorkspaceReady}
+	_ = st.CreateWorkspace(ws)
+	fu := &model.Session{ObjectiveID: obj.ID, Role: model.RolePRFollowup, Agent: model.AgentClaude,
+		Status: model.SessionRunning, WorkspaceID: ws.ID}
+	_ = st.CreateSession(fu)
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "octo/repo", Number: 11, Branch: "orcha/impl-x",
+		BaseBranch: "main", Status: model.PROpen}
+	_ = st.CreatePR(pr)
+
+	ctx := mcp.WithSession(context.Background(), fu.ID)
+	if _, err := o.mcpUpdatePR(ctx, map[string]any{"pr_id": "11"}); err != nil {
+		t.Fatalf("update_pr: %v", err)
+	}
+	if len(f.Edits) != 0 {
+		t.Fatalf("expected no host EditPR calls, got %d", len(f.Edits))
+	}
+}
+
 // recordUsage must increment the session's running token total while still
 // crediting the provider usage bucket — the per-session counter is additive,
 // not a replacement for the scheduling buckets.

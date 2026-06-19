@@ -82,6 +82,9 @@ type Forge interface {
 	CommitAll(ctx context.Context, workspacePath, message string) (committed bool, err error)
 	// OpenPR opens a pull request.
 	OpenPR(ctx context.Context, repo, branch, base, title, body string) (OpenResult, error)
+	// EditPR updates an existing PR's title and/or body on the host. An empty
+	// title or body leaves that field unchanged; both empty is a no-op.
+	EditPR(ctx context.Context, repo string, number int, title, body string) error
 	// GetPRState fetches the current PR state from the host.
 	GetPRState(ctx context.Context, repo string, number int) (PRState, error)
 	// FindOpenPR returns the open PR whose head is `branch` on `repo`, or nil if
@@ -144,6 +147,7 @@ type Fake struct {
 	Pushes        []PushRecord
 	ForcePush     []PushRecord
 	Comments      []CommentRecord
+	Edits         []EditRecord
 	Commits       []CommitRecord
 	incoming      []Comment
 	issueComments []IssueComment        // returned by ListRecentIssueComments
@@ -162,6 +166,13 @@ type PushRecord struct {
 // CommitRecord captures a commit for assertions.
 type CommitRecord struct {
 	WorkspacePath, Message string
+}
+
+// EditRecord captures a PR title/body edit for assertions.
+type EditRecord struct {
+	Repo        string
+	Number      int
+	Title, Body string
 }
 
 // CommentRecord captures a comment for assertions.
@@ -257,6 +268,18 @@ func (f *Fake) OpenPR(_ context.Context, repo, branch, base, title, body string)
 	st := &PRState{Number: n, URL: "https://forge.test/" + repo + "/pull/" + itoa(n), Status: "open", ChecksState: "pending", HeadSHA: "sha-" + branch}
 	f.prs[key(repo, n)] = st
 	return OpenResult{Number: n, URL: st.URL, HeadSHA: st.HeadSHA}, nil
+}
+
+func (f *Fake) EditPR(_ context.Context, repo string, number int, title, body string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Edits = append(f.Edits, EditRecord{Repo: repo, Number: number, Title: title, Body: body})
+	if st, ok := f.prs[key(repo, number)]; ok {
+		if title != "" {
+			st.Title = title
+		}
+	}
+	return nil
 }
 
 func (f *Fake) GetPRState(_ context.Context, repo string, number int) (PRState, error) {

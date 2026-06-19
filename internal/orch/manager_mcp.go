@@ -106,12 +106,12 @@ func (o *Orchestrator) toolPublishPR() mcp.Tool {
 func (o *Orchestrator) toolUpdatePR() mcp.Tool {
 	return mcp.Tool{
 		Name:        "update_pr",
-		Description: "Push follow-up changes to an existing PR (branch-safe: never pushes to a merged PR). After a rebase (which rewrites history) set force=true, or the push is rejected as non-fast-forward.",
+		Description: "Push follow-up changes to an existing PR (branch-safe: never pushes to a merged PR). After a rebase (which rewrites history) set force=true, or the push is rejected as non-fast-forward. Pass title and/or body to edit the PR's title/description on the host (gh pr edit) — you can retitle/rewrite the description without any code change.",
 		InputSchema: mcpObj(map[string]any{
 			"pr_id":          mcpStr,
 			"session_id":     mcpStr,
-			"title":          mcpStr,
-			"body":           mcpStr,
+			"title":          map[string]any{"type": "string", "description": "new PR title; updates it on the host. Omit to leave the title unchanged"},
+			"body":           map[string]any{"type": "string", "description": "new PR description; updates it on the host. Omit to leave the description unchanged"},
 			"commit_message": map[string]any{"type": "string", "description": "used only if you left changes uncommitted; prefer committing yourself with git"},
 			"force":          map[string]any{"type": "boolean", "description": "force-push (--force-with-lease); required after a rebase or any history rewrite"},
 			"force_reason":   map[string]any{"type": "string", "description": "why a force push is needed (e.g. 'rebased onto main to resolve conflicts')"},

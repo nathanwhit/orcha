@@ -325,10 +325,21 @@ func (o *Orchestrator) UpdatePR(ctx context.Context, prID string, spec UpdateSpe
 	if err != nil {
 		return nil, err
 	}
+	// Apply title/body changes on the host. This is independent of the push that
+	// just landed the code changes — if it fails we surface it but don't pretend
+	// the (successful) push didn't happen, so the local mirror isn't updated for
+	// fields the host rejected.
+	title := normalizePRTitle(spec.Title)
+	if title != "" || spec.Body != "" {
+		if err := f.EditPR(ctx, pr.Repo, pr.Number, title, spec.Body); err != nil {
+			o.audit(pr.ObjectiveID, spec.SessionID, "pr_edit_failed", err.Error(), model.JSONMap{"pr_id": prID})
+			return pr, fmt.Errorf("orch: pushed branch but failed to edit PR #%d title/body: %w", pr.Number, err)
+		}
+	}
 	pr, _ = o.st.UpdatePR(prID, func(p *model.PullRequest) {
 		p.HeadSHA = headSHA
-		if t := normalizePRTitle(spec.Title); t != "" {
-			p.Title = t
+		if title != "" {
+			p.Title = title
 		}
 		if spec.Body != "" {
 			p.Summary = spec.Body
