@@ -81,8 +81,19 @@ func (o *Orchestrator) superviseDecisions(now time.Time) []supervisorAction {
 
 		mgr := o.activeManagerFor(obj.ID)
 		if mgr == nil {
-			// No live manager: nothing can react to worker completions or PR events,
-			// so the objective is stuck. Respawn one — unless this objective has
+			// An objective parked on an open PR awaiting human review is NOT stuck —
+			// it is waiting, and the PR machinery owns every next step: a merge
+			// revives a manager (notifyManagerOfMerge) and new feedback spawns a
+			// follow-up (ProcessFeedback), neither of which needs a standing manager.
+			// Respawning one here just churns (and on a degraded host, fails to
+			// launch at all) and then escalates to the user for what is really
+			// "waiting for review" — the exact storm that minted dozens of bogus
+			// questions. So leave it alone, mirroring the live-manager poke path.
+			if o.objectiveHasOpenPR(obj.ID) {
+				continue
+			}
+			// No live manager and no open PR: nothing can react to worker
+			// completions, so the objective is stuck. Respawn one — unless it has
 			// already burned through too many managers, in which case ask the user.
 			if o.countManagers(obj.ID) >= maxManagerSessions {
 				if o.markPoked(obj.ID, now) {

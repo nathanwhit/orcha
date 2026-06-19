@@ -1837,6 +1837,69 @@ func openEscalations(t *testing.T, st *store.Store, objectiveID string) int {
 	return n
 }
 
+// An objective whose manager has died but whose work is parked on an open PR
+// awaiting review is NOT stuck — the supervisor must leave it entirely alone
+// (no respawn, no escalation), no matter how long it waits.
+func TestSupervisor_ParksObjectiveWaitingOnOpenPR(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+
+	obj, mgr, err := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	if err != nil {
+		t.Fatalf("create objective: %v", err)
+	}
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "octo/repo", Number: 7, Branch: "feat",
+		BaseBranch: "main", HeadSHA: "sha", Status: model.PROpen, ChecksState: model.ChecksPassing}
+	if err := st.CreatePR(pr); err != nil {
+		t.Fatalf("create pr: %v", err)
+	}
+	terminateSession(t, st, mgr.ID, model.SessionSucceeded)
+
+	// Parked: no action now, after the cooldown, or hours later.
+	for _, when := range []time.Time{st.Now(), st.Now().Add(2 * supervisePokeCooldown), st.Now().Add(10 * time.Hour)} {
+		if acts := o.superviseDecisions(when); len(acts) != 0 {
+			t.Fatalf("an open-PR objective must be left alone, got %+v", acts)
+		}
+	}
+	if n := openEscalations(t, st, obj.ID); n != 0 {
+		t.Fatalf("a waiting-on-review objective must never escalate, got %d", n)
+	}
+}
+
+// Parking an open-PR objective (above) must not strand it: when the PR finally
+// merges and no manager is live, the merge revives one so the objective can
+// reach mark_objective_done.
+func TestNotifyManagerOfMerge_RevivesParkedManager(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+
+	obj, mgr, err := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "ship it"})
+	if err != nil {
+		t.Fatalf("create objective: %v", err)
+	}
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "octo/repo", Number: 9, Branch: "feat",
+		BaseBranch: "main", HeadSHA: "sha", Status: model.PRMerged, ChecksState: model.ChecksPassing}
+	if err := st.CreatePR(pr); err != nil {
+		t.Fatalf("create pr: %v", err)
+	}
+	terminateSession(t, st, mgr.ID, model.SessionSucceeded)
+	if o.activeManagerFor(obj.ID) != nil {
+		t.Fatal("precondition: no live manager before the merge")
+	}
+
+	o.notifyManagerOfMerge(pr)
+
+	live := o.activeManagerFor(obj.ID)
+	if live == nil {
+		t.Fatal("a merge on a manager-less objective must revive a manager to finish it")
+	}
+	if !strings.Contains(live.Goal, "ship it") {
+		t.Fatalf("revived manager should carry the objective prompt, goal=%q", live.Goal)
+	}
+}
+
 // terminateSession drives a (queued) session through the legal lifecycle to a
 // terminal state: queued -> starting -> running -> final.
 func terminateSession(t *testing.T, st *store.Store, id string, final model.SessionStatus) {

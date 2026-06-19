@@ -184,6 +184,24 @@ const orchaBotMarker = "<!-- orcha-bot -->"
 func (o *Orchestrator) notifyManagerOfMerge(pr *model.PullRequest) {
 	mgr := o.activeManagerFor(pr.ObjectiveID)
 	if mgr == nil {
+		// The objective parked with no live manager — the supervisor leaves an
+		// open-PR objective alone rather than churning managers (see
+		// SuperviseIdleObjectives). A merge is the actionable event that needs one,
+		// so revive a manager now; its resume snapshot shows the merged PR and it
+		// can finish. Without this, a merged PR on a parked objective would never
+		// reach mark_objective_done. (Revival here intentionally bypasses the
+		// respawn budget: a merge is a one-time event, not a death loop.)
+		obj, err := o.st.GetObjective(pr.ObjectiveID)
+		if err != nil {
+			return
+		}
+		o.audit(pr.ObjectiveID, "", "manager_notified_merge",
+			fmt.Sprintf("PR #%d merged; reviving manager", pr.Number), model.JSONMap{"pr_id": pr.ID})
+		o.respawnManager(supervisorAction{
+			objectiveID: pr.ObjectiveID,
+			prompt:      obj.Prompt,
+			agent:       o.lastManagerAgent(pr.ObjectiveID),
+		})
 		return
 	}
 	prs, _ := o.st.ListPRsByObjective(pr.ObjectiveID)
