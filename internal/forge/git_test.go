@@ -314,6 +314,74 @@ func TestGitForge_CommitAll_UsesInheritedIdentity(t *testing.T) {
 	}
 }
 
+// CommitAll must not let a submodule whose checkout drifted ahead of its pin
+// leak that pointer bump into the catch-all commit (regression: a shallow
+// submodule update left tests/wpt/suite ahead of the recorded commit and
+// `git add -A` swept the bump into a deno PR).
+func TestGitForge_CommitAll_DoesNotSweepSubmoduleDrift(t *testing.T) {
+	hermeticGit(t)
+	root := t.TempDir()
+	ctx := context.Background()
+	writeFile := func(dir, name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Submodule upstream: commit X (the pin to keep) then a newer commit Y.
+	subBare := filepath.Join(root, "sub.git")
+	mustGit(t, root, "init", "--bare", "-b", "main", subBare)
+	subSeed := filepath.Join(root, "sub-seed")
+	mustGit(t, root, "init", "-b", "main", subSeed)
+	writeFile(subSeed, "s.txt", "x\n")
+	mustGit(t, subSeed, "add", ".")
+	mustGit(t, subSeed, "commit", "-m", "X")
+	mustGit(t, subSeed, "remote", "add", "origin", subBare)
+	mustGit(t, subSeed, "push", "-u", "origin", "main")
+	pinX := mustGit(t, subSeed, "rev-parse", "HEAD")
+	writeFile(subSeed, "s.txt", "y\n")
+	mustGit(t, subSeed, "add", ".")
+	mustGit(t, subSeed, "commit", "-m", "Y")
+	mustGit(t, subSeed, "push", "origin", "main")
+	tipY := mustGit(t, subSeed, "rev-parse", "HEAD")
+
+	// Superproject pins the submodule at X.
+	work := filepath.Join(root, "work")
+	mustGit(t, root, "init", "-b", "main", work)
+	// CommitAll commits through the forge (inheriting only the process env, which
+	// is hermetic here), so the checkout needs its own identity like a real clone.
+	mustGit(t, work, "config", "user.name", "Real Dev")
+	mustGit(t, work, "config", "user.email", "real@dev.example")
+	writeFile(work, "README.md", "hi\n")
+	mustGit(t, work, "add", ".")
+	mustGit(t, work, "commit", "-m", "initial")
+	mustGit(t, work, "-c", "protocol.file.allow=always", "submodule", "add", subBare, "vendor/sub")
+	mustGit(t, work, "-C", "vendor/sub", "checkout", "--detach", pinX)
+	mustGit(t, work, "add", ".gitmodules", "vendor/sub")
+	mustGit(t, work, "commit", "-m", "pin sub at X")
+
+	// Drift the submodule's working checkout to the newer commit (uncommitted),
+	// alongside a legitimate file change the agent left for CommitAll to commit.
+	mustGit(t, work, "-C", "vendor/sub", "checkout", "--detach", tipY)
+	writeFile(work, "feature.txt", "f\n")
+
+	committed, err := NewGit().CommitAll(ctx, work, "orcha: add feature")
+	if err != nil || !committed {
+		t.Fatalf("CommitAll: committed=%v err=%v", committed, err)
+	}
+	gitlink := mustGit(t, work, "ls-tree", "HEAD", "vendor/sub")
+	if strings.Contains(gitlink, tipY) {
+		t.Fatalf("submodule bump was swept into the commit: %q (pointer at tip %s)", gitlink, tipY)
+	}
+	if !strings.Contains(gitlink, pinX) {
+		t.Fatalf("submodule pointer = %q, want it left at the pin %s", gitlink, pinX)
+	}
+	// The legitimate change still landed.
+	if files := mustGit(t, work, "show", "--name-only", "--pretty=format:", "HEAD"); !strings.Contains(files, "feature.txt") {
+		t.Fatalf("expected feature.txt in the commit, got: %q", files)
+	}
+}
+
 // hermeticGit makes git invocations during this test — including ones made by
 // the code under test, which inherits the process env — ignore the developer's
 // global/system git config. Commit signing in particular (e.g. via the

@@ -160,6 +160,10 @@ func (g *GitForge) resolveBase(ctx context.Context, dir string) (string, error) 
 // author), not a synthetic one. Agents are expected to commit their own work
 // with their own message; this only catches leftovers.
 func (g *GitForge) CommitAll(ctx context.Context, workspacePath, message string) (bool, error) {
+	// Last gate before a pointer reaches a PR: undo any submodule that drifted
+	// from its recorded pin so the catch-all `git add -A` below can't sweep an
+	// accidental bump into the commit.
+	g.restoreSubmodulePins(ctx, workspacePath)
 	if _, err := g.git(ctx, workspacePath, "add", "-A"); err != nil {
 		return false, err
 	}
@@ -174,6 +178,38 @@ func (g *GitForge) CommitAll(ctx context.Context, workspacePath, message string)
 		return false, err
 	}
 	return true, nil
+}
+
+// restoreSubmodulePins resets any submodule whose working checkout has drifted
+// from the commit the superproject records back to that commit, so CommitAll's
+// `git add -A` cannot sweep an accidental pointer bump into a PR. Workers fixing
+// application code never legitimately re-pin a vendored submodule, and a shallow
+// `submodule update` can leave one ahead of its pin
+// (see workspace.(*Preparer).reconcileSubmodulePins). Best-effort: any failure
+// leaves that submodule untouched. An intentional, already-committed submodule
+// change is preserved — its commit is the recorded pin, so the checkout matches
+// and nothing is reset.
+func (g *GitForge) restoreSubmodulePins(ctx context.Context, workspacePath string) {
+	out, err := g.git(ctx, workspacePath, "config", "--file", ".gitmodules", "--get-regexp", `^submodule\..*\.path$`)
+	if err != nil {
+		return // no .gitmodules / no submodules
+	}
+	for _, line := range strings.Split(out, "\n") {
+		key, path, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if !ok || path == "" || !strings.HasPrefix(key, "submodule.") {
+			continue
+		}
+		rec, err := g.git(ctx, workspacePath, "rev-parse", "HEAD:"+path)
+		if err != nil || rec == "" {
+			continue // path isn't a gitlink here
+		}
+		sub := workspacePath + "/" + path
+		cur, err := g.git(ctx, sub, "rev-parse", "HEAD")
+		if err != nil || cur == rec {
+			continue // not initialized, or already at the pin
+		}
+		_, _ = g.git(ctx, sub, "checkout", "--detach", "--force", rec)
+	}
 }
 
 // PushBranch pushes the workspace's branch to origin. force is only set when the
