@@ -158,6 +158,60 @@ func TestPrepareIsolated_InitsSubmodules(t *testing.T) {
 	}
 }
 
+// TestPrepareIsolated_SubmoduleMirrorCache: submodule objects must be served from
+// the per-repo mirror cache, not refetched from the network on every prep. After
+// a prepare, the cache should hold the submodule as a remote and the prepared
+// submodule should carry a git alternate pointing back at the cache (so its
+// objects come from local disk). Regression guard for the caching path.
+func TestPrepareIsolated_SubmoduleMirrorCache(t *testing.T) {
+	hermeticGit(t)
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
+	t.Setenv("GIT_CONFIG_VALUE_0", "always")
+
+	bare, seed := seedBare(t)
+	root := t.TempDir()
+
+	subBare := filepath.Join(root, "sub.git")
+	git(t, root, "init", "--bare", "-b", "main", subBare)
+	subSeed := filepath.Join(root, "subseed")
+	git(t, root, "init", "-b", "main", subSeed)
+	write(t, subSeed, "lib.txt", "from submodule\n")
+	git(t, subSeed, "add", ".")
+	git(t, subSeed, "commit", "-m", "sub commit")
+	git(t, subSeed, "remote", "add", "origin", subBare)
+	git(t, subSeed, "push", "-u", "origin", "main")
+
+	git(t, seed, "submodule", "add", subBare, "vendor/sub")
+	git(t, seed, "commit", "-m", "add submodule")
+	git(t, seed, "push", "origin", "main")
+
+	work := filepath.Join(t.TempDir(), "work")
+	ws := filepath.Join(work, "ws")
+	if err := New().PrepareIsolated(context.Background(), exec.NewLocal(), Spec{
+		WorkRoot: work, RepoURL: bare, Dir: ws, Base: "main", Branch: "feat-sub",
+	}); err != nil {
+		t.Fatalf("prepare with submodule: %v", err)
+	}
+
+	// The cache holds the submodule's objects as a named remote.
+	cache := filepath.Join(work, ".orcha-cache", slug(bare)+".git")
+	remote := "sub-" + slug(subBare)
+	if out := git(t, cache, "remote"); !strings.Contains(out, remote) {
+		t.Fatalf("cache should have submodule remote %q, got remotes:\n%s", remote, out)
+	}
+
+	// The prepared submodule sources its objects from the cache via an alternate.
+	altFile := filepath.Join(ws, ".git", "modules", "vendor", "sub", "objects", "info", "alternates")
+	alt, err := os.ReadFile(altFile)
+	if err != nil {
+		t.Fatalf("submodule should have an objects alternate (mirror reference): %v", err)
+	}
+	if !strings.Contains(string(alt), cache) {
+		t.Fatalf("submodule alternate %q should point at the cache %q", strings.TrimSpace(string(alt)), cache)
+	}
+}
+
 // TestPrepareIsolated_BranchesOffFreshUpstream is the central guarantee: a
 // workspace prepared after upstream advances is based on the *new* commit, even
 // though the cache was first populated earlier.
