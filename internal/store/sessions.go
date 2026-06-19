@@ -124,6 +124,21 @@ func (s *Store) CountSessionsByStatuses(statuses ...model.SessionStatus) (int, e
 	return n, err
 }
 
+// CountActiveWorkerSessions counts sessions that consume the scheduler's global
+// worker-concurrency budget: starting or running, and NOT managers. Interactive
+// managers are long-lived per-objective supervisors that sit idle most of their
+// life (waiting on workers or PR events); counting them lets accumulated idle
+// managers exhaust the budget and starve new work on an otherwise idle fleet.
+// They are still bounded by per-target capacity (a manager is a real process on
+// the box) — just not by this logical throughput cap.
+func (s *Store) CountActiveWorkerSessions() (int, error) {
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM sessions WHERE status IN (?,?) AND role <> ?`,
+		string(model.SessionStarting), string(model.SessionRunning), string(model.RoleManager)).Scan(&n)
+	return n, err
+}
+
 func (s *Store) querySessions(q string, args ...any) ([]*model.Session, error) {
 	rows, err := s.db.Query(q, args...)
 	if err != nil {

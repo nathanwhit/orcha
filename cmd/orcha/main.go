@@ -40,7 +40,7 @@ func main() {
 		claudeBin    = flag.String("claude-bin", "claude", "path to the claude CLI")
 		codexBin     = flag.String("codex-bin", "codex", "path to the codex CLI")
 		realForge    = flag.Bool("real-forge", false, "use the real git+gh forge (needs real workspace checkouts) instead of the in-memory fake")
-		maxConc      = flag.Int("max-concurrent", 8, "max simultaneously active sessions across all targets")
+		maxConc      = flag.Int("max-concurrent", 32, "max concurrent worker sessions across all targets (managers are exempt; per-target capacity still applies)")
 		schedEvery   = flag.Duration("schedule-interval", 2*time.Second, "scheduler idle tick interval")
 		mcpBase      = flag.String("mcp-base-url", "http://127.0.0.1:8080", "base URL where the manager MCP tool surface is reachable by agent CLIs")
 		showVersion  = flag.Bool("version", false, "print version and exit")
