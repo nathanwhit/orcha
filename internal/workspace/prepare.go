@@ -100,10 +100,101 @@ func (p *Preparer) checkoutNewBranch(ctx context.Context, ex exec.Executor, spec
 	if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "checkout", "-B", spec.Branch, start); err != nil {
 		return fmt.Errorf("workspace: check out %s at %s: %w", spec.Branch, start, err)
 	}
-	if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "submodule", "update", "--init", "--recursive", "--checkout"); err != nil {
+	return p.updateSubmodules(ctx, ex, spec)
+}
+
+// submoduleJobs is how many submodules `submodule update` clones in parallel.
+// Most of the cost is per-submodule network setup, so a handful of jobs shortens
+// wall time on repos with several submodules; harmless for repos with one.
+const submoduleJobs = "8"
+
+// updateSubmodules checks out the tree's submodules, sourcing their objects from
+// the per-repo mirror cache instead of refetching them from the network on every
+// prep. Repos like denoland/deno pin large submodules (the WPT suite especially);
+// since base() wipes and re-clones the workspace each prep, an uncached
+// `submodule update` re-downloads all of them every time.
+//
+// Steps: (1) resolve the submodules' URLs into .git/config without touching the
+// network (submodule init), (2) warm the same bare cache base() maintains with
+// each submodule's objects (added as extra remotes), then (3) run submodule
+// update with --reference <cache> so every submodule clone takes its objects
+// from the local mirror via git alternates. Plain --reference degrades
+// gracefully — a submodule the cache doesn't have yet is fetched from its origin
+// as before — so correctness never depends on the cache being warm, only speed.
+// A repo with no .gitmodules makes this a fast no-op.
+func (p *Preparer) updateSubmodules(ctx context.Context, ex exec.Executor, spec Spec) error {
+	// Resolve submodule URLs into .git/config (no network). Relative URLs resolve
+	// against origin, which base() already re-pointed at the real upstream.
+	if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "submodule", "init"); err != nil {
+		return fmt.Errorf("workspace: submodule init for %s: %w", spec.Branch, err)
+	}
+	urls := p.submoduleURLs(ctx, ex, spec)
+
+	cache := p.cachePath(spec)
+	for _, u := range urls {
+		// Best-effort: a warm failure just falls back to a network fetch below.
+		p.warmSubmoduleMirror(ctx, ex, cache, u)
+	}
+
+	args := []string{"-C", spec.Dir, "submodule", "update", "--init", "--recursive",
+		"--checkout", "--jobs", submoduleJobs}
+	if len(urls) > 0 {
+		// The cache holds the submodule objects (warmed above); reference it so the
+		// per-submodule clones source from local disk. Workspaces are wiped each
+		// prep while the cache persists, so the alternate this leaves behind stays
+		// valid for the workspace's lifetime.
+		args = append(args, "--reference", cache)
+	}
+	if _, err := p.run(ctx, ex, "", args...); err != nil {
 		return fmt.Errorf("workspace: init submodules for %s: %w", spec.Branch, err)
 	}
 	return nil
+}
+
+// submoduleURLs returns the resolved (absolute) URL of every initialized
+// submodule, read from .git/config after `submodule init`. Returns nil for a
+// repo with no submodules (the --get-regexp exits non-zero on no match, which is
+// the no-submodule case, not a failure).
+func (p *Preparer) submoduleURLs(ctx context.Context, ex exec.Executor, spec Spec) []string {
+	out, err := p.run(ctx, ex, "", "-C", spec.Dir, "config", "--get-regexp", `^submodule\..*\.url$`)
+	if err != nil {
+		return nil
+	}
+	var urls []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		// Each line is "submodule.<name>.url <value>".
+		if i := strings.IndexByte(line, ' '); i > 0 {
+			if u := strings.TrimSpace(line[i+1:]); u != "" {
+				urls = append(urls, u)
+			}
+		}
+	}
+	return urls
+}
+
+// warmSubmoduleMirror ensures the per-repo mirror cache holds one submodule's
+// objects, so a later `submodule update --reference <cache>` serves them from
+// local disk. The submodule is added as an extra remote in the same bare cache
+// base() maintains (named by a slug of its URL) and fetched into the shared
+// object store. Best-effort: any error is swallowed, leaving the update to fetch
+// that submodule from the network as before.
+func (p *Preparer) warmSubmoduleMirror(ctx context.Context, ex exec.Executor, cache, url string) {
+	remote := "sub-" + slug(url)
+	// Add the remote once; if it already exists (a prior prep, or a concurrent
+	// one) skip straight to the fetch.
+	if _, err := p.run(ctx, ex, "", "-C", cache, "remote", "get-url", remote); err != nil {
+		if _, err := p.run(ctx, ex, "", "-C", cache, "remote", "add", remote, url); err != nil {
+			return
+		}
+	}
+	// Objects (not refs) are what the alternate needs; --no-tags keeps the cache's
+	// ref namespace tidy.
+	_, _ = p.run(ctx, ex, "", "-C", cache, "fetch", "--no-tags", remote)
+}
+
+// cachePath is the per-repo bare mirror cache directory for spec's RepoURL.
+func (p *Preparer) cachePath(spec Spec) string {
+	return join(spec.WorkRoot, p.cacheSub(), slug(spec.RepoURL)+".git")
 }
 
 // resolveRef turns a branch name into a checkable start point: origin/<ref> when
@@ -132,7 +223,7 @@ func (p *Preparer) resolveRef(ctx context.Context, ex exec.Executor, spec Spec, 
 // including) the final branch checkout.
 func (p *Preparer) base(ctx context.Context, ex exec.Executor, spec Spec) error {
 	cacheParent := join(spec.WorkRoot, p.cacheSub())
-	cache := join(cacheParent, slug(spec.RepoURL)+".git")
+	cache := p.cachePath(spec)
 
 	// Ensure the work root and cache parent exist on the target.
 	if _, err := exec.RunCapture(ctx, ex, exec.Command{Name: "mkdir", Args: []string{"-p", cacheParent}}); err != nil {
