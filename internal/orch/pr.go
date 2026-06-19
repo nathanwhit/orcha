@@ -191,7 +191,25 @@ func (o *Orchestrator) PublishPR(ctx context.Context, sessionID string, spec Pub
 		// Follow-ups need to know the branch lives on the fork.
 		pr.Metadata = model.JSONMap{"push_repo": pushRepo}
 	}
-	if err := o.st.CreatePR(pr); err != nil {
+	// Record the row under the same lock AdoptUntrackedPRs uses. An agent that
+	// opens its PR out-of-band (gh) and then calls publish_pr races the adopt
+	// scan: the moment PushBranch makes the branch visible, a concurrent scan can
+	// FindOpenPR and record the same host PR. Without joining that serialization
+	// here — and checking first — publish would blindly insert a second row for
+	// the same (repo, number) (observed in prod: #35374 recorded twice, 578ms
+	// apart, as pr_adopted then pr_published). Check-then-create so exactly one
+	// row exists; if adopt already recorded it, return that row rather than dup.
+	o.adoptMu.Lock()
+	if existing, _ := o.st.GetPRByRepoNumber(repo, res.Number); existing != nil {
+		o.adoptMu.Unlock()
+		o.audit(sess.ObjectiveID, sessionID, "pr_published",
+			fmt.Sprintf("PR #%d already recorded; using existing row", res.Number),
+			model.JSONMap{"pr_id": existing.ID, "url": existing.URL})
+		return existing, nil
+	}
+	err = o.st.CreatePR(pr)
+	o.adoptMu.Unlock()
+	if err != nil {
 		return nil, err
 	}
 	// Record a primary artifact pointing at the PR (not stdout).
