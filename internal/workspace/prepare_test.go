@@ -212,6 +212,68 @@ func TestPrepareIsolated_SubmoduleMirrorCache(t *testing.T) {
 	}
 }
 
+// TestReconcileSubmodulePins_ResetsDriftToPin: when a submodule's checkout has
+// drifted ahead of the commit the superproject pins (as a shallow `submodule
+// update` against a cache whose tracking branch is ahead can leave it),
+// reconcile must put it back exactly on the recorded pin so the drift can't be
+// committed. Regression guard for the wpt/suite submodule-bump leak.
+func TestReconcileSubmodulePins_ResetsDriftToPin(t *testing.T) {
+	hermeticGit(t)
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
+	t.Setenv("GIT_CONFIG_VALUE_0", "always")
+
+	bare, seed := seedBare(t)
+	root := t.TempDir()
+
+	subBare := filepath.Join(root, "sub.git")
+	git(t, root, "init", "--bare", "-b", "main", subBare)
+	subSeed := filepath.Join(root, "subseed")
+	git(t, root, "init", "-b", "main", subSeed)
+	write(t, subSeed, "lib.txt", "x\n")
+	git(t, subSeed, "add", ".")
+	git(t, subSeed, "commit", "-m", "X")
+	git(t, subSeed, "remote", "add", "origin", subBare)
+	git(t, subSeed, "push", "-u", "origin", "main")
+	pinX := git(t, subSeed, "rev-parse", "HEAD")
+
+	git(t, seed, "submodule", "add", subBare, "vendor/sub")
+	git(t, seed, "commit", "-m", "add submodule")
+	git(t, seed, "push", "origin", "main")
+
+	work := filepath.Join(t.TempDir(), "work")
+	ws := filepath.Join(work, "ws")
+	ex := exec.NewLocal()
+	p := New()
+	ctx := context.Background()
+	spec := Spec{WorkRoot: work, RepoURL: bare, Dir: ws, Base: "main", Branch: "feat-sub"}
+	if err := p.PrepareIsolated(ctx, ex, spec); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	subDir := filepath.Join(ws, "vendor", "sub")
+	if got := git(t, subDir, "rev-parse", "HEAD"); got != pinX {
+		t.Fatalf("submodule prepared at %q, want pin %s", got, pinX)
+	}
+
+	// Upstream advances; move the workspace submodule onto the newer tip, the way
+	// a drifting shallow update would.
+	write(t, subSeed, "lib.txt", "y\n")
+	git(t, subSeed, "add", ".")
+	git(t, subSeed, "commit", "-m", "Y")
+	git(t, subSeed, "push", "origin", "main")
+	tipY := git(t, subSeed, "rev-parse", "HEAD")
+	git(t, subDir, "fetch", "origin")
+	git(t, subDir, "checkout", "--detach", tipY)
+	if got := git(t, subDir, "rev-parse", "HEAD"); got != tipY {
+		t.Fatalf("drift setup failed: submodule at %q, want tip %s", got, tipY)
+	}
+
+	p.reconcileSubmodulePins(ctx, ex, spec)
+	if got := git(t, subDir, "rev-parse", "HEAD"); got != pinX {
+		t.Fatalf("after reconcile submodule at %q, want pin %s", got, pinX)
+	}
+}
+
 // TestPrepareIsolated_BranchesOffFreshUpstream is the central guarantee: a
 // workspace prepared after upstream advances is based on the *new* commit, even
 // though the cache was first populated earlier.

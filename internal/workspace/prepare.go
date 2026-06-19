@@ -148,7 +148,44 @@ func (p *Preparer) updateSubmodules(ctx context.Context, ex exec.Executor, spec 
 	if _, err := p.run(ctx, ex, "", args...); err != nil {
 		return fmt.Errorf("workspace: init submodules for %s: %w", spec.Branch, err)
 	}
+	// Force every submodule to exactly the commit the superproject pins. git's
+	// shallow `submodule update` can land a submodule on the fetched branch tip
+	// instead of the recorded commit (see reconcileSubmodulePins), and that
+	// silent drift gets swept into a later commit by `git add -A`.
+	p.reconcileSubmodulePins(ctx, ex, spec)
 	return nil
+}
+
+// reconcileSubmodulePins forces every submodule back to the exact commit the
+// superproject records (HEAD:<path>). A shallow `submodule update` — observed on
+// git 2.43 against a --reference cache whose remote-tracking branch is ahead of
+// the pin — can clone the submodule straight to the freshly-fetched branch tip
+// and never run the checkout to the pinned commit, leaving the submodule ahead
+// of where the superproject points. That drift is invisible until a later
+// `git add -A` sweeps the bumped gitlink into a commit (exactly how an unrelated
+// tests/wpt/suite bump leaked into a denoland/deno PR). Re-pinning here makes the
+// checkout match the superproject. The pinned commit's objects are already local
+// (fetched during update or borrowed from the cache alternate); a --depth 1
+// fetch by SHA backstops the rare miss. Each step is best-effort per submodule so
+// one failure never blocks preparation.
+func (p *Preparer) reconcileSubmodulePins(ctx context.Context, ex exec.Executor, spec Spec) {
+	for _, path := range p.submodulePaths(ctx, ex, spec) {
+		rec, err := p.capture(ctx, ex, "-C", spec.Dir, "rev-parse", "HEAD:"+path)
+		if err != nil || rec == "" {
+			continue // not a gitlink in this tree
+		}
+		sub := join(spec.Dir, path)
+		cur, err := p.capture(ctx, ex, "-C", sub, "rev-parse", "HEAD")
+		if err != nil {
+			continue // submodule not initialized
+		}
+		if cur == rec {
+			continue // already at the pin
+		}
+		// Ensure the pinned commit is present, then hard-reset onto it.
+		_, _ = p.run(ctx, ex, "", "-C", sub, "fetch", "--depth", "1", "origin", rec)
+		_, _ = p.run(ctx, ex, "", "-C", sub, "checkout", "--detach", "--force", rec)
+	}
 }
 
 // submoduleURLs returns the resolved (absolute) URL of every initialized
@@ -156,20 +193,45 @@ func (p *Preparer) updateSubmodules(ctx context.Context, ex exec.Executor, spec 
 // repo with no submodules (the --get-regexp exits non-zero on no match, which is
 // the no-submodule case, not a failure).
 func (p *Preparer) submoduleURLs(ctx context.Context, ex exec.Executor, spec Spec) []string {
-	out, err := p.run(ctx, ex, "", "-C", spec.Dir, "config", "--get-regexp", `^submodule\..*\.url$`)
+	return p.configValues(ctx, ex, "-C", spec.Dir, "config", "--get-regexp", `^submodule\..*\.url$`)
+}
+
+// submodulePaths returns the path of every submodule declared in .gitmodules
+// (e.g. "tests/wpt/suite"). Paths live in .gitmodules regardless of init state,
+// so this works before or after `submodule init`. Returns nil for a repo with no
+// submodules.
+func (p *Preparer) submodulePaths(ctx context.Context, ex exec.Executor, spec Spec) []string {
+	return p.configValues(ctx, ex, "-C", spec.Dir, "config", "--file", ".gitmodules", "--get-regexp", `^submodule\..*\.path$`)
+}
+
+// configValues runs a `git config --get-regexp` query and returns the values of
+// matching keys. It validates that each line's key actually matches a
+// "submodule.<name>.<field>" config name: command output is captured cleanly,
+// but as defense against any stray line (a combined-stream capture can fold an
+// SSH "Connection ... closed." notice into output) only well-formed config lines
+// are accepted — a past miss minted a bogus "sub-..." mirror remote from such a
+// stderr line.
+func (p *Preparer) configValues(ctx context.Context, ex exec.Executor, args ...string) []string {
+	out, err := p.capture(ctx, ex, args...)
 	if err != nil {
 		return nil
 	}
-	var urls []string
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		// Each line is "submodule.<name>.url <value>".
-		if i := strings.IndexByte(line, ' '); i > 0 {
-			if u := strings.TrimSpace(line[i+1:]); u != "" {
-				urls = append(urls, u)
-			}
+	var vals []string
+	for _, line := range strings.Split(out, "\n") {
+		key, val, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if !ok || val == "" || !strings.HasPrefix(key, "submodule.") {
+			continue
 		}
+		vals = append(vals, strings.TrimSpace(val))
 	}
-	return urls
+	return vals
+}
+
+// capture runs a git subcommand and returns clean, trimmed stdout (stderr kept
+// separate), for parse-sensitive plumbing like `config --get-regexp` and
+// `rev-parse`.
+func (p *Preparer) capture(ctx context.Context, ex exec.Executor, args ...string) (string, error) {
+	return exec.Capture(ctx, ex, exec.Command{Name: p.git(), Args: args})
 }
 
 // warmSubmoduleMirror ensures the per-repo mirror cache holds one submodule's
