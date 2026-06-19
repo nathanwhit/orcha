@@ -1,5 +1,10 @@
 package store
 
+import (
+	"database/sql"
+	"errors"
+)
+
 // RecordIssueTask claims an issue trigger for processing, returning whether this
 // call is the one that claimed it. The unique (repo, number, external_id) index
 // makes the claim atomic: a concurrent poll or a post-restart re-poll sees
@@ -15,6 +20,24 @@ func (s *Store) RecordIssueTask(repo string, number int, externalID string) (ins
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
+}
+
+// ActiveObjectiveForIssue returns the id of a non-terminal objective already
+// tracking (repo, number), or "" if none. The issue-trigger path uses it to
+// avoid spawning a duplicate objective when an issue that is already being worked
+// is re-triggered (a re-assignment or new @-mention mints a fresh trigger event).
+// Terminal objectives (succeeded/failed/canceled) are ignored, so a later
+// re-trigger can start fresh work once the prior attempt is done.
+func (s *Store) ActiveObjectiveForIssue(repo string, number int) (string, error) {
+	var id string
+	err := s.db.QueryRow(
+		`SELECT o.id FROM issue_tasks t JOIN objectives o ON o.id = t.objective_id
+		 WHERE t.repo = ? AND t.number = ? AND o.status IN ('active','waiting_user')
+		 ORDER BY o.created_at DESC LIMIT 1`, repo, number).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return id, err
 }
 
 // SetIssueTaskObjective records which objective a claimed trigger produced.
