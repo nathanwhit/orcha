@@ -1799,6 +1799,42 @@ func TestSupervisor_RespawnsManagerThenEscalates(t *testing.T) {
 	if qs, _ := st.ListQuestionsByObjective(obj.ID); len(qs) == 0 {
 		t.Fatal("escalation should record an open question for the objective")
 	}
+
+	// Idempotent: a still-stuck objective is escalated every cooldown, but the
+	// user only needs one standing "this is stuck" question — re-escalating must
+	// not pile up duplicates. (This is what let one unmerged PR mint 78 of them.)
+	for i := 0; i < 5; i++ {
+		o.escalateManagerDeaths(obj.ID)
+	}
+	if n := openEscalations(t, st, obj.ID); n != 1 {
+		t.Fatalf("re-escalation should not duplicate the standing question, got %d open", n)
+	}
+
+	// Once the user clears it, a later escalation is free to ask again.
+	if err := st.CancelOpenQuestionsByObjective(obj.ID); err != nil {
+		t.Fatalf("cancel questions: %v", err)
+	}
+	o.escalateManagerDeaths(obj.ID)
+	if n := openEscalations(t, st, obj.ID); n != 1 {
+		t.Fatalf("after the prior escalation was cleared, a fresh one should be created, got %d open", n)
+	}
+}
+
+// openEscalations counts an objective's standing supervisor escalations — open
+// questions with no asking session (worker/manager asks always carry one).
+func openEscalations(t *testing.T, st *store.Store, objectiveID string) int {
+	t.Helper()
+	qs, err := st.ListQuestionsByObjective(objectiveID)
+	if err != nil {
+		t.Fatalf("list questions: %v", err)
+	}
+	n := 0
+	for _, q := range qs {
+		if q.Status == model.QuestionOpen && q.SessionID == "" {
+			n++
+		}
+	}
+	return n
 }
 
 // terminateSession drives a (queued) session through the legal lifecycle to a

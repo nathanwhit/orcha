@@ -227,6 +227,20 @@ func (o *Orchestrator) respawnManager(act supervisorAction) {
 // churned through its manager budget — repeatedly respawning would just burn
 // tokens, so a human should look.
 func (o *Orchestrator) escalateManagerDeaths(objectiveID string) {
+	// Idempotent: a stuck objective is escalated every supervisor tick that gets
+	// past the cooldown (90s), but the user only needs ONE standing "this is
+	// stuck" question — not a fresh one every cooldown until they look. Without
+	// this, an objective that can't progress (e.g. an open PR awaiting review, or
+	// a manager that can't even start) piled up dozens of identical questions.
+	// A supervisor escalation is the only question with no session id (worker and
+	// manager asks always carry one), so that's the dedup key.
+	if existing, err := o.st.ListQuestionsByObjective(objectiveID); err == nil {
+		for _, q := range existing {
+			if q.Status == model.QuestionOpen && q.SessionID == "" {
+				return
+			}
+		}
+	}
 	_ = o.st.CreateQuestion(&model.Question{
 		ObjectiveID: objectiveID,
 		Priority:    20,
