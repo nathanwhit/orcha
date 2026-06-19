@@ -252,6 +252,23 @@ func (g *GitForge) OpenPR(ctx context.Context, repo, branch, base, title, body s
 	return res, nil
 }
 
+// EditPR updates an existing PR's title and/or body via gh. Empty fields are
+// left untouched; if both are empty it does nothing (no gh call).
+func (g *GitForge) EditPR(ctx context.Context, repo string, number int, title, body string) error {
+	args := []string{"pr", "edit", strconv.Itoa(number), "--repo", repo}
+	if title != "" {
+		args = append(args, "--title", title)
+	}
+	if body != "" {
+		args = append(args, "--body", body)
+	}
+	if len(args) == 4 { // nothing to change beyond the target
+		return nil
+	}
+	_, err := g.gh(ctx, args...)
+	return err
+}
+
 // GetPRState fetches the PR's status and aggregate checks from gh.
 func (g *GitForge) GetPRState(ctx context.Context, repo string, number int) (PRState, error) {
 	out, err := g.gh(ctx, "pr", "view", strconv.Itoa(number), "--repo", repo,
