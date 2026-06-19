@@ -477,6 +477,44 @@ func TestPublishPR_RejectsWhenNoDiff(t *testing.T) {
 	}
 }
 
+// A PR opened out-of-band and adopted (AdoptUntrackedPRs) the instant before its
+// own publish_pr call lands must not produce a second row. PublishPR records
+// under the same adoptMu and checks (repo, number) first, returning the
+// already-recorded row instead of inserting a duplicate. Regression for prod
+// #35374, recorded twice (pr_adopted then pr_published, 578ms apart) because
+// publish skipped that check entirely.
+func TestPublishPR_DoesNotDuplicateAdoptedPR(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	o.SetForge(forge.NewFake())
+
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p", Repo: "octo/repo"})
+	s, _ := o.CreateSession(SpawnSpec{ObjectiveID: obj.ID, Role: model.RoleImplementer, Agent: model.AgentClaude})
+	if _, err := o.PrepareIsolatedWorkspace(context.Background(), s.ID, "octo/repo", "", "main"); err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+
+	// Simulate the adopt scan having already recorded this host PR. The fake forge
+	// mints the next PR number (101) for OpenPR, so seed that exact (repo, number).
+	existing := &model.PullRequest{ObjectiveID: obj.ID, Repo: "octo/repo", Number: 101,
+		Branch: "orcha/adopted", BaseBranch: "main", Status: model.PROpen, ChecksState: model.ChecksPending}
+	if err := st.CreatePR(existing); err != nil {
+		t.Fatalf("seed adopted PR: %v", err)
+	}
+
+	pr, err := o.PublishPR(context.Background(), s.ID, PublishSpec{Title: "t", Body: "b", CommitMessage: "c"})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if pr.ID != existing.ID {
+		t.Fatalf("publish should return the already-recorded row %s, got %s", existing.ID, pr.ID)
+	}
+	if prs, _ := st.ListPRsByObjective(obj.ID); len(prs) != 1 {
+		t.Fatalf("expected exactly 1 PR row for the objective, got %d", len(prs))
+	}
+}
+
 // CommentPR tags comments with the orcha-bot marker, but agents frequently copy
 // that marker into their own body (they see it on prior comments). The marker
 // must not be doubled.

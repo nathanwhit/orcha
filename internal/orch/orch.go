@@ -94,7 +94,7 @@ type Orchestrator struct {
 	tunnelMu sync.Mutex
 	tunnels  map[string]*mcpTunnel // reverse MCP tunnels keyed by target id
 
-	adoptMu sync.Mutex // serializes PR adoption so concurrent scans can't double-record a PR
+	adoptMu sync.Mutex // serializes PR recording (adoption scans + publish_pr) so concurrent paths can't double-record one host PR
 
 	pokeMu   sync.Mutex           // guards lastPoke
 	lastPoke map[string]time.Time // per-objective last supervisor re-poke time (cooldown)
