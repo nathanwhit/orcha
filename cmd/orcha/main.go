@@ -52,6 +52,8 @@ func main() {
 		usageMonitor = flag.Duration("usage-monitor", 0, "scrape each provider's real subscription usage (claude /usage, codex /status) via a tmux pty this often, so provider selection load-balances on actual remaining usage (0 = auto: on at 5m unless -fake-agents, off with fake)")
 		notifyURL    = flag.String("notify-url", "", "POST high-signal events (worker needs input, work done, PR opened/updated, failures) here as JSON for push notifications; matches ntfy's JSON publish format so an ntfy server URL works directly (empty disables)")
 		notifyTopic  = flag.String("notify-topic", "", "ntfy topic to publish to (carried in the JSON body; set for ntfy.sh, ignored by endpoints that don't use topics)")
+		exeAuth      = flag.Bool("exe-auth", false, "gate the dashboard and API behind exe.dev's authenticating proxy (trusts the X-ExeDev-Email header it injects; only safe when the VM is reachable solely via that proxy). Leave off for local dev.")
+		allowedMail  = flag.String("allowed-emails", "", "comma-separated exe.dev emails permitted to use the dashboard when -exe-auth is set (empty = any authenticated exe.dev user)")
 	)
 	flag.Parse()
 
@@ -214,7 +216,7 @@ func main() {
 	// in-flight work: shutdown leaves sessions recoverable and live tmux
 	// sessions are re-adopted on the next boot.
 	restart := make(chan struct{}, 1)
-	mux.HandleFunc("POST /api/restart", func(w http.ResponseWriter, r *http.Request) {
+	restartHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"restarting"}` + "\n"))
 		select {
@@ -222,7 +224,19 @@ func main() {
 		default:
 		}
 	})
-	mux.Handle("/api/", srv.Handler())
+
+	// guard gates the operator-facing surfaces (dashboard, API, pty) behind
+	// exe.dev identity when -exe-auth is set; it is the identity wrapper otherwise.
+	// The MCP surfaces below are deliberately left ungated: agent CLIs reach them
+	// over the localhost reverse tunnel and never carry exe headers.
+	guard := func(h http.Handler) http.Handler { return h }
+	if *exeAuth {
+		guard = api.ExeAuth(splitCSV(*allowedMail))
+		log.Printf("exe.dev auth on (allowlist: %d email(s))", len(splitCSV(*allowedMail)))
+	}
+
+	mux.Handle("POST /api/restart", guard(restartHandler))
+	mux.Handle("/api/", guard(srv.Handler()))
 	// Manager tool surface (MCP). Manager sessions' Claude connects to
 	// /mcp/<sessionID> to drive the orchestrator.
 	mux.Handle("/mcp/", http.StripPrefix("/mcp", o.ManagerMCPHandler()))
@@ -237,7 +251,7 @@ func main() {
 	// agent (e.g. reached over an SSH tunnel) connects to /omcp/<anything>.
 	mux.Handle("/omcp/", http.StripPrefix("/omcp", o.OperatorMCPHandler()))
 	// The dashboard SPA (built from ui/, embedded at compile time).
-	mux.Handle("/", webui.Handler())
+	mux.Handle("/", guard(webui.Handler()))
 
 	httpSrv := &http.Server{Addr: *addr, Handler: mux}
 

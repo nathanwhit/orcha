@@ -8,3 +8,4 @@ orcha.db-shm
 internal/webui/dist/*
 !internal/webui/dist/.gitkeep
 bin/
+/orcha

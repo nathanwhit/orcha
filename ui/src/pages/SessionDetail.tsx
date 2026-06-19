@@ -1,4 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import "@xterm/xterm/css/xterm.css";
 import * as api from "../api";
 import { usePoll } from "../hooks";
 import { Icon } from "../icons";
@@ -274,59 +277,121 @@ function firstLine(s: string): string {
   return line.length > 80 ? line.slice(0, 80) + "…" : line;
 }
 
-// TerminalPanel polls the tmux capture-pane endpoint while the session runs.
+// TerminalPanel attaches a live, interactive xterm.js terminal to the session's
+// tmux pane over a WebSocket (/api/sessions/{id}/pty): pane bytes stream in,
+// keystrokes stream out. It is a real attach — full-screen TUIs, Ctrl-C, and
+// tab completion all work, exactly as `tmux attach` would. The terminal sizes
+// itself to the panel and tells the pty its dimensions, so the view fits.
 function TerminalPanel({ id, active }: { id: string; active: boolean }) {
-  const [screen, setScreen] = useState<api.Screen | null>(null);
-  const [gone, setGone] = useState(false);
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const [attach, setAttach] = useState("");
+  const [status, setStatus] = useState<"connecting" | "open" | "closed">(
+    "connecting",
+  );
 
   useEffect(() => {
-    if (!active) {
-      setGone(true);
+    const host = hostRef.current;
+    if (!active || !host) {
+      setStatus("closed");
       return;
     }
-    let live = true;
-    let timer: number | undefined;
-    const tick = async () => {
-      try {
-        const s = await api.get<api.Screen | null>(`/api/sessions/${id}/screen`);
-        if (!live) return;
-        setScreen(s);
-        setGone(s === null);
-      } catch {
-        // ignore; retry
-      }
-      if (live) timer = window.setTimeout(tick, 1000);
+    setStatus("connecting");
+
+    const term = new Terminal({
+      cursorBlink: true,
+      fontFamily:
+        'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+      fontSize: 12,
+      scrollback: 1000,
+      theme: { background: "#000000" },
+    });
+    const fit = new FitAddon();
+    term.loadAddon(fit);
+    term.open(host);
+    fit.fit();
+
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(
+      `${proto}//${window.location.host}/api/sessions/${id}/pty` +
+        `?cols=${term.cols}&rows=${term.rows}`,
+    );
+    ws.binaryType = "arraybuffer";
+    const enc = new TextEncoder();
+
+    ws.onopen = () => {
+      setStatus("open");
+      term.focus();
     };
-    void tick();
+    ws.onmessage = (ev) => {
+      if (ev.data instanceof ArrayBuffer) term.write(new Uint8Array(ev.data));
+    };
+    ws.onclose = () => setStatus("closed");
+    ws.onerror = () => setStatus("closed");
+
+    // Keystrokes go out as binary frames (written verbatim to the pty); resize
+    // goes out as a text JSON control frame.
+    const onData = term.onData((d) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(enc.encode(d));
+    });
+    const sendResize = () => {
+      try {
+        fit.fit();
+      } catch {
+        return;
+      }
+      if (ws.readyState === WebSocket.OPEN)
+        ws.send(
+          JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }),
+        );
+    };
+    const ro = new ResizeObserver(() => sendResize());
+    ro.observe(host);
+
+    // Populate the attach-command header once (handy for taking over from a real
+    // terminal); failure is non-fatal.
+    api
+      .get<api.Screen | null>(`/api/sessions/${id}/screen`)
+      .then((s) => {
+        if (s) setAttach(s.attach);
+      })
+      .catch(() => {});
+
     return () => {
-      live = false;
-      if (timer !== undefined) clearTimeout(timer);
+      ro.disconnect();
+      onData.dispose();
+      ws.close();
+      term.dispose();
     };
   }, [id, active]);
 
-  if (gone && !screen)
-    return (
-      <Card className="px-4 py-8 text-center text-sm text-faint">
-        No live terminal — the session isn't running in tmux right now.
-      </Card>
-    );
+  const dot =
+    status === "open"
+      ? "bg-emerald-400/80"
+      : status === "connecting"
+        ? "bg-amber-400/80"
+        : "bg-zinc-500";
 
   return (
     <div className="overflow-hidden rounded-xl border border-edge bg-black">
       <div className="flex items-center justify-between border-b border-edge bg-surface px-3 py-1.5">
         <span className="flex items-center gap-1.5 text-[11px] text-faint">
-          <span className="size-2 rounded-full bg-emerald-400/80" />
+          <span className={`size-2 rounded-full ${dot}`} />
           tmux
         </span>
-        {screen?.attach && (
+        {attach && (
           <span className="flex items-center gap-1 font-mono text-[11px] text-mute">
-            {screen.attach}
-            <CopyButton text={screen.attach} />
+            {attach}
+            <CopyButton text={attach} />
           </span>
         )}
       </div>
-      <div className="term max-h-[26rem] min-h-[10rem] p-3 text-zinc-300">
-        {screen?.screen || "(blank)"}
+      <div className="relative">
+        <div ref={hostRef} className="h-[26rem] p-2" />
+        {status === "closed" && (
+          <div className="absolute inset-0 grid place-items-center bg-black/70 text-sm text-faint">
+            No live terminal — the session isn't running in tmux right now.
+          </div>
+        )}
       </div>
     </div>
   );
