@@ -333,6 +333,32 @@ function TerminalPanel({ id, active }: { id: string; active: boolean }) {
     const onData = term.onData((d) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(enc.encode(d));
     });
+
+    // Scroll wheel: in the alternate screen (a full-screen TUI like claude or
+    // vim) xterm's default is to emit cursor-arrow keys, which the app reads as
+    // navigation, not scrolling — so claude shows "scroll wheel is sending arrow
+    // keys". Send PgUp/PgDn instead, which pagers and claude actually scroll on.
+    // Leave the normal buffer (real scrollback) and any mouse-capturing app alone.
+    let wheelAcc = 0;
+    term.attachCustomWheelEventHandler((e) => {
+      if (term.modes.mouseTrackingMode !== "none") return true; // app owns the mouse
+      if (term.buffer.active.type !== "alternate") return true; // normal: scrollback
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? term.rows * 16 : 1;
+      wheelAcc += e.deltaY * unit;
+      const step = 100; // ~one mouse notch per page key
+      let keys = "";
+      while (wheelAcc <= -step) {
+        keys += "\x1b[5~"; // PgUp
+        wheelAcc += step;
+      }
+      while (wheelAcc >= step) {
+        keys += "\x1b[6~"; // PgDn
+        wheelAcc -= step;
+      }
+      if (keys && ws.readyState === WebSocket.OPEN) ws.send(enc.encode(keys));
+      return false; // handled — suppress xterm's arrow-key default
+    });
+
     const sendResize = () => {
       try {
         fit.fit();
