@@ -12,6 +12,7 @@ import (
 	"github.com/nathanwhit/orcha/internal/agent"
 	"github.com/nathanwhit/orcha/internal/forge"
 	"github.com/nathanwhit/orcha/internal/model"
+	"github.com/nathanwhit/orcha/internal/notify"
 	"github.com/nathanwhit/orcha/internal/store"
 	"github.com/nathanwhit/orcha/internal/workspace"
 )
@@ -81,7 +82,8 @@ type Orchestrator struct {
 	providers map[model.AgentKind]agent.Provider
 	forge     forge.Forge
 	preparer  *workspace.Preparer
-	notify    func() // optional scheduler wake hook
+	notify    func()           // optional scheduler wake hook
+	notifier  *notify.Notifier // optional outbound push-notification sink
 
 	usageBins map[model.AgentKind]string // CLI binary per provider for the usage monitor (guarded by mu)
 
@@ -182,6 +184,7 @@ func (o *Orchestrator) audit(objectiveID, sessionID, typ, summary string, data m
 		Summary:     summary,
 		Data:        data,
 	})
+	o.notifyEvent(typ, summary, data)
 }
 
 // ErrNoProvider is returned when no usable provider is available.

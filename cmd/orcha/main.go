@@ -20,6 +20,7 @@ import (
 	"github.com/nathanwhit/orcha/internal/api"
 	"github.com/nathanwhit/orcha/internal/forge"
 	"github.com/nathanwhit/orcha/internal/model"
+	"github.com/nathanwhit/orcha/internal/notify"
 	"github.com/nathanwhit/orcha/internal/orch"
 	"github.com/nathanwhit/orcha/internal/store"
 	"github.com/nathanwhit/orcha/internal/version"
@@ -49,6 +50,8 @@ func main() {
 		issueAllow   = flag.String("issue-allow", "", "comma-separated GitHub logins permitted to summon work via an issue @-mention/assignment (empty disables the issue trigger)")
 		idleBgWork   = flag.Duration("idle-bg-work-timeout", 4*time.Hour, "tmux mode: max time a one-shot worker may sit on a static pane that still shows live background shells (a build it yielded to await) before it is reaped; must exceed the longest build+wait")
 		usageMonitor = flag.Duration("usage-monitor", 0, "scrape each provider's real subscription usage (claude /usage, codex /status) via a tmux pty this often, so provider selection load-balances on actual remaining usage (0 = auto: on at 5m unless -fake-agents, off with fake)")
+		notifyURL    = flag.String("notify-url", "", "POST high-signal events (worker needs input, work done, PR opened/updated, failures) here as JSON for push notifications; matches ntfy's JSON publish format so an ntfy server URL works directly (empty disables)")
+		notifyTopic  = flag.String("notify-topic", "", "ntfy topic to publish to (carried in the JSON body; set for ntfy.sh, ignored by endpoints that don't use topics)")
 	)
 	flag.Parse()
 
@@ -122,6 +125,13 @@ func main() {
 	} else {
 		o.SetForge(forge.NewFake())
 		log.Println("using fake forge (no real PR operations)")
+	}
+
+	// Push notifications for high-signal events (worker needs input, work done,
+	// PR opened/updated, failures). Best-effort fire-and-forget; off when unset.
+	if n := notify.New(*notifyURL, *notifyTopic); n != nil {
+		o.SetNotifier(n)
+		log.Printf("notifications on (POST to %s)", *notifyURL)
 	}
 
 	// Ensure a local target exists so sessions can be scheduled out of the box.
