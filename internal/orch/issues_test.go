@@ -142,21 +142,33 @@ func TestIssueTrigger_AssignmentByAllowedActor(t *testing.T) {
 	}
 }
 
-func TestIssueTrigger_ReassignmentRefires(t *testing.T) {
+func TestIssueTrigger_ReassignmentSkipsWhileActiveRefiresAfterTerminal(t *testing.T) {
 	o, f := issueTriggerOrch(t)
 	f.SetAssignedIssues("acme/widgets", forge.Issue{Number: 12, Title: "Redo", Assignees: []string{"orcha-bot"}})
 	f.SetAssignment("acme/widgets", 12, "alice", "evt-1")
 
 	o.SyncIssueTriggers(context.Background())
-	if objs := objectivesForIssue(t, o, 12); len(objs) != 1 {
+	objs := objectivesForIssue(t, o, 12)
+	if len(objs) != 1 {
 		t.Fatalf("first assignment: want 1 objective, got %d", len(objs))
 	}
 
-	// Unassign then re-assign produces a new event id, which must re-fire.
+	// Re-assign (new event id) WHILE the first objective is still active: this must
+	// NOT spawn a duplicate, even though the trigger event itself is new.
 	f.SetAssignment("acme/widgets", 12, "alice", "evt-2")
 	o.SyncIssueTriggers(context.Background())
-	if objs := objectivesForIssue(t, o, 12); len(objs) != 2 {
-		t.Fatalf("re-assignment should re-fire: want 2 objectives, got %d", len(objs))
+	if got := objectivesForIssue(t, o, 12); len(got) != 1 {
+		t.Fatalf("re-assignment while active should not duplicate: want 1 objective, got %d", len(got))
+	}
+
+	// Once the first objective is terminal, a fresh trigger event re-fires.
+	if err := o.CancelObjective(objs[0].ID, "test"); err != nil {
+		t.Fatalf("cancel objective: %v", err)
+	}
+	f.SetAssignment("acme/widgets", 12, "alice", "evt-3")
+	o.SyncIssueTriggers(context.Background())
+	if got := objectivesForIssue(t, o, 12); len(got) != 2 {
+		t.Fatalf("re-trigger after the prior objective ended should spawn fresh: want 2, got %d", len(got))
 	}
 }
 

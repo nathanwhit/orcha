@@ -32,7 +32,10 @@ func (s *Store) DashboardObjectives() ([]ObjectiveRow, error) {
 		              AND se.status IN ('queued','starting','running','waiting_user','waiting_capacity')), 0) AS active_sessions,
 		  COALESCE((SELECT COUNT(*) FROM pull_requests p WHERE p.objective_id = o.id), 0) AS pr_count,
 		  COALESCE((SELECT COUNT(*) FROM questions q WHERE q.objective_id = o.id AND q.status = 'open'), 0) AS open_questions,
-		  COALESCE((SELECT p.repo FROM pull_requests p WHERE p.objective_id = o.id ORDER BY p.created_at ASC LIMIT 1), '') AS repo,
+		  COALESCE(
+		    (SELECT p.repo FROM pull_requests p WHERE p.objective_id = o.id ORDER BY p.created_at ASC LIMIT 1),
+		    json_extract(o.metadata, '$.repo'),
+		    '') AS repo,
 		  COALESCE((SELECT se.current_activity FROM sessions se
 		            WHERE se.objective_id = o.id AND se.current_activity <> ''
 		            ORDER BY se.updated_at DESC LIMIT 1), '') AS latest_activity

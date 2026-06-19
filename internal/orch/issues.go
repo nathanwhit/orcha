@@ -102,6 +102,15 @@ func (o *Orchestrator) triggerIssueObjective(ctx context.Context, p *model.Proje
 	if err != nil || !inserted {
 		return // already handled (or store error) — don't act twice
 	}
+	// Don't open a second objective for an issue that already has an active one.
+	// Re-assigning or re-mentioning the bot mints a NEW trigger event (so the
+	// claim above is fresh), but if work is already in flight a duplicate
+	// objective just contends for the same scarce manager/target slots and muddies
+	// the dashboard. The claim stays recorded so this event isn't re-evaluated;
+	// once the prior objective is terminal a later re-trigger starts fresh work.
+	if existing, err := o.st.ActiveObjectiveForIssue(p.Repo, iss.Number); err == nil && existing != "" {
+		return
+	}
 	obj, _, err := o.CreateObjective(NewObjectiveSpec{
 		Title:      fmt.Sprintf("Issue #%d: %s", iss.Number, iss.Title),
 		Prompt:     issueObjectivePrompt(p.Repo, iss, requester, via),
