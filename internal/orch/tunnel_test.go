@@ -81,3 +81,58 @@ func TestTunnelSupervisor_ReopensOnDrop(t *testing.T) {
 		t.Fatal("tunnel should be dead after CloseTunnels")
 	}
 }
+
+// A tunnel that can never bind (the remote port is held by an orphan, so every
+// ssh launches then exits ~immediately under ExitOnForwardFailure) must NOT
+// hot-loop. The old supervisor reset its backoff on every launch and relaunched
+// at ~1/s — ~100k events/day in prod, drowning the logs. With backoff, the same
+// stuck condition reopens only a handful of times over the window.
+func TestTunnelSupervisor_BacksOffWhenPortHeld(t *testing.T) {
+	o, _ := newTestOrch(t)
+
+	// Shrink the timing knobs so the test runs in a fraction of a second.
+	restore := setTunnelTimings(20*time.Millisecond, 5*time.Millisecond, 40*time.Millisecond)
+	defer restore()
+
+	var opens atomic.Int32
+	open := func() (exec.Process, error) {
+		opens.Add(1)
+		p := newFakeTunnelProc()
+		p.drop() // never binds: dies immediately, like a held remote port
+		return p, nil
+	}
+	first := newFakeTunnelProc()
+	first.drop()
+	tun := &mcpTunnel{
+		base: "http://127.0.0.1:18080", port: 18080, tgtName: "held",
+		open: open, proc: first,
+		stop: make(chan struct{}), dead: make(chan struct{}),
+	}
+	go o.superviseTunnel(tun)
+
+	time.Sleep(250 * time.Millisecond)
+	o.tunnelMu.Lock()
+	o.tunnels[tun.tgtName] = tun
+	o.tunnelMu.Unlock()
+	o.CloseTunnels()
+	select {
+	case <-tun.dead:
+	case <-time.After(3 * time.Second):
+		t.Fatal("CloseTunnels did not stop the supervisor")
+	}
+
+	// With backoff (5,10,20,40,40… ms) a permanently-unbindable tunnel reopens a
+	// dozen-ish times in 250ms. The old hot-loop (relaunch with no wait) would be
+	// limited only by scheduling — orders of magnitude more.
+	if n := opens.Load(); n == 0 || n > 60 {
+		t.Fatalf("expected a bounded, backed-off reopen count, got %d", n)
+	}
+}
+
+// setTunnelTimings overrides the supervision knobs for a test and returns a
+// restore func.
+func setTunnelTimings(healthy, initial, max time.Duration) func() {
+	ph, pi, pm := tunnelHealthyAfter, tunnelReopenBackoff, tunnelMaxBackoff
+	tunnelHealthyAfter, tunnelReopenBackoff, tunnelMaxBackoff = healthy, initial, max
+	return func() { tunnelHealthyAfter, tunnelReopenBackoff, tunnelMaxBackoff = ph, pi, pm }
+}
