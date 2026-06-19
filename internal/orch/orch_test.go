@@ -2476,3 +2476,33 @@ func TestUpdatePR_NoCheckoutRefuses(t *testing.T) {
 		t.Fatalf("no push should have happened, got %d", len(f.Pushes))
 	}
 }
+
+// With no PR-branch checkout, a title/body-only update_pr must still edit the PR
+// on the host (gh pr edit needs no checkout) instead of refusing — this is the
+// only lever to retitle/rewrite a description when no follow-up checkout exists
+// (e.g. the manager is dead and a PR comment is all there is).
+func TestUpdatePR_NoCheckoutEditsTitleBody(t *testing.T) {
+	o, st := newTestOrch(t)
+	f := forge.NewFake()
+	o.SetForge(f)
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "octo/repo", Number: 5, Branch: "b",
+		BaseBranch: "main", Status: model.PROpen, Title: "old", Summary: "old body"}
+	_ = st.CreatePR(pr)
+
+	got, err := o.UpdatePR(context.Background(), pr.ID, UpdateSpec{
+		SessionID: "x", Title: "new title", Body: "new body",
+	})
+	if err != nil {
+		t.Fatalf("metadata-only update_pr must succeed without a checkout: %v", err)
+	}
+	if len(f.Pushes) != 0 {
+		t.Fatalf("metadata-only update must not push, got %d pushes", len(f.Pushes))
+	}
+	if len(f.Edits) != 1 || f.Edits[0].Number != 5 || f.Edits[0].Title != "new title" || f.Edits[0].Body != "new body" {
+		t.Fatalf("expected one host edit of #5 with new title/body, got %+v", f.Edits)
+	}
+	if got.Title != "new title" || got.Summary != "new body" {
+		t.Fatalf("local mirror not updated: title=%q body=%q", got.Title, got.Summary)
+	}
+}

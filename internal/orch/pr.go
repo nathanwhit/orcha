@@ -37,6 +37,26 @@ func (o *Orchestrator) forgeForWorkspace(ws *model.Workspace) forge.Forge {
 	return o.forgeFor(tgt)
 }
 
+// forgeForPRHostOps returns a forge for host-only PR operations (gh pr edit /
+// comment) that need no checkout but do need the repo's gh auth. It prefers a
+// target-bound workspace (a worker host where gh is authed): the caller's own
+// workspace, else any workspace on the objective, else the orchestrator host.
+func (o *Orchestrator) forgeForPRHostOps(workspaceID string, pr *model.PullRequest) forge.Forge {
+	if workspaceID != "" {
+		if ws, err := o.st.GetWorkspace(workspaceID); err == nil && ws.TargetID != "" {
+			return o.forgeForWorkspace(ws)
+		}
+	}
+	if wss, err := o.st.ListWorkspacesByObjective(pr.ObjectiveID); err == nil {
+		for _, ws := range wss {
+			if ws.TargetID != "" {
+				return o.forgeForWorkspace(ws)
+			}
+		}
+	}
+	return o.forge
+}
+
 // prBranchWorkspace resolves the checkout a PR follow-up should push from. It
 // prefers an explicitly supplied workspace (the follow-up session's own checkout)
 // when that workspace actually tracks the PR's branch, and otherwise finds the
@@ -290,6 +310,37 @@ func (o *Orchestrator) UpdatePR(ctx context.Context, prID string, spec UpdateSpe
 		return pr, errors.New("orch: force push requires an explicit reason")
 	}
 
+	title := normalizePRTitle(spec.Title)
+
+	// Metadata-only update: a title/body (and optional comment) change with no
+	// PR-branch checkout to push from. Editing the PR's title/description on the
+	// host needs gh, not a checkout, so don't require one — this is the only lever
+	// to retitle or rewrite a description when no follow-up checkout exists (e.g.
+	// the manager is dead and a PR comment is all there is). force is meaningless
+	// here (nothing is pushed) and there is no branch contention, so no branch lock.
+	if fws == nil && (title != "" || spec.Body != "") {
+		hf := o.forgeForPRHostOps(spec.WorkspaceID, pr)
+		if err := hf.EditPR(ctx, pr.Repo, pr.Number, title, spec.Body); err != nil {
+			o.audit(pr.ObjectiveID, spec.SessionID, "pr_edit_failed", err.Error(), model.JSONMap{"pr_id": prID})
+			return pr, fmt.Errorf("orch: failed to edit PR #%d title/body: %w", pr.Number, err)
+		}
+		pr, _ = o.st.UpdatePR(prID, func(p *model.PullRequest) {
+			if title != "" {
+				p.Title = title
+			}
+			if spec.Body != "" {
+				p.Summary = spec.Body
+			}
+		})
+		if spec.Comment != "" {
+			_ = hf.Comment(ctx, pr.Repo, pr.Number, spec.Comment+"\n\n"+orchaBotMarker)
+			o.audit(pr.ObjectiveID, spec.SessionID, "pr_comment", "left comment", model.JSONMap{"pr_id": prID})
+		}
+		o.audit(pr.ObjectiveID, spec.SessionID, "pr_updated",
+			fmt.Sprintf("edited PR #%d title/body without a push", pr.Number), model.JSONMap{"pr_id": prID})
+		return pr, nil
+	}
+
 	// A push needs a checkout of the PR branch. Refuse rather than fall back to
 	// the orchestrator host's cwd (which would push the wrong branch, or nothing,
 	// silently). This is the case a manager-spawned follow-up with no PR-branch
@@ -329,7 +380,6 @@ func (o *Orchestrator) UpdatePR(ctx context.Context, prID string, spec UpdateSpe
 	// just landed the code changes — if it fails we surface it but don't pretend
 	// the (successful) push didn't happen, so the local mirror isn't updated for
 	// fields the host rejected.
-	title := normalizePRTitle(spec.Title)
 	if title != "" || spec.Body != "" {
 		if err := f.EditPR(ctx, pr.Repo, pr.Number, title, spec.Body); err != nil {
 			o.audit(pr.ObjectiveID, spec.SessionID, "pr_edit_failed", err.Error(), model.JSONMap{"pr_id": prID})
