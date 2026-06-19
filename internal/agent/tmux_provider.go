@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 	"sync"
@@ -592,18 +593,37 @@ func (p *TmuxProvider) CancelSession(h Handle) error {
 
 // Snapshot returns the current visible pane content for a live session, so the
 // UI can render the terminal panel. Implements Snapshotter.
-func (p *TmuxProvider) Snapshot(h Handle) (string, error) {
+func (p *TmuxProvider) Snapshot(h Handle) (Screen, error) {
 	th, ok := h.(*tmuxHandle)
 	if !ok {
-		return "", nil
+		return Screen{}, nil
 	}
 	p.mu.Lock()
 	sess := p.sessions[th.sessionID]
 	p.mu.Unlock()
 	if sess == nil {
-		return "", nil
+		return Screen{}, nil
 	}
-	return sess.ctrl.CapturePane(context.Background(), sess.name)
+	content, err := sess.ctrl.CapturePaneANSI(context.Background(), sess.name)
+	cols, rows := sess.ctrl.Size()
+	return Screen{Content: content, Cols: cols, Rows: rows}, err
+}
+
+// AttachPTY opens an interactive pty attached to the live session. Implements
+// Attacher. The returned process streams the tmux client's bytes both ways; the
+// caller owns it and must Close it when the viewer disconnects.
+func (p *TmuxProvider) AttachPTY(h Handle, cols, rows uint16) (exec.PTYProcess, error) {
+	th, ok := h.(*tmuxHandle)
+	if !ok {
+		return nil, fmt.Errorf("tmux: not a tmux handle")
+	}
+	p.mu.Lock()
+	sess := p.sessions[th.sessionID]
+	p.mu.Unlock()
+	if sess == nil {
+		return nil, fmt.Errorf("tmux: session %s not running", th.sessionID)
+	}
+	return sess.ctrl.AttachPTY(context.Background(), sess.name, cols, rows)
 }
 
 func (p *TmuxProvider) teardown(sessionID string) {

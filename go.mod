@@ -3,6 +3,8 @@ module github.com/nathanwhit/orcha
 go 1.26.3
 
 require (
+	github.com/coder/websocket v1.8.15
+	github.com/creack/pty v1.1.24
 	github.com/google/uuid v1.6.0
 	modernc.org/sqlite v1.52.0
 )

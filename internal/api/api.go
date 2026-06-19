@@ -47,6 +47,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/sessions/{id}/restart", s.restartSession)
 	mux.HandleFunc("GET /api/sessions/{id}/stream", s.streamSession)
 	mux.HandleFunc("GET /api/sessions/{id}/screen", s.sessionScreen)
+	mux.HandleFunc("GET /api/sessions/{id}/pty", s.sessionPTY)
 
 	mux.HandleFunc("GET /api/targets", s.listTargets)
 	mux.HandleFunc("POST /api/targets", s.createTarget)
@@ -76,6 +77,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/events", s.listEvents)
 
 	mux.HandleFunc("GET /api/health", s.health)
+	mux.HandleFunc("GET /api/whoami", s.whoami)
 
 	return mux
 }
@@ -440,7 +442,12 @@ func (s *Server) sessionScreen(w http.ResponseWriter, r *http.Request) {
 	if sess != nil {
 		attach, _ = sess.Metadata["tmux_attach"].(string)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"screen": screen, "attach": attach})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"screen": screen.Content,
+		"cols":   screen.Cols,
+		"rows":   screen.Rows,
+		"attach": attach,
+	})
 }
 
 func (s *Server) cancelSession(w http.ResponseWriter, r *http.Request) {

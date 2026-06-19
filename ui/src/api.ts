@@ -231,7 +231,16 @@ export function formatTokens(n: number): string {
 
 export interface Screen {
   screen: string;
+  cols: number;
+  rows: number;
   attach: string;
+}
+
+// Whoami reports the exe.dev-authenticated identity. Empty email means auth is
+// not enabled (local dev), so the UI omits the identity affordance.
+export interface Whoami {
+  email: string;
+  userId: string;
 }
 
 async function parse(r: Response) {

@@ -1025,7 +1025,7 @@ func TestOrch_SessionScreen_TmuxPanel(t *testing.T) {
 	deadline := time.Now().Add(6 * time.Second)
 	for time.Now().Before(deadline) {
 		screen, ok, err := o.SessionScreen(s.ID)
-		if err == nil && ok && strings.Contains(screen, "PANEL-VISIBLE") {
+		if err == nil && ok && strings.Contains(screen.Content, "PANEL-VISIBLE") {
 			// The attach command is also recorded on the session.
 			rs, _ := st.GetSession(s.ID)
 			if a, _ := rs.Metadata["tmux_attach"].(string); !strings.Contains(a, "tmux attach -t orcha-") {
@@ -1194,7 +1194,7 @@ func TestLive_RemoteTmux(t *testing.T) {
 	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {
 		screen, ok, _ := o.SessionScreen(s.ID)
-		if ok && strings.Contains(screen, "REMOTE-TMUX-OK") {
+		if ok && strings.Contains(screen.Content, "REMOTE-TMUX-OK") {
 			rs, _ := st.GetSession(s.ID)
 			t.Logf("remote tmux attach: %v", rs.Metadata["tmux_attach"])
 			return

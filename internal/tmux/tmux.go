@@ -124,6 +124,43 @@ func (c *Controller) CapturePane(ctx context.Context, name string) (string, erro
 	return stripSSHNoise(out), nil
 }
 
+// CapturePaneANSI is like CapturePane but preserves the pane's colors and text
+// attributes as escape sequences (capture-pane -e), so a terminal emulator in
+// the UI can render the screen faithfully. Kept separate from CapturePane:
+// callers that parse the pane as plain text (usage scraping, completion-marker
+// detection) must not see SGR noise.
+func (c *Controller) CapturePaneANSI(ctx context.Context, name string) (string, error) {
+	out, err := c.run(ctx, "capture-pane", "-p", "-e", "-t", name)
+	if err != nil {
+		return out, err
+	}
+	return stripSSHNoise(out), nil
+}
+
+// Size returns the virtual terminal size new sessions are created at. The UI
+// sizes its emulator to match so the captured screen renders 1:1.
+func (c *Controller) Size() (cols, rows int) { return c.cols, c.rows }
+
+// AttachPTY opens a live, interactive attach to the session over a pty at the
+// given size, for the web UI's terminal. It runs `tmux attach` through the same
+// executor as every other command, so it lands on the right host (local pty, or
+// ssh -tt for a remote target). Requires the executor to support ptys.
+func (c *Controller) AttachPTY(ctx context.Context, name string, cols, rows uint16) (exec.PTYProcess, error) {
+	starter, ok := c.ex.(exec.PTYStarter)
+	if !ok {
+		return nil, fmt.Errorf("tmux: executor %T does not support ptys", c.ex)
+	}
+	// Force TERM: the attach client renders against our pty, which the browser
+	// drives with an xterm-compatible emulator (xterm.js). Without this, tmux
+	// inherits whatever TERM the orchestrator has — often unset or "dumb" in CI
+	// and under systemd — and aborts with "terminal does not support clear".
+	return starter.StartPTY(ctx, exec.Command{
+		Name: c.bin,
+		Args: []string{"attach", "-t", name},
+		Env:  []string{"TERM=xterm-256color"},
+	}, cols, rows)
+}
+
 func stripSSHNoise(s string) string {
 	lines := strings.Split(s, "\n")
 	kept := lines[:0]

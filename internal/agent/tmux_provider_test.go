@@ -66,7 +66,7 @@ func TestTmuxProvider_InteractiveShellSession(t *testing.T) {
 	}
 	deadline := time.Now().Add(6 * time.Second)
 	for time.Now().Before(deadline) {
-		if screen, err := p.Snapshot(h); err == nil && strings.Contains(screen, "TMUX-PROVIDER-OK") {
+		if screen, err := p.Snapshot(h); err == nil && strings.Contains(screen.Content, "TMUX-PROVIDER-OK") {
 			goto steered
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -108,12 +108,79 @@ func TestTmuxProvider_Snapshot(t *testing.T) {
 	deadline := time.Now().Add(6 * time.Second)
 	for time.Now().Before(deadline) {
 		screen, err := snap.Snapshot(h)
-		if err == nil && strings.Contains(screen, "SNAPSHOT-CONTENT") {
+		if err == nil && strings.Contains(screen.Content, "SNAPSHOT-CONTENT") {
 			return
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
 	t.Fatal("snapshot never showed the typed content")
+}
+
+// AttachPTY opens a real interactive pty to a live session: bytes written to it
+// reach the pane's shell, and the pane's output streams back through the same
+// pty. This is the path the web UI's live terminal rides on.
+func TestTmuxProvider_AttachPTY(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	p := NewTmux(TmuxConfig{Kind: model.AgentOther})
+	h, events, err := p.StartSession(context.Background(), Spec{SessionID: "tmux-attach-1"})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	go func() {
+		for range events {
+		}
+	}() // drain
+	defer p.CancelSession(h)
+
+	var att Attacher = p
+	proc, err := att.AttachPTY(h, 80, 24)
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	defer proc.Close()
+
+	// Stream the pty into a channel so reads can't block past the deadline.
+	out := make(chan []byte, 64)
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, rerr := proc.Read(buf)
+			if n > 0 {
+				b := make([]byte, n)
+				copy(b, buf[:n])
+				out <- b
+			}
+			if rerr != nil {
+				close(out)
+				return
+			}
+		}
+	}()
+
+	// Give the attach a moment to settle, then type a command into the pty.
+	time.Sleep(500 * time.Millisecond)
+	if _, err := proc.Write([]byte("echo ATTACH-PTY-OK\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	var acc strings.Builder
+	deadline := time.After(6 * time.Second)
+	for {
+		select {
+		case b, ok := <-out:
+			if !ok {
+				t.Fatalf("pty closed before output appeared; got:\n%s", acc.String())
+			}
+			acc.Write(b)
+			if strings.Contains(acc.String(), "ATTACH-PTY-OK") {
+				return // saw the command's output echoed back through the pty
+			}
+		case <-deadline:
+			t.Fatalf("never saw typed output through the pty; got:\n%s", acc.String())
+		}
+	}
 }
 
 // An orchestrator restart must ADOPT a still-live tmux session — the TUI keeps
@@ -173,8 +240,8 @@ func TestTmuxProvider_ResumeAdoptsLiveSession(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("no status event after resume")
 	}
-	if screen, err := p2.Snapshot(h2); err != nil || !strings.Contains(screen, "ADOPT-MARKER") {
-		t.Fatalf("adopted screen lost prior context (err=%v):\n%s", err, screen)
+	if screen, err := p2.Snapshot(h2); err != nil || !strings.Contains(screen.Content, "ADOPT-MARKER") {
+		t.Fatalf("adopted screen lost prior context (err=%v):\n%s", err, screen.Content)
 	}
 
 	// The adopted session is fully driveable: steer it and cancel it.
@@ -196,7 +263,7 @@ func waitForScreen(t *testing.T, p *TmuxProvider, h Handle, want string) {
 	t.Helper()
 	deadline := time.Now().Add(6 * time.Second)
 	for time.Now().Before(deadline) {
-		if screen, err := p.Snapshot(h); err == nil && strings.Contains(screen, want) {
+		if screen, err := p.Snapshot(h); err == nil && strings.Contains(screen.Content, want) {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -482,7 +549,7 @@ func waitForScreenT(t *testing.T, p *TmuxProvider, h Handle, want string, timeou
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if screen, err := p.Snapshot(h); err == nil && strings.Contains(screen, want) {
+		if screen, err := p.Snapshot(h); err == nil && strings.Contains(screen.Content, want) {
 			return
 		}
 		time.Sleep(150 * time.Millisecond)
