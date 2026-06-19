@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/nathanwhit/orcha/internal/agent"
+	"github.com/nathanwhit/orcha/internal/exec"
 	"github.com/nathanwhit/orcha/internal/model"
 	"github.com/nathanwhit/orcha/internal/store"
 )
@@ -549,22 +550,44 @@ func (o *Orchestrator) persistSessionMeta(sessionID string, evMeta model.JSONMap
 // SessionScreen returns the current visible terminal screen for a live session
 // when its provider supports snapshots (e.g. tmux capture-pane). ok is false
 // when the session is not running or the provider has no screen.
-func (o *Orchestrator) SessionScreen(sessionID string) (screen string, ok bool, err error) {
+func (o *Orchestrator) SessionScreen(sessionID string) (screen agent.Screen, ok bool, err error) {
 	o.mu.Lock()
 	r := o.runs[sessionID]
 	o.mu.Unlock()
 	if r == nil {
-		return "", false, nil
+		return agent.Screen{}, false, nil
 	}
 	snap, isSnap := r.provider.(agent.Snapshotter)
 	if !isSnap {
-		return "", false, nil
+		return agent.Screen{}, false, nil
 	}
 	s, err := snap.Snapshot(r.handle)
 	if err != nil {
-		return "", true, err
+		return agent.Screen{}, true, err
 	}
 	return s, true, nil
+}
+
+// SessionAttach opens a live, interactive pty attached to a running session so
+// the UI can drive it like a real terminal. ok is false when the session is not
+// running or its provider has no attach capability. The caller owns the returned
+// process and must Close it when the viewer disconnects.
+func (o *Orchestrator) SessionAttach(sessionID string, cols, rows uint16) (exec.PTYProcess, bool, error) {
+	o.mu.Lock()
+	r := o.runs[sessionID]
+	o.mu.Unlock()
+	if r == nil {
+		return nil, false, nil
+	}
+	att, isAtt := r.provider.(agent.Attacher)
+	if !isAtt {
+		return nil, false, nil
+	}
+	p, err := att.AttachPTY(r.handle, cols, rows)
+	if err != nil {
+		return nil, true, err
+	}
+	return p, true, nil
 }
 
 func msgKind(k agent.EventKind) model.MessageKind {

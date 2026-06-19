@@ -274,6 +274,13 @@ function NavItems({
 function HealthFooter() {
   const health = usePoll(() => api.get<api.Health>("/api/health"), 10000);
   const [restarting, setRestarting] = useState(false);
+  const [me, setMe] = useState<api.Whoami | null>(null);
+  useEffect(() => {
+    void api
+      .get<api.Whoami>("/api/whoami")
+      .then(setMe)
+      .catch(() => {});
+  }, []);
   const startedRef = useRef<string | undefined>(undefined);
   const started = health.data?.started;
   // A new `started` timestamp means the restarted process is up.
@@ -286,6 +293,24 @@ function HealthFooter() {
   const ok = health.data?.status === "ok";
   return (
     <div className="border-t border-edge px-3 py-2">
+      {me?.email && (
+        <div className="mb-1 flex items-center justify-between gap-2 px-2 text-[11px] text-faint">
+          <span className="truncate" title={me.email}>
+            {me.email}
+          </span>
+          <button
+            className="shrink-0 text-mute hover:text-fg"
+            title="Sign out of exe.dev"
+            onClick={() => {
+              void fetch("/__exe.dev/logout", { method: "POST" }).finally(() => {
+                window.location.assign("/");
+              });
+            }}
+          >
+            Logout
+          </button>
+        </div>
+      )}
       <div className="flex items-center justify-between">
         <p
           className="flex items-center gap-2 px-2 text-[11px] text-faint"

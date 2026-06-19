@@ -101,11 +101,27 @@ type Provider interface {
 	ResumeSession(ctx context.Context, sessionID string, spec Spec) (Handle, <-chan Event, error)
 }
 
+// Screen is a snapshot of a session's terminal: the visible pane content,
+// carrying ANSI color/attribute escapes, plus the pane dimensions so the UI can
+// size its emulator to match and render the screen 1:1.
+type Screen struct {
+	Content string `json:"screen"`
+	Cols    int    `json:"cols"`
+	Rows    int    `json:"rows"`
+}
+
 // Snapshotter is an optional provider capability: return the current visible
 // screen for a session (e.g. a tmux capture-pane), so the UI can render the live
 // terminal panel.
 type Snapshotter interface {
-	Snapshot(h Handle) (string, error)
+	Snapshot(h Handle) (Screen, error)
+}
+
+// Attacher is an optional provider capability: open a live, interactive pty
+// attached to a running session, so the UI can drive it like a real terminal
+// (keystrokes, signals, full-screen TUIs) rather than just mirror it.
+type Attacher interface {
+	AttachPTY(h Handle, cols, rows uint16) (exec.PTYProcess, error)
 }
 
 // workDirFor returns the directory a session's process runs in: its workspace
