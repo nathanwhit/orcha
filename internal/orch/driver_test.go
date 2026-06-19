@@ -88,6 +88,53 @@ func TestScheduler_RespectsMaxConcurrent(t *testing.T) {
 	_ = o.Cancel(b.ID, false)
 }
 
+// Managers must not be gated by the worker concurrency cap: they are long-lived
+// supervisors that sit idle most of their life, and gating them is what made a
+// new manager queue for minutes behind running workers on an idle fleet. Workers
+// still respect the cap.
+func TestScheduler_ManagersExemptFromWorkerCap(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 8)
+	o.RegisterProvider(blockingFake(model.AgentClaude))
+	sch := NewScheduler(o, time.Second, 1) // worker cap of 1
+
+	newManager := func() *model.Session {
+		m := &model.Session{Role: model.RoleManager, Agent: model.AgentClaude,
+			Mode: model.ModeInteractive, Status: model.SessionQueued}
+		if err := st.CreateSession(m); err != nil {
+			t.Fatalf("create manager: %v", err)
+		}
+		return m
+	}
+	m1, m2 := newManager(), newManager()
+	w := queuedSession(t, st, "") // one worker
+
+	// Worker cap is 1, yet both managers AND the one worker start this tick.
+	started, _ := sch.Tick(context.Background())
+	if started != 3 {
+		t.Fatalf("started=%d, want 3 (1 worker + 2 managers, managers exempt)", started)
+	}
+	for _, s := range []*model.Session{m1, m2, w} {
+		got, _ := st.GetSession(s.ID)
+		if got.Status != model.SessionRunning {
+			t.Fatalf("%s (%s) status=%s, want running", s.ID, got.Role, got.Status)
+		}
+	}
+
+	// The worker cap is still enforced: a second worker waits behind the one
+	// already running (managers don't count toward the budget).
+	w2 := queuedSession(t, st, "")
+	if started, _ := sch.Tick(context.Background()); started != 0 {
+		t.Fatalf("second worker should wait on the worker cap, started=%d", started)
+	}
+	if got, _ := st.GetSession(w2.ID); got.Status != model.SessionQueued {
+		t.Fatalf("second worker status=%s, want queued", got.Status)
+	}
+	for _, s := range []*model.Session{m1, m2, w, w2} {
+		_ = o.Cancel(s.ID, false)
+	}
+}
+
 func TestScheduler_RespectsTargetCapacity(t *testing.T) {
 	o, st := newTestOrch(t)
 	addTarget(t, st, "local", model.TargetLocal, 1) // single slot

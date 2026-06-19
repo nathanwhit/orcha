@@ -20,14 +20,15 @@ type Scheduler struct {
 }
 
 // NewScheduler builds a scheduler. interval is the idle tick period;
-// maxConcurrent caps simultaneously active (starting+running) sessions across
-// all targets (target capacity still applies per target).
+// maxConcurrent caps simultaneously active (starting+running) WORKER sessions
+// across all targets — managers are exempt (see Tick). Per-target capacity still
+// applies and counts everything, managers included.
 func NewScheduler(o *Orchestrator, interval time.Duration, maxConcurrent int) *Scheduler {
 	if interval <= 0 {
 		interval = 2 * time.Second
 	}
 	if maxConcurrent <= 0 {
-		maxConcurrent = 8
+		maxConcurrent = 32
 	}
 	return &Scheduler{
 		o:             o,
@@ -81,14 +82,17 @@ func (s *Scheduler) Run(ctx context.Context) {
 // It is exported so tests (and Wake-driven callers) can drive scheduling
 // deterministically.
 func (s *Scheduler) Tick(ctx context.Context) (int, error) {
-	active, err := s.o.st.CountSessionsByStatuses(model.SessionStarting, model.SessionRunning)
+	// The global cap bounds concurrent WORKERS only. Interactive managers are
+	// excluded from both the running count and the budget gate below: they are
+	// long-lived per-objective supervisors, idle most of their life, so gating
+	// them behind the worker cap is exactly what made a new manager queue for
+	// minutes on an otherwise idle fleet. Managers stay bounded by per-target
+	// capacity and the per-objective respawn limit.
+	active, err := s.o.st.CountActiveWorkerSessions()
 	if err != nil {
 		return 0, err
 	}
 	budget := s.maxConcurrent - active
-	if budget <= 0 {
-		return 0, nil
-	}
 
 	// queued + waiting_capacity are the runnable-but-not-yet-running states.
 	candidates, err := s.o.st.ListSessionsByStatuses(model.SessionQueued, model.SessionWaitingCapacity)
@@ -98,8 +102,11 @@ func (s *Scheduler) Tick(ctx context.Context) (int, error) {
 
 	started := 0
 	for _, sess := range candidates {
-		if budget <= 0 {
-			break
+		isManager := sess.Role == model.RoleManager
+		// Workers consume the budget; managers bypass it. Don't break — a worker
+		// past the cap is skipped, but a later manager must still get a chance.
+		if !isManager && budget <= 0 {
+			continue
 		}
 		// Dependency gating.
 		ready, blocked := s.o.dependencyState(sess)
@@ -117,7 +124,9 @@ func (s *Scheduler) Tick(ctx context.Context) (int, error) {
 		_, err := s.o.StartRun(ctx, sess.ID)
 		if err == nil {
 			started++
-			budget--
+			if !isManager {
+				budget--
+			}
 			continue
 		}
 		// StartRun already recorded the appropriate state for capacity/lock
