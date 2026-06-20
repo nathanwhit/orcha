@@ -339,10 +339,16 @@ function TerminalPanel({ id, active }: { id: string; active: boolean }) {
     // navigation, not scrolling — so claude shows "scroll wheel is sending arrow
     // keys". Send PgUp/PgDn instead, which pagers and claude actually scroll on.
     // Leave the normal buffer (real scrollback) and any mouse-capturing app alone.
+    //
+    // Crucially we must preventDefault ourselves: when a custom wheel handler
+    // returns false, xterm bails *before* its own cancel()/preventDefault, so the
+    // native wheel event survives and the browser scrolls the page instead. The
+    // wheel listener is registered passive:false, so cancelling here is allowed.
     let wheelAcc = 0;
     term.attachCustomWheelEventHandler((e) => {
       if (term.modes.mouseTrackingMode !== "none") return true; // app owns the mouse
       if (term.buffer.active.type !== "alternate") return true; // normal: scrollback
+      e.preventDefault(); // stop the page from scrolling underneath us
       const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? term.rows * 16 : 1;
       wheelAcc += e.deltaY * unit;
       const step = 100; // ~one mouse notch per page key
