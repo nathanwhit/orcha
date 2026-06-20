@@ -162,7 +162,7 @@ func (o *Orchestrator) PublishPR(ctx context.Context, sessionID string, spec Pub
 			if err := o.stashPendingPublish(sess.ID, spec); err != nil {
 				return nil, err
 			}
-			rv, err := o.spawnReviewer(ctx, sess, diff, fp)
+			rv, err := o.spawnReviewer(ctx, sess, repo, diff, fp)
 			if err != nil {
 				return nil, fmt.Errorf("%w: could not start the review: %v", ErrUnsafePublish, err)
 			}

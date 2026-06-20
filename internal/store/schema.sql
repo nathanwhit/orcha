@@ -219,6 +219,7 @@ CREATE TABLE IF NOT EXISTS projects (
     clone_url   TEXT NOT NULL DEFAULT '',
     base_branch TEXT NOT NULL DEFAULT '',
     review_gate INTEGER NOT NULL DEFAULT 0, -- adversarial review gate on publish_pr
+    review_guidance TEXT NOT NULL DEFAULT '', -- project-specific guidance for the reviewer
     created_at  TIMESTAMP NOT NULL,
     updated_at  TIMESTAMP NOT NULL
 );

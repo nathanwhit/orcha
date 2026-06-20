@@ -42,6 +42,19 @@ func (o *Orchestrator) reviewGateEnabled(repo string) bool {
 	return p.ReviewGate
 }
 
+// reviewGuidanceFor returns the project's free-text reviewer guidance for repo,
+// or "" when there is no project or no guidance set.
+func (o *Orchestrator) reviewGuidanceFor(repo string) string {
+	if repo == "" {
+		return ""
+	}
+	p, err := o.st.GetProjectByRepo(repo)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(p.ReviewGuidance)
+}
+
 // reviewBound reports whether a reviewer session was spawned by the review gate
 // (it carries the reviewed session id). Only these get the submit_review surface;
 // a reviewer a manager spawns by hand keeps the ordinary worker surface
@@ -161,7 +174,7 @@ func firstLine(s string) string {
 // ensureWorkspace, since RoleReviewer needs an isolated workspace) and the diff
 // inlined into its goal. It carries the reviewed session id and the diff
 // fingerprint in metadata so submit_review and the gate can correlate the verdict.
-func (o *Orchestrator) spawnReviewer(ctx context.Context, impl *model.Session, diff, fp string) (*model.Session, error) {
+func (o *Orchestrator) spawnReviewer(ctx context.Context, impl *model.Session, repo, diff, fp string) (*model.Session, error) {
 	reviewer := o.otherProvider(impl.Agent)
 	meta := model.JSONMap{
 		"reviews_session":    impl.ID,
@@ -174,16 +187,23 @@ func (o *Orchestrator) spawnReviewer(ctx context.Context, impl *model.Session, d
 			meta[k] = v
 		}
 	}
+	// Project-specific guidance, if the maintainers set any, is given its own
+	// clearly-labelled section so the reviewer weights it heavily.
+	guidanceSection := ""
+	if g := o.reviewGuidanceFor(repo); g != "" {
+		guidanceSection = fmt.Sprintf("Project-specific review guidance from the maintainers — weight this heavily:\n%s\n\n", g)
+	}
 	goal := fmt.Sprintf(
 		"Adversarially review the change below before it ships as a PR.\n\n"+
 			"The implementer was given this task:\n%s\n\n"+
 			"The change to review (diff vs base):\n%s\n\n"+
+			"%s"+
 			"You have your own fresh checkout to read the code and run the build/tests. "+
 			"Find real problems — bugs, regressions, missed requirements, broken or missing "+
 			"tests, security issues — do not rubber-stamp. When done, call submit_review with "+
 			"verdict %q only if it is genuinely ready to ship, or %q with specific, actionable "+
 			"findings (file:line). That tool call is how you finish your review.",
-		strings.TrimSpace(impl.Goal), strings.TrimSpace(diff), reviewApprove, reviewRequestChanges)
+		strings.TrimSpace(impl.Goal), strings.TrimSpace(diff), guidanceSection, reviewApprove, reviewRequestChanges)
 
 	spec := SpawnSpec{
 		Role:     model.RoleReviewer,

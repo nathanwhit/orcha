@@ -191,6 +191,39 @@ func TestReviewMCPSurface_Tools(t *testing.T) {
 	}
 }
 
+// Project-specific review guidance is woven into the spawned reviewer's prompt.
+func TestReviewGate_InjectsProjectGuidance(t *testing.T) {
+	o, obj, _, impl, _ := reviewGateFixture(t, true)
+	p, _ := o.st.GetProjectByRepo("octo/repo")
+	p.ReviewGuidance = "SCRUTINIZE the tunnel reconnect logic"
+	if err := o.st.UpdateProject(p); err != nil {
+		t.Fatalf("update project: %v", err)
+	}
+
+	if _, err := o.PublishPR(context.Background(), impl.ID, PublishSpec{Title: "t", Body: "b"}); err == nil {
+		t.Fatal("first publish should be held")
+	}
+	rv := reviewersFor(o, obj.ID)[0]
+	if !strings.Contains(rv.Goal, "SCRUTINIZE the tunnel reconnect logic") {
+		t.Fatalf("reviewer goal should include the project guidance, got:\n%s", rv.Goal)
+	}
+	if !strings.Contains(rv.Goal, "Project-specific review guidance") {
+		t.Fatalf("reviewer goal should label the guidance section, got:\n%s", rv.Goal)
+	}
+}
+
+// With no guidance set, the reviewer prompt has no guidance section.
+func TestReviewGate_NoGuidanceNoSection(t *testing.T) {
+	o, obj, _, impl, _ := reviewGateFixture(t, true)
+	if _, err := o.PublishPR(context.Background(), impl.ID, PublishSpec{Title: "t", Body: "b"}); err == nil {
+		t.Fatal("first publish should be held")
+	}
+	rv := reviewersFor(o, obj.ID)[0]
+	if strings.Contains(rv.Goal, "Project-specific review guidance") {
+		t.Fatalf("reviewer goal should have no guidance section, got:\n%s", rv.Goal)
+	}
+}
+
 // A gate-spawned reviewer (bound to a reviewed session) gets the /rmcp/
 // submit_review surface; a reviewer a manager spawned by hand keeps the ordinary
 // worker /wmcp/ surface (report_result).
@@ -242,5 +275,33 @@ func TestProjectReviewGate_Roundtrip(t *testing.T) {
 	}
 	if p2, _ := st.GetProjectByRepo("octo/repo"); p2.ReviewGate {
 		t.Fatal("toggling the gate off should clear review_gate")
+	}
+}
+
+// review_guidance round-trips through the store: it persists, survives a
+// "remember the repo" re-upsert, and can be edited via the editing path.
+func TestProjectReviewGuidance_Roundtrip(t *testing.T) {
+	_, st := newTestOrch(t)
+	if err := st.UpsertProject(&model.Project{Repo: "octo/repo", ReviewGuidance: "focus on tests"}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if p, _ := st.GetProjectByRepo("octo/repo"); p.ReviewGuidance != "focus on tests" {
+		t.Fatalf("guidance should persist, got %q", p.ReviewGuidance)
+	}
+	// Re-registering the repo (the empty-preserving upsert) keeps the guidance.
+	if err := st.UpsertProject(&model.Project{Repo: "octo/repo"}); err != nil {
+		t.Fatalf("re-upsert: %v", err)
+	}
+	if p, _ := st.GetProjectByRepo("octo/repo"); p.ReviewGuidance != "focus on tests" {
+		t.Fatalf("re-registering must not clear guidance, got %q", p.ReviewGuidance)
+	}
+	// The editing path can change it.
+	p, _ := st.GetProjectByRepo("octo/repo")
+	p.ReviewGuidance = "now focus on perf"
+	if err := st.UpdateProject(p); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if p2, _ := st.GetProjectByRepo("octo/repo"); p2.ReviewGuidance != "now focus on perf" {
+		t.Fatalf("editing should update guidance, got %q", p2.ReviewGuidance)
 	}
 }

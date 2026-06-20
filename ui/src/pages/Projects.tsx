@@ -11,6 +11,7 @@ import {
   Field,
   IconButton,
   Modal,
+  TextArea,
   TextInput,
   TimeAgo,
 } from "../ui";
@@ -137,6 +138,7 @@ function GateToggle({
         push_repo: project.push_repo ?? "",
         base_branch: project.base_branch ?? "",
         review_gate: !on,
+        review_guidance: project.review_guidance ?? "", // full update — preserve it
       });
       onChanged();
     } finally {
@@ -179,6 +181,9 @@ function ProjectModal({
   const [pushRepo, setPushRepo] = useState(project?.push_repo ?? "");
   const [base, setBase] = useState(project?.base_branch ?? "");
   const [reviewGate, setReviewGate] = useState(project?.review_gate ?? false);
+  const [reviewGuidance, setReviewGuidance] = useState(
+    project?.review_guidance ?? "",
+  );
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -194,6 +199,7 @@ function ProjectModal({
         push_repo: pushRepo,
         base_branch: base,
         review_gate: reviewGate,
+        review_guidance: reviewGuidance,
       };
       if (editing) {
         await api.put(`/api/projects/${project.id}`, body);
@@ -265,6 +271,19 @@ function ProjectModal({
             </span>
           </span>
         </label>
+        {reviewGate && (
+          <Field
+            label="Review guidance"
+            hint="optional — given to the reviewer"
+          >
+            <TextArea
+              value={reviewGuidance}
+              onChange={(e) => setReviewGuidance(e.target.value)}
+              rows={4}
+              placeholder="Project-specific things the reviewer should focus on, e.g. “scrutinise error handling in the tunnel code; never approve scheduler changes without tests”."
+            />
+          </Field>
+        )}
         {err && <p className="text-xs text-rose-400">{err}</p>}
         <div className="flex justify-end gap-2 pt-1">
           <Button onClick={onClose}>Cancel</Button>

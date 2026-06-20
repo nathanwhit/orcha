@@ -97,7 +97,10 @@ func (s *Store) migrate() error {
 	if err := s.ensureColumn("sessions", "handoff_summary", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
-	return s.ensureColumn("projects", "review_gate", "INTEGER NOT NULL DEFAULT 0")
+	if err := s.ensureColumn("projects", "review_gate", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	return s.ensureColumn("projects", "review_guidance", "TEXT NOT NULL DEFAULT ''")
 }
 
 // ensureColumn adds a column to a table if it is not already present. Existing

@@ -178,6 +178,7 @@ export interface Project {
   clone_url?: string;
   base_branch?: string;
   review_gate?: boolean;
+  review_guidance?: string;
   created_at: string;
   updated_at: string;
 }
