@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/nathanwhit/orcha/internal/model"
 )
@@ -156,6 +157,39 @@ func (s *Store) MarkTargetSeen(id string, status model.TargetStatus) error {
 	_, err := s.db.Exec(`UPDATE targets SET status = ?, last_seen_at = ? WHERE id = ?`,
 		string(status), s.now(), id)
 	return err
+}
+
+// SetTargetLoad records a target's latest sampled load into its metadata
+// (load_per_core, mem_available_mb, load_probed_at) and stamps last_seen_at,
+// preserving any other metadata keys. Used by the load-aware scheduler's probe.
+func (s *Store) SetTargetLoad(id string, loadPerCore float64, memAvailMB int, at time.Time) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var md model.JSONMap
+	err = tx.QueryRow(`SELECT metadata FROM targets WHERE id = ?`, id).Scan(&md)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if md == nil {
+		md = model.JSONMap{}
+	}
+	md["load_per_core"] = loadPerCore
+	md["mem_available_mb"] = memAvailMB
+	md["load_probed_at"] = at.UTC().Format(time.RFC3339)
+
+	if _, err := tx.Exec(
+		`UPDATE targets SET metadata = ?, last_seen_at = ? WHERE id = ?`, md, at, id,
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ClaimTargetSlot atomically reserves one session slot on a target. It enforces
