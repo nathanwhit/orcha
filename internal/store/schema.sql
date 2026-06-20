@@ -218,6 +218,7 @@ CREATE TABLE IF NOT EXISTS projects (
     push_repo   TEXT NOT NULL DEFAULT '', -- fork pushes go to; '' = repo itself
     clone_url   TEXT NOT NULL DEFAULT '',
     base_branch TEXT NOT NULL DEFAULT '',
+    review_gate INTEGER NOT NULL DEFAULT 0, -- adversarial review gate on publish_pr
     created_at  TIMESTAMP NOT NULL,
     updated_at  TIMESTAMP NOT NULL
 );

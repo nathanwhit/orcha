@@ -246,6 +246,9 @@ func main() {
 	// Follow-up tool surface (MCP): the PR-response tools (update_pr/comment_pr/…)
 	// plus report_result, but not the manager's spawn/publish/mark-done tools.
 	mux.Handle("/fmcp/", http.StripPrefix("/fmcp", o.FollowupMCPHandler()))
+	// Reviewer tool surface (MCP): submit_review (+create_note/ask_user) for the
+	// adversarial review gate. Reviewers connect to /rmcp/<sessionID>.
+	mux.Handle("/rmcp/", http.StripPrefix("/rmcp", o.ReviewMCPHandler()))
 	// Operator tool surface (MCP): drive orcha from the top — create/list/inspect
 	// objectives, answer questions, steer a manager. Not session-bound; an outside
 	// agent (e.g. reached over an SSH tunnel) connects to /omcp/<anything>.

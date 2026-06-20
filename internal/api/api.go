@@ -237,6 +237,7 @@ type upsertProjectReq struct {
 	PushRepo   string `json:"push_repo"`
 	BaseBranch string `json:"base_branch"`
 	CloneURL   string `json:"clone_url"`
+	ReviewGate bool   `json:"review_gate"`
 }
 
 func (s *Server) upsertProject(w http.ResponseWriter, r *http.Request) {
@@ -251,7 +252,7 @@ func (s *Server) upsertProject(w http.ResponseWriter, r *http.Request) {
 	}
 	p := &model.Project{
 		Name: req.Name, Repo: req.Repo, PushRepo: req.PushRepo,
-		BaseBranch: req.BaseBranch, CloneURL: req.CloneURL,
+		BaseBranch: req.BaseBranch, CloneURL: req.CloneURL, ReviewGate: req.ReviewGate,
 	}
 	if err := s.st.UpsertProject(p); err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
@@ -276,7 +277,7 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request) {
 	}
 	p := &model.Project{
 		ID: r.PathValue("id"), Name: req.Name, Repo: req.Repo, PushRepo: req.PushRepo,
-		BaseBranch: req.BaseBranch, CloneURL: req.CloneURL,
+		BaseBranch: req.BaseBranch, CloneURL: req.CloneURL, ReviewGate: req.ReviewGate,
 	}
 	if err := s.st.UpdateProject(p); err != nil {
 		writeErr(w, httpStatusFor(err), err)

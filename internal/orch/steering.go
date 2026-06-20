@@ -148,6 +148,22 @@ func (o *Orchestrator) buildSpec(sess *model.Session, ws *model.Workspace, tgt *
 		if spec.Prompt != "" {
 			spec.Prompt = followupSystemPreamble + o.scratchNote(sess, tgt) + completionInstruction + "\n\n" + spec.Prompt
 		}
+	// Adversarial reviewer spawned by the review gate (bound to a reviewed
+	// session): it gets the dedicated review surface (submit_review/create_note/
+	// ask_user) — not the worker surface (no report_result) or any mutation tools.
+	// Must precede the isCodingWorker case below, which a reviewer also satisfies.
+	// A reviewer a manager spawned by hand has no binding and falls through to the
+	// ordinary worker surface (report_result) instead.
+	case sess.Role == model.RoleReviewer && reviewBound(sess):
+		if o.cfg.ManagerMCPBaseURL != "" {
+			spec.MCP = map[string]string{"orcha": o.mcpBaseFor(tgt) + "/rmcp/" + sess.ID}
+			spec.AllowedTools = []string{"mcp__orcha"}
+		}
+		spec.PermissionMode = o.cfg.WorkerPermissionMode
+		spec.OneShot = true
+		if spec.Prompt != "" {
+			spec.Prompt = reviewerSystemPreamble + repoMemoryNote + o.scratchNote(sess, tgt) + completionInstruction + "\n\n" + spec.Prompt
+		}
 	// Other coding workers run one-shot in a checkout and do not publish. They get
 	// the small worker tool surface (report_result/create_note/ask_user) so they
 	// choose what to hand back to the manager instead of leaving it to a pane scrape.
@@ -253,6 +269,20 @@ is what the manager sees, so do not rely on your scrollback surviving. Set
 include_diff: true to attach your diff. For a long write-up, create_note it and
 pass its id in report_result's notes. Call report_result BEFORE printing the done
 marker.`
+
+// reviewerSystemPreamble orients an adversarial reviewer. Its task — the change
+// to review, inlined as a diff — is in the goal; this sets the skeptical stance
+// and points it at submit_review as the only way to finish.
+const reviewerSystemPreamble = `You are an ADVERSARIAL code reviewer on an engineering
+team, running in your own fresh checkout of the repository. Another agent wrote the
+change described in your task; your job is to find real problems before it ships — not
+to rubber-stamp it. Read the diff and the surrounding code, and run the build/tests if
+that helps you judge correctness. Look for bugs, regressions, missed requirements,
+broken or missing tests, and security issues. Do NOT edit the code, push, or open a PR.
+When you are done, call the submit_review tool (one of your orcha MCP tools, named
+mcp__orcha*) with your verdict — "approve" only if it is genuinely ready to ship, or
+"request_changes" with specific, actionable findings (file:line). That tool call IS your
+handoff; call it before printing the done marker.`
 
 // managerSystemPreamble orients the manager agent toward the tool surface and
 // the operating rules from the spec.

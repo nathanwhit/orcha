@@ -42,9 +42,9 @@ func (s *Store) UpsertProject(p *model.Project) error {
 	}
 	p.CreatedAt, p.UpdatedAt = now, now
 	_, err := s.db.Exec(
-		`INSERT INTO projects(id, name, repo, push_repo, clone_url, base_branch, created_at, updated_at)
-		 VALUES(?,?,?,?,?,?,?,?)`,
-		p.ID, p.Name, p.Repo, p.PushRepo, p.CloneURL, p.BaseBranch, now, now)
+		`INSERT INTO projects(id, name, repo, push_repo, clone_url, base_branch, review_gate, created_at, updated_at)
+		 VALUES(?,?,?,?,?,?,?,?,?)`,
+		p.ID, p.Name, p.Repo, p.PushRepo, p.CloneURL, p.BaseBranch, b2i(p.ReviewGate), now, now)
 	return err
 }
 
@@ -61,8 +61,8 @@ func (s *Store) UpdateProject(p *model.Project) error {
 	}
 	p.UpdatedAt = s.Now()
 	res, err := s.db.Exec(
-		`UPDATE projects SET name=?, repo=?, push_repo=?, clone_url=?, base_branch=?, updated_at=? WHERE id=?`,
-		p.Name, p.Repo, p.PushRepo, p.CloneURL, p.BaseBranch, p.UpdatedAt, p.ID)
+		`UPDATE projects SET name=?, repo=?, push_repo=?, clone_url=?, base_branch=?, review_gate=?, updated_at=? WHERE id=?`,
+		p.Name, p.Repo, p.PushRepo, p.CloneURL, p.BaseBranch, b2i(p.ReviewGate), p.UpdatedAt, p.ID)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return ErrConflict
@@ -79,18 +79,28 @@ func (s *Store) UpdateProject(p *model.Project) error {
 	return nil
 }
 
-var projectCols = `id, name, repo, push_repo, clone_url, base_branch, created_at, updated_at`
+var projectCols = `id, name, repo, push_repo, clone_url, base_branch, review_gate, created_at, updated_at`
 
 func scanProject(r rowScanner) (*model.Project, error) {
 	var p model.Project
-	err := r.Scan(&p.ID, &p.Name, &p.Repo, &p.PushRepo, &p.CloneURL, &p.BaseBranch, &p.CreatedAt, &p.UpdatedAt)
+	var reviewGate int64 // SQLite stores the bool as 0/1; scan via int then convert
+	err := r.Scan(&p.ID, &p.Name, &p.Repo, &p.PushRepo, &p.CloneURL, &p.BaseBranch, &reviewGate, &p.CreatedAt, &p.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
+	p.ReviewGate = reviewGate != 0
 	return &p, nil
+}
+
+// b2i maps a bool to the 0/1 SQLite stores for it.
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // GetProject fetches a project by id.

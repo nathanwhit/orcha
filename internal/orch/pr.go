@@ -137,6 +137,39 @@ func (o *Orchestrator) PublishPR(ctx context.Context, sessionID string, spec Pub
 	// not the orchestrator host — otherwise the checkout path does not exist.
 	f := o.forgeForWorkspace(ws)
 
+	// --- Adversarial review gate (opt-in per project) ---
+	// When the project enables it, a PR may not open until a cross-provider
+	// reviewer has approved THIS exact diff. The first publish attempt stashes the
+	// intent, spawns the reviewer, and is held; submit_review's approve replays
+	// PublishPR, which then finds a matching verdict here and falls through to open.
+	if o.reviewGateEnabled(repo) {
+		diff, derr := f.Diff(ctx, ws.Path)
+		if derr != nil {
+			return nil, derr
+		}
+		fp := diffFingerprint(diff)
+		verdict, _ := sess.Metadata["review_verdict"].(string)
+		vfp, _ := sess.Metadata["review_fingerprint"].(string)
+		switch {
+		case verdict == reviewApprove && vfp == fp:
+			// Approved for this exact diff — fall through to the publish path.
+		case verdict == reviewRequestChanges && vfp == fp:
+			findings, _ := sess.Metadata["review_findings"].(string)
+			return nil, fmt.Errorf("%w: review requested changes — %s", ErrUnsafePublish, firstLine(findings))
+		case o.activeReviewerFor(sess.ObjectiveID, sess.ID, fp) != nil:
+			return nil, fmt.Errorf("%w: a review of this change is already in progress; you'll be notified with the verdict", ErrUnsafePublish)
+		default:
+			if err := o.stashPendingPublish(sess.ID, spec); err != nil {
+				return nil, err
+			}
+			rv, err := o.spawnReviewer(ctx, sess, diff, fp)
+			if err != nil {
+				return nil, fmt.Errorf("%w: could not start the review: %v", ErrUnsafePublish, err)
+			}
+			return nil, fmt.Errorf("%w: opened an adversarial review (session %s) of this change on a second provider; the PR will open automatically once it approves", ErrUnsafePublish, rv.ID)
+		}
+	}
+
 	// --- Mechanical safety checks (no DB transaction held across these) ---
 	if ok, err := f.RepoExists(ctx, repo); err != nil {
 		return nil, err

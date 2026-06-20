@@ -426,12 +426,16 @@ type Event struct {
 // the standard fork workflow (base off upstream, push to fork, PR against
 // upstream). Empty PushRepo means pushes go to Repo itself.
 type Project struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	Repo       string    `json:"repo"`
-	PushRepo   string    `json:"push_repo,omitempty"`
-	CloneURL   string    `json:"clone_url,omitempty"`
-	BaseBranch string    `json:"base_branch,omitempty"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Repo       string `json:"repo"`
+	PushRepo   string `json:"push_repo,omitempty"`
+	CloneURL   string `json:"clone_url,omitempty"`
+	BaseBranch string `json:"base_branch,omitempty"`
+	// ReviewGate, when true, makes publish_pr on this repo require an adversarial
+	// (cross-provider) reviewer to approve the exact diff before the PR opens. It
+	// is opt-in per project and toggled from the dashboard. Default false.
+	ReviewGate bool      `json:"review_gate"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
 }

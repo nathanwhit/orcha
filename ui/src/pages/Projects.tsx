@@ -67,6 +67,7 @@ export function ProjectsPage() {
                     <Chip>base {p.base_branch || "main"}</Chip>
                   </p>
                 </div>
+                <GateToggle project={p} onChanged={projects.reload} />
                 <TimeAgo iso={p.updated_at} />
                 <IconButton
                   name="edit"
@@ -115,6 +116,51 @@ export function ProjectsPage() {
   );
 }
 
+// GateToggle flips a project's adversarial review gate in place (a full PUT, so
+// it sends every editable field — updateProject clears anything omitted).
+function GateToggle({
+  project,
+  onChanged,
+}: {
+  project: api.Project;
+  onChanged: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const on = !!project.review_gate;
+  const toggle = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await api.put(`/api/projects/${project.id}`, {
+        name: project.name,
+        repo: project.repo,
+        push_repo: project.push_repo ?? "",
+        base_branch: project.base_branch ?? "",
+        review_gate: !on,
+      });
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <button
+      type="button"
+      onClick={toggle}
+      disabled={busy}
+      title="Require an adversarial cross-provider review to approve the diff before a PR opens"
+      className={
+        "inline-flex items-center rounded-md px-1.5 py-0.5 text-[11px] ring-1 ring-inset transition " +
+        (on
+          ? "bg-emerald-500/15 text-emerald-300 ring-emerald-500/30"
+          : "bg-raised text-faint ring-edge hover:text-mute")
+      }
+    >
+      review gate {on ? "on" : "off"}
+    </button>
+  );
+}
+
 // ProjectModal both adds and edits a project. With no `project` it POSTs a new
 // one ("Add project"); with one it pre-fills the fields and PUTs the edit
 // ("Edit project").
@@ -132,6 +178,7 @@ function ProjectModal({
   const [repo, setRepo] = useState(project?.repo ?? "");
   const [pushRepo, setPushRepo] = useState(project?.push_repo ?? "");
   const [base, setBase] = useState(project?.base_branch ?? "");
+  const [reviewGate, setReviewGate] = useState(project?.review_gate ?? false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -146,6 +193,7 @@ function ProjectModal({
         repo,
         push_repo: pushRepo,
         base_branch: base,
+        review_gate: reviewGate,
       };
       if (editing) {
         await api.put(`/api/projects/${project.id}`, body);
@@ -201,6 +249,22 @@ function ProjectModal({
           push them to the fork, and open PRs against the upstream — the
           standard fork workflow.
         </p>
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={reviewGate}
+            onChange={(e) => setReviewGate(e.target.checked)}
+            className="mt-0.5 size-4 accent-emerald-500"
+          />
+          <span>
+            Adversarial review gate
+            <span className="mt-0.5 block text-[11px] text-faint">
+              Hold every PR until a reviewer on a different provider approves the
+              diff. Approve opens the PR automatically; requested changes go back
+              to the manager.
+            </span>
+          </span>
+        </label>
         {err && <p className="text-xs text-rose-400">{err}</p>}
         <div className="flex justify-end gap-2 pt-1">
           <Button onClick={onClose}>Cancel</Button>
