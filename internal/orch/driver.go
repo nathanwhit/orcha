@@ -56,10 +56,15 @@ var workspaceGCInterval = 5 * time.Minute
 func (s *Scheduler) Run(ctx context.Context) {
 	t := time.NewTicker(s.interval)
 	gc := time.NewTicker(workspaceGCInterval)
+	load := time.NewTicker(loadProbeInterval)
 	defer t.Stop()
 	defer gc.Stop()
+	defer load.Stop()
 	// Sweep stale checkouts left by a previous process at startup, then on a tick.
 	go s.o.ReclaimWorkspaces(ctx)
+	// Sample target load before the first placements so they are load-aware from
+	// the start (no-op when load-aware scheduling is disabled).
+	go s.o.ProbeTargetLoads(ctx)
 	for {
 		_, _ = s.Tick(ctx)
 		// Re-engage any active objective that has gone idle (no worker making
@@ -74,6 +79,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 		case <-gc.C:
 			// Reclaim asynchronously: a remote rm must not stall scheduling.
 			go s.o.ReclaimWorkspaces(ctx)
+		case <-load.C:
+			// Probe asynchronously: a slow/hung SSH probe must not stall scheduling.
+			go s.o.ProbeTargetLoads(ctx)
 		}
 	}
 }

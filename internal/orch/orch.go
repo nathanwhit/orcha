@@ -63,6 +63,13 @@ type Config struct {
 	// @-mention or assignment. Disabled unless a bot login and a non-empty
 	// allowlist are both set (and a real forge is installed).
 	IssueTriggers IssueTriggerConfig
+	// MaxLoadPerCore makes scheduling load-aware: a target whose recent 1-minute
+	// load average per core is at or above this value is skipped for NEW placement
+	// (sessions already on it keep running), so a saturated box stops accepting
+	// work even when it still has free capacity slots. The scheduler also biases
+	// toward the less-loaded target among acceptable ones. 0 disables load-aware
+	// scheduling entirely (no probing, no gate). Stale/missing samples fail open.
+	MaxLoadPerCore float64
 }
 
 // IssueTriggerConfig governs the issue-trigger monitor. BotLogin is the GitHub

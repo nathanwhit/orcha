@@ -2,6 +2,7 @@ package orch
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/nathanwhit/orcha/internal/model"
 )
@@ -42,6 +43,7 @@ func (o *Orchestrator) SelectTarget(req TargetRequest) (*model.Target, error) {
 		return nil, fmt.Errorf("%w: pinned target %s not found", ErrNoTarget, req.PinnedTargetID)
 	}
 
+	now := o.st.Now()
 	var best *model.Target
 	for _, t := range targets {
 		if !t.Status.CanSchedule() { // draining/offline/disabled excluded
@@ -53,9 +55,16 @@ func (o *Orchestrator) SelectTarget(req TargetRequest) (*model.Target, error) {
 		if !hasLabels(t, req.RequiredLabels) {
 			continue
 		}
-		// Prefer the target with the most free capacity (spread load), with a
-		// small bonus for cache locality if the project lives there.
-		if best == nil || score(t, req) > score(best, req) {
+		// Load gate: a saturated box stops accepting new work even with free slots,
+		// so the scheduler spreads to a quieter target (or waits) instead of piling
+		// on and thrashing. Fails open when load-aware scheduling is off or the
+		// sample is missing/stale.
+		if o.overloaded(t, now) {
+			continue
+		}
+		// Prefer the target with the most free capacity (spread load) and a small
+		// cache-locality bonus, less a penalty for how loaded it currently is.
+		if best == nil || o.targetScore(t, req, now) > o.targetScore(best, req, now) {
 			best = t
 		}
 	}
@@ -63,6 +72,22 @@ func (o *Orchestrator) SelectTarget(req TargetRequest) (*model.Target, error) {
 		return nil, ErrNoTarget
 	}
 	return best, nil
+}
+
+// targetScore ranks a candidate target: capacity spread + cache locality, minus
+// a penalty for current per-core load so the less-loaded target wins a close
+// race. The load penalty is deliberately small — it breaks ties and biases
+// spreading, but does not override the cache-locality bonus (a cold cache means
+// a full checkout + build, which is far costlier than a modestly busier box).
+func (o *Orchestrator) targetScore(t *model.Target, req TargetRequest, now time.Time) int {
+	s := score(t, req)
+	if o.cfg.MaxLoadPerCore <= 0 {
+		return s // load-aware scheduling disabled: capacity + cache only
+	}
+	if lpc, ok := o.targetLoadPerCore(t, now); ok {
+		s -= int(lpc * 20)
+	}
+	return s
 }
 
 // ErrNoTarget is returned when no schedulable target satisfies a request.
