@@ -16,6 +16,28 @@ import {
   TimeAgo,
 } from "../ui";
 
+const TERMINAL_HEIGHT_KEY = "orcha:terminal-height";
+const DEFAULT_TERMINAL_HEIGHT = 26 * 16;
+const MIN_TERMINAL_HEIGHT = 12 * 16;
+
+function readTerminalHeight(): number {
+  try {
+    const stored = Number(localStorage.getItem(TERMINAL_HEIGHT_KEY));
+    if (Number.isFinite(stored) && stored >= MIN_TERMINAL_HEIGHT) return stored;
+  } catch {
+    // Keep the default terminal size if storage is unavailable.
+  }
+  return DEFAULT_TERMINAL_HEIGHT;
+}
+
+function storeTerminalHeight(height: number) {
+  try {
+    localStorage.setItem(TERMINAL_HEIGHT_KEY, String(Math.round(height)));
+  } catch {
+    // Resizing should still work for the current page.
+  }
+}
+
 export function SessionPage({ id }: { id: string }) {
   const session = usePoll(
     () => api.get<api.Session>(`/api/sessions/${id}`),
@@ -284,6 +306,8 @@ function firstLine(s: string): string {
 // itself to the panel and tells the pty its dimensions, so the view fits.
 function TerminalPanel({ id, active }: { id: string; active: boolean }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const [terminalHeight] = useState(readTerminalHeight);
+  const storedHeightRef = useRef(terminalHeight);
   const [attach, setAttach] = useState("");
   const [status, setStatus] = useState<"connecting" | "open" | "closed">(
     "connecting",
@@ -371,6 +395,11 @@ function TerminalPanel({ id, active }: { id: string; active: boolean }) {
       } catch {
         return;
       }
+      const height = host.getBoundingClientRect().height;
+      if (Math.abs(height - storedHeightRef.current) >= 1) {
+        storedHeightRef.current = height;
+        storeTerminalHeight(height);
+      }
       if (ws.readyState === WebSocket.OPEN)
         ws.send(
           JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }),
@@ -418,9 +447,14 @@ function TerminalPanel({ id, active }: { id: string; active: boolean }) {
         )}
       </div>
       <div className="relative">
-        <div ref={hostRef} className="h-[26rem] p-2" />
+        {/* Native vertical resize changes this host; ResizeObserver fits xterm and persists the chosen height. */}
+        <div
+          ref={hostRef}
+          className="min-h-[12rem] resize-y overflow-hidden p-2"
+          style={{ height: storedHeightRef.current }}
+        />
         {status === "closed" && (
-          <div className="absolute inset-0 grid place-items-center bg-black/70 text-sm text-faint">
+          <div className="pointer-events-none absolute inset-0 grid place-items-center bg-black/70 text-sm text-faint">
             No live terminal — the session isn't running in tmux right now.
           </div>
         )}
