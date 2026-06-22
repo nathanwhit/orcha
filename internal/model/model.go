@@ -426,14 +426,23 @@ type Event struct {
 // the standard fork workflow (base off upstream, push to fork, PR against
 // upstream). Empty PushRepo means pushes go to Repo itself.
 type Project struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	Repo       string    `json:"repo"`
-	PushRepo   string    `json:"push_repo,omitempty"`
-	CloneURL   string    `json:"clone_url,omitempty"`
-	BaseBranch string    `json:"base_branch,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Repo       string `json:"repo"`
+	PushRepo   string `json:"push_repo,omitempty"`
+	CloneURL   string `json:"clone_url,omitempty"`
+	BaseBranch string `json:"base_branch,omitempty"`
+	// ReviewGate, when true, makes publish_pr on this repo require an adversarial
+	// (cross-provider) reviewer to approve the exact diff before the PR opens. It
+	// is opt-in per project and toggled from the dashboard. Default false.
+	ReviewGate bool `json:"review_gate"`
+	// ReviewGuidance is free-text, project-specific direction handed to the
+	// adversarial reviewer (e.g. "scrutinise error handling in the tunnel code";
+	// "never approve scheduler changes without tests"). Empty means no extra
+	// guidance. Edited from the dashboard.
+	ReviewGuidance string    `json:"review_guidance,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // RepoMemoryFile is one durable, repo-wide memory file shared across every

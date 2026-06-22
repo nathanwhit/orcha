@@ -376,6 +376,14 @@ func (o *Orchestrator) notifyManagerOfChild(childID string, success bool) {
 	if err != nil || mgr.Role != model.RoleManager || mgr.Status.IsTerminal() {
 		return
 	}
+	// A reviewer's outcome is delivered by submit_review (approve auto-opens the
+	// PR, request_changes hands the findings to the manager). The generic
+	// "succeeded — publish it" message below would be wrong for a reviewer, so
+	// route it through the review-specific notifier instead.
+	if child.Role == model.RoleReviewer {
+		o.notifyManagerOfReview(child, mgr, success)
+		return
+	}
 	summary := relaySummary(child)
 	var msg string
 	switch {
