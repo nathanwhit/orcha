@@ -1,4 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -17,8 +22,11 @@ import {
 } from "../ui";
 
 const TERMINAL_HEIGHT_KEY = "orcha:terminal-height";
+const TERMINAL_WIDTH_KEY = "orcha:terminal-width";
 const DEFAULT_TERMINAL_HEIGHT = 26 * 16;
 const MIN_TERMINAL_HEIGHT = 12 * 16;
+const MIN_TERMINAL_WIDTH = 20 * 16;
+const TERMINAL_VIEWPORT_GUTTER = 2 * 16;
 
 function readTerminalHeight(): number {
   try {
@@ -36,6 +44,35 @@ function storeTerminalHeight(height: number) {
   } catch {
     // Resizing should still work for the current page.
   }
+}
+
+function readTerminalWidth(): number | null {
+  try {
+    const stored = Number(localStorage.getItem(TERMINAL_WIDTH_KEY));
+    if (Number.isFinite(stored) && stored >= MIN_TERMINAL_WIDTH) return stored;
+  } catch {
+    // Keep the default terminal width if storage is unavailable.
+  }
+  return null;
+}
+
+function storeTerminalWidth(width: number) {
+  try {
+    localStorage.setItem(TERMINAL_WIDTH_KEY, String(Math.round(width)));
+  } catch {
+    // Resizing should still work for the current page.
+  }
+}
+
+function maxTerminalWidth() {
+  return Math.max(
+    MIN_TERMINAL_WIDTH,
+    document.documentElement.clientWidth - TERMINAL_VIEWPORT_GUTTER,
+  );
+}
+
+function clampTerminalWidth(width: number) {
+  return Math.min(Math.max(width, MIN_TERMINAL_WIDTH), maxTerminalWidth());
 }
 
 export function SessionPage({ id }: { id: string }) {
@@ -305,13 +342,48 @@ function firstLine(s: string): string {
 // tab completion all work, exactly as `tmux attach` would. The terminal sizes
 // itself to the panel and tells the pty its dimensions, so the view fits.
 function TerminalPanel({ id, active }: { id: string; active: boolean }) {
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [terminalHeight] = useState(readTerminalHeight);
+  const [terminalWidth, setTerminalWidth] = useState(readTerminalWidth);
   const storedHeightRef = useRef(terminalHeight);
   const [attach, setAttach] = useState("");
   const [status, setStatus] = useState<"connecting" | "open" | "closed">(
     "connecting",
   );
+
+  const resizeTerminalWidth = (width: number) => {
+    const nextWidth = clampTerminalWidth(width);
+    setTerminalWidth(nextWidth);
+    storeTerminalWidth(nextWidth);
+  };
+
+  const beginHorizontalResize = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const panel = panelRef.current;
+    if (!panel) return;
+
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const startX = e.clientX;
+    const startWidth = panel.getBoundingClientRect().width;
+
+    const onPointerMove = (ev: globalThis.PointerEvent) => {
+      resizeTerminalWidth(startWidth + startX - ev.clientX);
+    };
+    const onPointerUp = () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+  };
+
+  const nudgeTerminalWidth = (delta: number) => {
+    const panel = panelRef.current;
+    if (!panel) return;
+    resizeTerminalWidth(panel.getBoundingClientRect().width + delta);
+  };
 
   useEffect(() => {
     const host = hostRef.current;
@@ -433,31 +505,60 @@ function TerminalPanel({ id, active }: { id: string; active: boolean }) {
         : "bg-zinc-500";
 
   return (
-    <div className="overflow-hidden rounded-xl border border-edge bg-black">
-      <div className="flex items-center justify-between border-b border-edge bg-surface px-3 py-1.5">
-        <span className="flex items-center gap-1.5 text-[11px] text-faint">
-          <span className={`size-2 rounded-full ${dot}`} />
-          tmux
-        </span>
-        {attach && (
-          <span className="flex items-center gap-1 font-mono text-[11px] text-mute">
-            {attach}
-            <CopyButton text={attach} />
-          </span>
-        )}
-      </div>
-      <div className="relative">
-        {/* Native vertical resize changes this host; ResizeObserver fits xterm and persists the chosen height. */}
+    <div className="flex justify-end overflow-visible">
+      <div
+        ref={panelRef}
+        className="relative overflow-hidden rounded-xl border border-edge bg-black"
+        style={{
+          width: terminalWidth ?? "100%",
+          minWidth: "min(20rem, calc(100vw - 2rem))",
+          maxWidth: "calc(100vw - 2rem)",
+        }}
+      >
         <div
-          ref={hostRef}
-          className="min-h-[12rem] resize-y overflow-hidden p-2"
-          style={{ height: storedHeightRef.current }}
-        />
-        {status === "closed" && (
-          <div className="pointer-events-none absolute inset-0 grid place-items-center bg-black/70 text-sm text-faint">
-            No live terminal — the session isn't running in tmux right now.
-          </div>
-        )}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize terminal width"
+          tabIndex={0}
+          className="group absolute inset-y-0 left-0 z-10 w-2 cursor-ew-resize touch-none outline-none"
+          onPointerDown={beginHorizontalResize}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowLeft") {
+              e.preventDefault();
+              nudgeTerminalWidth(24);
+            } else if (e.key === "ArrowRight") {
+              e.preventDefault();
+              nudgeTerminalWidth(-24);
+            }
+          }}
+        >
+          <span className="absolute inset-y-3 left-0 w-px bg-edge transition-colors group-hover:bg-accent group-focus-visible:bg-accent" />
+        </div>
+        <div className="flex items-center justify-between border-b border-edge bg-surface px-3 py-1.5 pl-4">
+          <span className="flex items-center gap-1.5 text-[11px] text-faint">
+            <span className={`size-2 rounded-full ${dot}`} />
+            tmux
+          </span>
+          {attach && (
+            <span className="flex items-center gap-1 font-mono text-[11px] text-mute">
+              {attach}
+              <CopyButton text={attach} />
+            </span>
+          )}
+        </div>
+        <div className="relative">
+          {/* Native vertical resize changes this host; ResizeObserver fits xterm and persists the chosen height. */}
+          <div
+            ref={hostRef}
+            className="min-h-[12rem] resize-y overflow-hidden p-2"
+            style={{ height: storedHeightRef.current }}
+          />
+          {status === "closed" && (
+            <div className="pointer-events-none absolute inset-0 grid place-items-center bg-black/70 text-sm text-faint">
+              No live terminal — the session isn't running in tmux right now.
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
