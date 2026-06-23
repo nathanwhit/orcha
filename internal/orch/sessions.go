@@ -392,6 +392,19 @@ func (o *Orchestrator) consume(r *run, events <-chan agent.Event) {
 // already canceled, the transition is rejected and recorded as an ignored late
 // completion — canceled work can never be resurrected.
 func (o *Orchestrator) finishRun(r *run, success bool) {
+	child, _ := o.st.GetSession(r.sessionID)
+	// A CI follow-up that "succeeded" but never advanced its PR's head did not land
+	// a fix — the PR is still red. The success flag comes from the agent printing a
+	// done marker, which it does even when it gave up or its push failed (observed:
+	// a follow-up reported "Blocked... could not push" yet was marked succeeded). So
+	// for a CI follow-up, require proof it pushed (the PR head moved); otherwise
+	// record a failure, which routes it to the manager below. PR follow-ups may
+	// legitimately just comment, so they are exempt.
+	if success && child != nil && child.Role == model.RoleCIFollowup && !o.followupAdvancedPR(child) {
+		_ = o.emit(r.sessionID, model.MsgSystem, model.KindStatus,
+			"CI follow-up finished without advancing the PR (no fix pushed) — recording as failed", nil)
+		success = false
+	}
 	next := model.SessionSucceeded
 	if !success {
 		next = model.SessionFailed
@@ -401,10 +414,9 @@ func (o *Orchestrator) finishRun(r *run, success bool) {
 		// Terminal already (likely canceled): record and ignore.
 		_ = o.emit(r.sessionID, model.MsgSystem, model.KindStatus,
 			"ignored late completion ("+string(next)+"): "+err.Error(), nil)
-		sess, _ := o.st.GetSession(r.sessionID)
 		objID := ""
-		if sess != nil {
-			objID = sess.ObjectiveID
+		if child != nil {
+			objID = child.ObjectiveID
 		}
 		o.audit(objID, r.sessionID, "late_completion_ignored", string(next), nil)
 		return
@@ -413,10 +425,15 @@ func (o *Orchestrator) finishRun(r *run, success bool) {
 	// Fold any edits the agent made to .orcha/MEMORY.md back into repo-wide
 	// memory before the manager re-engages, so it sees the latest learnings. Only
 	// on success — a failed run's notes are unreliable.
-	if success {
-		if sess, err := o.st.GetSession(r.sessionID); err == nil {
-			o.mergeBackRepoMemory(sess)
-		}
+	if success && child != nil {
+		o.mergeBackRepoMemory(child)
+	}
+	// PR/CI follow-ups are spawned parentless (notifyManagerOfChild ignores them);
+	// route their outcome to the objective's manager explicitly, so a failed
+	// follow-up reaches the supervisor instead of stranding a still-red PR.
+	if child != nil && (child.Role == model.RoleCIFollowup || child.Role == model.RolePRFollowup) {
+		o.notifyManagerOfFollowup(child, success)
+		return
 	}
 	o.notifyManagerOfChild(r.sessionID, success)
 }
