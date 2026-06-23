@@ -49,10 +49,9 @@ func TestScheduler_StartsQueuedSession(t *testing.T) {
 	if started != 1 {
 		t.Fatalf("started=%d, want 1", started)
 	}
-	reloaded, _ := st.GetSession(s.ID)
-	if reloaded.Status != model.SessionRunning {
-		t.Fatalf("session status=%s, want running", reloaded.Status)
-	}
+	// StartRun runs in the background (its checkout must not block scheduling), so
+	// the session reaches running shortly after the tick.
+	waitFor(t, func() bool { rs, _ := st.GetSession(s.ID); return rs.Status == model.SessionRunning })
 	_ = o.Cancel(s.ID, false)
 }
 
@@ -68,11 +67,9 @@ func TestScheduler_RespectsMaxConcurrent(t *testing.T) {
 	if started != 1 {
 		t.Fatalf("started=%d, want 1 (global cap)", started)
 	}
-	// One running, the other still queued (not even attempted).
-	active, _ := st.CountSessionsByStatuses(model.SessionRunning)
-	if active != 1 {
-		t.Fatalf("active=%d, want 1", active)
-	}
+	// One reaches running; the other was never attempted (budget gate), so it
+	// stays queued.
+	waitFor(t, func() bool { active, _ := st.CountSessionsByStatuses(model.SessionRunning); return active == 1 })
 	bs, _ := st.GetSession(b.ID)
 	if bs.Status != model.SessionQueued {
 		t.Fatalf("second session status=%s, want queued", bs.Status)
@@ -115,10 +112,8 @@ func TestScheduler_ManagersExemptFromWorkerCap(t *testing.T) {
 		t.Fatalf("started=%d, want 3 (1 worker + 2 managers, managers exempt)", started)
 	}
 	for _, s := range []*model.Session{m1, m2, w} {
-		got, _ := st.GetSession(s.ID)
-		if got.Status != model.SessionRunning {
-			t.Fatalf("%s (%s) status=%s, want running", s.ID, got.Role, got.Status)
-		}
+		s := s
+		waitFor(t, func() bool { got, _ := st.GetSession(s.ID); return got.Status == model.SessionRunning })
 	}
 
 	// The worker cap is still enforced: a second worker waits behind the one
@@ -143,15 +138,20 @@ func TestScheduler_RespectsTargetCapacity(t *testing.T) {
 
 	a := queuedSession(t, st, "")
 	b := queuedSession(t, st, "")
-	started, _ := sch.Tick(context.Background())
-	if started != 1 {
-		t.Fatalf("started=%d, want 1 (target capacity)", started)
+	if _, err := sch.Tick(context.Background()); err != nil {
+		t.Fatal(err)
 	}
-	bs, _ := st.GetSession(b.ID)
-	if bs.Status != model.SessionWaitingCapacity {
-		t.Fatalf("second session status=%s, want waiting_capacity", bs.Status)
-	}
+	// The target has a single slot. Both pass the worker-cap gate and launch, but
+	// the slot claim is atomic in the store, so exactly one wins and runs while the
+	// other is parked waiting_capacity. Which one wins is a goroutine race, so
+	// assert the aggregate.
+	waitFor(t, func() bool {
+		running, _ := st.CountSessionsByStatuses(model.SessionRunning)
+		waiting, _ := st.CountSessionsByStatuses(model.SessionWaitingCapacity)
+		return running == 1 && waiting == 1
+	})
 	_ = o.Cancel(a.ID, false)
+	_ = o.Cancel(b.ID, false)
 }
 
 func TestScheduler_DependencyGating(t *testing.T) {
@@ -180,9 +180,7 @@ func TestScheduler_DependencyGating(t *testing.T) {
 	if started < 1 {
 		t.Fatalf("expected dependent C to start once its dep succeeded, started=%d", started)
 	}
-	if cs, _ := st.GetSession(c.ID); cs.Status != model.SessionRunning {
-		t.Fatalf("C status=%s, want running", cs.Status)
-	}
+	waitFor(t, func() bool { cs, _ := st.GetSession(c.ID); return cs.Status == model.SessionRunning })
 	_ = o.Cancel(c.ID, false)
 }
 
@@ -231,14 +229,12 @@ func TestScheduler_ProviderExhaustedParksSession(t *testing.T) {
 	sch := NewScheduler(o, time.Second, 8)
 
 	s := queuedSession(t, st, "")
-	started, _ := sch.Tick(context.Background())
-	if started != 0 {
-		t.Fatalf("exhausted provider should not start work, started=%d", started)
+	if _, err := sch.Tick(context.Background()); err != nil {
+		t.Fatal(err)
 	}
-	// The session is parked (so the loop doesn't respin) and the user is asked.
-	if rs, _ := st.GetSession(s.ID); rs.Status != model.SessionWaitingUser {
-		t.Fatalf("session should be parked waiting_user, got %s", rs.Status)
-	}
+	// The start is attempted in the background, finds every provider exhausted, asks
+	// the user, and parks the session waiting_user so the loop doesn't respin.
+	waitFor(t, func() bool { rs, _ := st.GetSession(s.ID); return rs.Status == model.SessionWaitingUser })
 	qs, _ := st.ListOpenQuestions()
 	if len(qs) == 0 {
 		t.Fatal("exhaustion should open a question for the user")
