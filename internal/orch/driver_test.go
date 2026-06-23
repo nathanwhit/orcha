@@ -308,6 +308,70 @@ func TestRecoverInterruptedRequeuesAndRestarts(t *testing.T) {
 	})
 }
 
+// A session can be stranded "running" mid-life when its watcher dies without
+// emitting a terminal event (a missed tmux exit, a re-adopt-after-restart that
+// later loses the session). Startup recovery never sees it (the process did not
+// restart), so the periodic reconciler must requeue it — while leaving genuinely
+// live runs and in-flight starts untouched.
+func TestReconcileOrphans_RequeuesStrandedRunningSession(t *testing.T) {
+	defer func(g time.Duration) { orphanGrace = g }(orphanGrace)
+	orphanGrace = 0 // treat any unbacked running row as an orphan regardless of age
+
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	o.RegisterProvider(blockingFake(model.AgentClaude))
+	sch := NewScheduler(o, time.Second, 8)
+
+	obj := &model.Objective{Title: "obj", Prompt: "p", Status: model.ObjectiveActive}
+	if err := st.CreateObjective(obj); err != nil {
+		t.Fatalf("objective: %v", err)
+	}
+
+	// (1) A genuinely live session: StartRun registers a run in o.runs whose
+	// watcher drives it. The reconciler must leave it alone.
+	live := queuedSession(t, st, obj.ID)
+	if _, err := o.StartRun(context.Background(), live.ID); err != nil {
+		t.Fatalf("start live: %v", err)
+	}
+	waitFor(t, func() bool { s, _ := st.GetSession(live.ID); return s.Status == model.SessionRunning })
+
+	// (2) The orphan: marked running, but no run was ever registered for it.
+	orphan := queuedSession(t, st, obj.ID)
+	mustRun(t, st, orphan.ID)
+
+	// (3) A start in flight: a running row covered by the in-flight guard (its
+	// StartRun's run is still wiring up). Must also be left alone.
+	inflight := queuedSession(t, st, obj.ID)
+	mustRun(t, st, inflight.ID)
+	if !sch.beginStart(inflight.ID, true) {
+		t.Fatal("beginStart should mark the session in flight")
+	}
+
+	sch.ReconcileOrphans(context.Background())
+
+	if s, _ := st.GetSession(orphan.ID); s.Status != model.SessionQueued {
+		t.Fatalf("orphan status = %s, want queued (requeued)", s.Status)
+	}
+	if s, _ := st.GetSession(live.ID); s.Status != model.SessionRunning {
+		t.Fatalf("live status = %s, want running (untouched)", s.Status)
+	}
+	if s, _ := st.GetSession(inflight.ID); s.Status != model.SessionRunning {
+		t.Fatalf("in-flight status = %s, want running (untouched)", s.Status)
+	}
+
+	_ = o.Cancel(live.ID, false)
+}
+
+func mustRun(t *testing.T, st *store.Store, id string) {
+	t.Helper()
+	if _, err := st.UpdateSessionStatus(id, model.SessionStarting); err != nil {
+		t.Fatalf("starting: %v", err)
+	}
+	if _, err := st.UpdateSessionStatus(id, model.SessionRunning); err != nil {
+		t.Fatalf("running: %v", err)
+	}
+}
+
 // An orchestrator shutdown must not bury live sessions: the provider's
 // failure done event (emitted when the run context is canceled) used to mark
 // them failed — terminal — so restart recovery never resumed them.

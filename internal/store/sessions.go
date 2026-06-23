@@ -266,6 +266,26 @@ func (s *Store) RequeueInterruptedSessions() ([]*model.Session, error) {
 	return sessions, nil
 }
 
+// RequeueSession force-requeues a single session that is currently starting or
+// running, returning whether a row was changed. Like RequeueInterruptedSessions
+// it bypasses the state machine's running->queued guard — the caller (the
+// orphan reconciler) has already established that no live run backs this row, so
+// the premise that makes that edge illegal does not hold. The status guard in the
+// WHERE clause makes it a no-op if the row moved to a terminal state under us
+// (e.g. a late watcher finally fired), so it can never resurrect finished work.
+func (s *Store) RequeueSession(id string) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE sessions SET status = ?, updated_at = ?
+		   WHERE id = ? AND status IN (?, ?)`,
+		string(model.SessionQueued), s.now(), id,
+		string(model.SessionStarting), string(model.SessionRunning))
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // AddSessionTokens increments a session's running token total. It is a small,
 // self-contained UPDATE and deliberately does not touch updated_at or the
 // session state machine — usage accrues independently of lifecycle changes.
