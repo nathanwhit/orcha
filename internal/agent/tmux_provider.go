@@ -153,25 +153,30 @@ func (p *TmuxProvider) watchDialogs(ctx context.Context, ctrl *tmux.Controller, 
 }
 
 // ResumeSession resumes a logical session, e.g. after an orchestrator restart.
-// tmux sessions outlive the orchestrator process, so if the session is still
-// alive it is ADOPTED as-is: the running TUI keeps its full conversation and
-// nothing is typed into it. Only when the tmux session is gone is a new one
-// created — via ResumeCommand (continuing the prior agent conversation) when
-// configured, else a cold start.
+//
+// A tmux session outlives the orchestrator process, so the agent's TUI is often
+// still alive here. It is tempting to just ADOPT it as-is — but the agent inside
+// holds an MCP connection to the orchestrator process that just died, and neither
+// Codex nor Claude re-initialize their MCP client when the server drops: every
+// subsequent tool call hangs (120s timeouts) on the dead connection, silently
+// bricking the manager. So whenever we have a ResumeCommand, we RELAUNCH the agent
+// in place — killing the stale process first if it is still running — which both
+// continues the prior conversation AND gives it a fresh MCP connection to this
+// process. Adopting a live session as-is is only a last resort, when there is no
+// resume command to relaunch with.
 func (p *TmuxProvider) ResumeSession(ctx context.Context, sessionID string, spec Spec) (Handle, <-chan Event, error) {
 	spec.SessionID = sessionID
 	ex := p.cfg.ExecutorFor(spec)
 	ctrl := tmux.New(ex).WithBinary(p.cfg.TmuxBin).WithSize(p.cfg.Cols, p.cfg.Rows)
 	name := tmux.SessionName(sessionID)
-
-	if alive, _ := ctrl.HasSession(ctx, name); alive {
-		runCtx, cancel := context.WithCancel(ctx)
-		out := p.arm(runCtx, cancel, ctrl, name, spec,
-			"re-adopted live tmux session "+name+" — attach: "+attachCommand(spec.Target, name))
-		return &tmuxHandle{sessionID: sessionID}, out, nil
-	}
+	alive, _ := ctrl.HasSession(ctx, name)
 
 	if p.cfg.ResumeCommand != nil {
+		if alive {
+			// Drop the stale process and its dead MCP connection; the replacement
+			// resumes the same conversation via ResumeCommand.
+			_ = ctrl.KillSession(ctx, name)
+		}
 		dir := workDirFor(spec)
 		ensureDir(ctx, ex, dir)
 		runCtx, cancel := context.WithCancel(ctx)
@@ -185,6 +190,15 @@ func (p *TmuxProvider) ResumeSession(ctx context.Context, sessionID string, spec
 			go p.watchDialogs(runCtx, ctrl, name)
 		}
 		// The resumed conversation already contains the prompt; don't repass it.
+		return &tmuxHandle{sessionID: sessionID}, out, nil
+	}
+
+	// No resume command: the most we can do is adopt a still-live session (its MCP
+	// will be wedged if the orchestrator restarted), else start cold.
+	if alive {
+		runCtx, cancel := context.WithCancel(ctx)
+		out := p.arm(runCtx, cancel, ctrl, name, spec,
+			"re-adopted live tmux session "+name+" — attach: "+attachCommand(spec.Target, name))
 		return &tmuxHandle{sessionID: sessionID}, out, nil
 	}
 	return p.StartSession(ctx, spec)
