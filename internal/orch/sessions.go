@@ -185,6 +185,17 @@ func (o *Orchestrator) StartRun(ctx context.Context, sessionID string) (*Run, er
 	spec := o.buildSpec(sess, ws, tgt)
 
 	runCtx, cancel := context.WithCancel(ctx)
+
+	// A fresh interactive start delivers its opening prompt as a positional argv
+	// argument, which is size-bounded and fragile for big inputs. Move an oversized
+	// one to a file on the target and hand the agent a short bootstrap pointing at
+	// it. Resume paths don't re-pass the prompt (it's already in the conversation),
+	// so only externalize a cold start.
+	if pid, _ := sess.Metadata["provider_session_id"].(string); pid == "" {
+		if tmuxName, _ := sess.Metadata["tmux_session"].(string); tmuxName == "" {
+			spec = o.externalizeLargePrompt(runCtx, sess, tgt, spec)
+		}
+	}
 	// A session whose prior run captured a durable provider-side handle — a
 	// provider conversation id, or a tmux session that outlived the process —
 	// RESUMES instead of starting cold. After an orchestrator restart this is
@@ -236,6 +247,53 @@ func (o *Orchestrator) StartRun(ctx context.Context, sessionID string) (*Run, er
 
 	go o.consume(r, events)
 	return &Run{r: r}, nil
+}
+
+// maxInlinePromptBytes is the largest opening prompt passed inline as a positional
+// argument. Above it the prompt is written to a file and replaced by a bootstrap.
+// The kernel cap is ~128KB per argv string (MAX_ARG_STRLEN), less after the shell/
+// tmux/SSH escaping a remote launch adds; 32KB stays comfortably clear while still
+// covering essentially every real objective prompt inline.
+const maxInlinePromptBytes = 32 * 1024
+
+// externalizeLargePrompt moves an oversized opening prompt off the command line.
+// The interactive providers pass the first prompt as a positional argv argument,
+// which is bounded (~128KB per arg on Linux, less over SSH after escaping) and
+// fragile for big inputs. When the prompt is large, write it to a file on the
+// target — delivered over a pipe (stdin), which has no such limit — and hand the
+// agent a short bootstrap that points at it. Small prompts are left inline,
+// exactly as before. A no-op without a real target/preparer (offline/test runs),
+// and it falls back to the inline prompt if the write fails, so a session never
+// launches with no task at all.
+func (o *Orchestrator) externalizeLargePrompt(ctx context.Context, sess *model.Session, tgt *model.Target, spec agent.Spec) agent.Spec {
+	if tgt == nil || o.preparer == nil || len(spec.Prompt) <= maxInlinePromptBytes {
+		return spec
+	}
+	abs := promptFilePath(sess.ID)
+	ex := agent.NewExecutor(tgt)
+	if err := writeWorkspaceFile(ctx, ex, tgt.WorkRoot, abs, spec.Prompt); err != nil {
+		o.audit(sess.ObjectiveID, sess.ID, "prompt_externalize_failed", err.Error(), nil)
+		return spec
+	}
+	o.audit(sess.ObjectiveID, sess.ID, "prompt_externalized",
+		fmt.Sprintf("opening prompt (%d bytes) written to %s", len(spec.Prompt), abs),
+		model.JSONMap{"path": abs})
+	spec.Prompt = promptBootstrap(abs)
+	return spec
+}
+
+// promptFilePath is the per-session file an externalized opening prompt is written
+// to on the target. /tmp is used (not the checkout) so it never risks landing in a
+// PR; the provider already writes its pane log there.
+func promptFilePath(sessionID string) string {
+	return "/tmp/orcha-prompt-" + sessionID + ".md"
+}
+
+// promptBootstrap is the short inline prompt that replaces an externalized one: it
+// tells the agent where its real instructions are and to read them first.
+func promptBootstrap(absPath string) string {
+	return "Your full instructions for this session were too large to pass inline, so they have been written to a file on this machine:\n\n" +
+		absPath + "\n\nRead that entire file now (run `cat " + absPath + "`) before doing anything else — it contains your complete task. Then carry it out."
 }
 
 // consume drains a provider's event stream into the transcript and drives

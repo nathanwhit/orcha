@@ -2,6 +2,8 @@ package orch
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"time"
 
 	"github.com/nathanwhit/orcha/internal/model"
@@ -17,6 +19,15 @@ type Scheduler struct {
 	interval      time.Duration
 	maxConcurrent int
 	wake          chan struct{}
+
+	// starting tracks sessions with a StartRun in flight. Starting a session does
+	// a git checkout (minutes for a big repo), so it runs in the background — but
+	// the session row stays queued until StartRun flips it, so without this guard
+	// the next tick would launch a second StartRun for the same session. The value
+	// is whether the session is a worker, so the worker budget can account for
+	// in-flight launches that haven't reached the running count yet.
+	startMu  sync.Mutex
+	starting map[string]bool
 }
 
 // NewScheduler builds a scheduler. interval is the idle tick period;
@@ -35,7 +46,51 @@ func NewScheduler(o *Orchestrator, interval time.Duration, maxConcurrent int) *S
 		interval:      interval,
 		maxConcurrent: maxConcurrent,
 		wake:          make(chan struct{}, 1),
+		starting:      map[string]bool{},
 	}
+}
+
+// beginStart marks a session's StartRun as in flight, returning false if one
+// already is (so a slow checkout is never started twice while the session row is
+// still queued). isWorker feeds the worker-budget accounting.
+func (s *Scheduler) beginStart(id string, isWorker bool) bool {
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
+	if _, ok := s.starting[id]; ok {
+		return false
+	}
+	s.starting[id] = isWorker
+	return true
+}
+
+func (s *Scheduler) endStart(id string) {
+	s.startMu.Lock()
+	delete(s.starting, id)
+	s.startMu.Unlock()
+}
+
+func (s *Scheduler) isStarting(id string) bool {
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
+	_, ok := s.starting[id]
+	return ok
+}
+
+// inflightWorkers counts worker StartRuns that have been launched but not yet
+// reached the running/starting count CountActiveWorkerSessions sees. Counting
+// them keeps the worker cap honest across the async-launch window (it may briefly
+// double-count a worker already flipped to running, which only undershoots the
+// cap — never oversubscribes it).
+func (s *Scheduler) inflightWorkers() int {
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
+	n := 0
+	for _, isWorker := range s.starting {
+		if isWorker {
+			n++
+		}
+	}
+	return n
 }
 
 // Wake nudges the scheduler to run a tick promptly (e.g. after a session is
@@ -86,9 +141,15 @@ func (s *Scheduler) Run(ctx context.Context) {
 	}
 }
 
-// Tick performs one scheduling pass and returns how many sessions it started.
-// It is exported so tests (and Wake-driven callers) can drive scheduling
-// deterministically.
+// Tick performs one scheduling pass and returns how many session starts it
+// LAUNCHED this pass. Starting a session does a git checkout that can take
+// minutes for a large repo, so StartRun runs in the background — one slow
+// checkout must not head-of-line block every other pending session (managers
+// included) on the single scheduler thread. A launched session reaches the
+// running state shortly after the tick returns; gating (dependencies, the worker
+// cap, an already-in-flight start) is still decided synchronously here.
+//
+// It is exported so tests (and Wake-driven callers) can drive scheduling.
 func (s *Scheduler) Tick(ctx context.Context) (int, error) {
 	// The global cap bounds concurrent WORKERS only. Interactive managers are
 	// excluded from both the running count and the budget gate below: they are
@@ -100,7 +161,7 @@ func (s *Scheduler) Tick(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	budget := s.maxConcurrent - active
+	budget := s.maxConcurrent - active - s.inflightWorkers()
 
 	// queued + waiting_capacity are the runnable-but-not-yet-running states.
 	candidates, err := s.o.st.ListSessionsByStatuses(model.SessionQueued, model.SessionWaitingCapacity)
@@ -110,6 +171,9 @@ func (s *Scheduler) Tick(ctx context.Context) (int, error) {
 
 	started := 0
 	for _, sess := range candidates {
+		if s.isStarting(sess.ID) {
+			continue // a StartRun for this session is already running in the background
+		}
 		isManager := sess.Role == model.RoleManager
 		// Workers consume the budget; managers bypass it. Don't break — a worker
 		// past the cap is skipped, but a later manager must still get a chance.
@@ -129,21 +193,31 @@ func (s *Scheduler) Tick(ctx context.Context) (int, error) {
 			continue // dependencies still in flight
 		}
 
-		_, err := s.o.StartRun(ctx, sess.ID)
-		if err == nil {
-			started++
-			if !isManager {
-				budget--
-			}
+		// Launch the start in the background: the checkout it may do can take
+		// minutes, and blocking the scheduler thread on it stalls every other
+		// pending session. The in-flight guard keeps a later tick from
+		// double-starting this same session while its row is still queued.
+		if !s.beginStart(sess.ID, !isManager) {
 			continue
 		}
-		// StartRun already recorded the appropriate state for capacity/lock
-		// contention (waiting_capacity) — just leave those for a later tick.
-		// Provider exhaustion is terminal for this tick: it has already asked the
-		// user, so park the session to avoid re-asking every tick.
-		if err == ErrProviderExhausted {
-			_, _ = s.o.st.UpdateSessionStatus(sess.ID, model.SessionWaitingUser)
+		started++
+		if !isManager {
+			budget--
 		}
+		go func(id string) {
+			defer s.endStart(id)
+			if _, err := s.o.StartRun(ctx, id); err != nil {
+				// Capacity/lock contention already parked the session
+				// waiting_capacity inside StartRun, and a real start failure already
+				// marked it failed. Provider exhaustion is the one case left to the
+				// caller: StartRun has asked the user, so park it to avoid re-asking
+				// every tick.
+				if errors.Is(err, ErrProviderExhausted) {
+					_, _ = s.o.st.UpdateSessionStatus(id, model.SessionWaitingUser)
+				}
+			}
+			s.Wake() // a slot/lock may have freed up — re-evaluate promptly
+		}(sess.ID)
 	}
 	return started, nil
 }

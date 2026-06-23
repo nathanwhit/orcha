@@ -108,6 +108,8 @@ type Orchestrator struct {
 
 	gcMu sync.Mutex // held during a workspace-reclaim pass so passes don't overlap
 
+	scratchMu sync.Mutex // serializes shared-scratch find-or-create so concurrently-starting workers on one objective can't create duplicate rows
+
 	repoMemMu sync.Mutex // serializes repo-memory read-merge-write so concurrent sessions on one repo can't clobber each other
 }
 

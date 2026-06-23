@@ -275,6 +275,13 @@ func sharedScratchPath(tgt *model.Target, objectiveID string) string {
 // Without it such artifacts die with the worker's checkout, so a later worker
 // reports "the harness isn't in the tree" and cannot reproduce the result.
 func (o *Orchestrator) EnsureSharedScratch(ctx context.Context, objectiveID string, tgt *model.Target) (*model.Workspace, error) {
+	// Serialize the find-or-create: workers now start concurrently, and two on the
+	// same objective+target would otherwise both miss the lookup and create
+	// duplicate shared-scratch rows. The mkdir below is idempotent; the DB row is
+	// what needs the guard.
+	o.scratchMu.Lock()
+	defer o.scratchMu.Unlock()
+
 	ws, err := o.st.SharedScratchFor(objectiveID, tgt.ID)
 	if err != nil {
 		ws = &model.Workspace{

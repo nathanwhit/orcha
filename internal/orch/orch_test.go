@@ -1695,6 +1695,9 @@ func TestSupervisor_RepokesIdleManagerOnlyWhenNoWorkers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create objective: %v", err)
 	}
+	// The supervisor only pokes a LIVE (running) manager; a queued/starting one is
+	// still coming up and is left to the scheduler. Mark it running for the poke path.
+	markSessionRunning(t, st, mgr.ID)
 
 	// A freshly-active manager (UpdatedAt just now) is NOT yet considered stalled.
 	if acts := o.superviseDecisions(st.Now()); len(acts) != 0 {
@@ -1732,6 +1735,55 @@ func TestSupervisor_RepokesIdleManagerOnlyWhenNoWorkers(t *testing.T) {
 	}
 }
 
+// A manager that has not reached running yet (still queued, or mid-checkout now
+// that starts run in the background) is NOT idle — it is coming up. Poking it
+// races its startup and resume-steers a manager that never received its objective
+// prompt, which is how a brand-new manager ended up blindly asking the user what
+// to work on. The scheduler owns bringing it up; the supervisor leaves it alone.
+func TestSupervisor_DoesNotPokeManagerStillStartingUp(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+
+	_, mgr, err := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	if err != nil {
+		t.Fatalf("create objective: %v", err)
+	}
+	if mgr.Status != model.SessionQueued {
+		t.Fatalf("precondition: a fresh manager should be queued, got %s", mgr.Status)
+	}
+	// Even long past the idle threshold, a not-yet-running manager is not acted on.
+	future := st.Now().Add(superviseIdleAfter + supervisePokeCooldown + time.Hour)
+	if acts := o.superviseDecisions(future); len(acts) != 0 {
+		t.Fatalf("a manager still coming up must not be poked, got %+v", acts)
+	}
+
+	// Once running and quiet, the very same manager IS poked.
+	markSessionRunning(t, st, mgr.ID)
+	if acts := o.superviseDecisions(future); len(acts) != 1 || acts[0].kind != "poke" {
+		t.Fatalf("a running idle manager should be poked, got %+v", acts)
+	}
+}
+
+// The idle poke restates the objective so a manager that lost its initial prompt
+// (a startup race, a dropped resume) can recover instead of asking the user for
+// scope it was already given.
+func TestIdleManagerPokeMessage_RestatesObjective(t *testing.T) {
+	o, st := newTestOrch(t)
+	obj := &model.Objective{Title: "t", Prompt: "Fix the mkdirSync dot-segment bug in denoland/deno",
+		Status: model.ObjectiveActive}
+	if err := st.CreateObjective(obj); err != nil {
+		t.Fatalf("create objective: %v", err)
+	}
+	msg := o.idleManagerPokeMessage(obj.ID)
+	if !strings.Contains(msg, "Fix the mkdirSync dot-segment bug") {
+		t.Fatalf("poke should restate the objective prompt, got: %q", msg)
+	}
+	if !strings.Contains(msg, "mark_objective_done") {
+		t.Fatalf("poke should keep the next-step instructions, got: %q", msg)
+	}
+}
+
 // An idle manager whose only outstanding work is a healthy open PR is waiting on
 // a human to merge — it must NOT be poked (that just makes it re-ask "can you
 // merge?"). But an open PR that is failing CI or carries unhandled feedback is
@@ -1745,6 +1797,7 @@ func TestSupervisor_DoesNotPokeWhenAwaitingHumanMerge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create objective: %v", err)
 	}
+	markSessionRunning(t, st, mgr.ID)
 	future := st.Now().Add(superviseIdleAfter + time.Minute)
 
 	// Sanity: with no PR, an idle manager IS poked (latent work to drive).
@@ -1938,11 +1991,62 @@ func TestNotifyManagerOfMerge_RevivesParkedManager(t *testing.T) {
 	}
 }
 
+// A small opening prompt stays inline (positional argv), but an oversized one is
+// written to a file on the target and replaced by a short bootstrap pointing at
+// it — so a big prompt can't blow the command-line size limit.
+func TestExternalizeLargePrompt_OffloadsToFileWhenBig(t *testing.T) {
+	o, st := newTestOrch(t)
+	o.SetWorkspacePreparer(workspace.New())
+	tgt := &model.Target{Name: "local", Kind: model.TargetLocal, Status: model.TargetOnline,
+		WorkRoot: t.TempDir(), CapacitySessions: 4}
+	if err := st.CreateTarget(tgt); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	sess := &model.Session{Role: model.RoleManager, Agent: model.AgentClaude,
+		Mode: model.ModeInteractive, Status: model.SessionQueued}
+	if err := st.CreateSession(sess); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// Small prompt: left exactly as-is.
+	small := agent.Spec{Prompt: "do the thing"}
+	if got := o.externalizeLargePrompt(context.Background(), sess, tgt, small); got.Prompt != small.Prompt {
+		t.Fatalf("small prompt should stay inline, got %q", got.Prompt)
+	}
+
+	// Large prompt: offloaded to the file, replaced by a bootstrap referencing it.
+	big := strings.Repeat("x", maxInlinePromptBytes+1)
+	path := promptFilePath(sess.ID)
+	t.Cleanup(func() { _ = os.Remove(path) })
+	got := o.externalizeLargePrompt(context.Background(), sess, tgt, agent.Spec{Prompt: big})
+	if strings.Contains(got.Prompt, big) || !strings.Contains(got.Prompt, path) {
+		t.Fatalf("large prompt should be replaced by a bootstrap referencing %s, got len=%d", path, len(got.Prompt))
+	}
+	onDisk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("prompt file not written: %v", err)
+	}
+	if string(onDisk) != big {
+		t.Fatalf("prompt file content mismatch: %d bytes on disk", len(onDisk))
+	}
+}
+
 // terminateSession drives a (queued) session through the legal lifecycle to a
 // terminal state: queued -> starting -> running -> final.
 func terminateSession(t *testing.T, st *store.Store, id string, final model.SessionStatus) {
 	t.Helper()
 	for _, s := range []model.SessionStatus{model.SessionStarting, model.SessionRunning, final} {
+		if _, err := st.UpdateSessionStatus(id, s); err != nil {
+			t.Fatalf("transition %s -> %s: %v", id, s, err)
+		}
+	}
+}
+
+// markSessionRunning walks a queued session through the legal
+// queued -> starting -> running transitions (no direct queued -> running).
+func markSessionRunning(t *testing.T, st *store.Store, id string) {
+	t.Helper()
+	for _, s := range []model.SessionStatus{model.SessionStarting, model.SessionRunning} {
 		if _, err := st.UpdateSessionStatus(id, s); err != nil {
 			t.Fatalf("transition %s -> %s: %v", id, s, err)
 		}
