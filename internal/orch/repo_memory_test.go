@@ -118,6 +118,12 @@ func TestRepoMemory_SeedEditMergeRoundTrip(t *testing.T) {
 	if !strings.Contains(string(excl), repoMemoryRoot+"/") {
 		t.Fatalf(".orcha/ not excluded from git: %q", excl)
 	}
+	// A .gitignore inside .orcha/ keeps gitignore-respecting tools (deno fmt, rg,
+	// …) from walking the memory files, since they don't read .git/info/exclude.
+	ign, err := os.ReadFile(filepath.Join(ws.Path, repoMemoryGitignore))
+	if err != nil || strings.TrimSpace(string(ign)) != "*" {
+		t.Fatalf(".orcha/.gitignore missing/wrong: %q err=%v", ign, err)
+	}
 	if out := tgit(t, ws.Path, "status", "--porcelain"); out != "" {
 		t.Fatalf("memory leaked into git status: %q", out)
 	}
