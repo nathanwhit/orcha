@@ -33,6 +33,13 @@ const (
 	repoMemoryIndex     = "MEMORY.md"             // index file, relative to repoMemoryDir
 	repoMemoryRoot      = ".orcha"                // excluded from git locally
 	gitLocalExclude     = ".git/info/exclude"
+	// repoMemoryGitignore lives inside .orcha/ and ignores everything under it.
+	// .git/info/exclude hides .orcha/ from git, but tools that walk the tree via
+	// .gitignore (deno fmt/lint, prettier, ripgrep, …) don't read info/exclude —
+	// they'd reformat the memory markdown out from under the agent. A `*` here is
+	// inside the already-excluded dir, so it fixes those tools without touching
+	// the agent's diff.
+	repoMemoryGitignore = ".orcha/.gitignore"
 )
 
 // repoMemoryScaffold seeds a brand-new repo's index so the agent sees the memory
@@ -140,6 +147,11 @@ func (o *Orchestrator) seedRepoMemory(ctx context.Context, sess *model.Session, 
 	// Keep the whole .orcha/ dir out of `git status`/diffs locally (the checkout is
 	// fresh each run, so a one-time append never accumulates duplicates).
 	_, _ = exec.RunCapture(ctx, ex, exec.Command{Name: "tee", Args: []string{"-a", gitLocalExclude}, Dir: ws.Path, Stdin: repoMemoryRoot + "/\n"})
+	// And keep gitignore-respecting tools (deno fmt/lint, prettier, rg) from
+	// walking into the memory files — they don't honor .git/info/exclude, only
+	// real .gitignore files. This one sits inside the excluded .orcha/, so it
+	// never reaches the agent's diff.
+	_, _ = exec.RunCapture(ctx, ex, exec.Command{Name: "tee", Args: []string{repoMemoryGitignore}, Dir: ws.Path, Stdin: "*\n"})
 }
 
 // mergeBackRepoMemory folds a finished session's edits to .orcha/memory/ back
