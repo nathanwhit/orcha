@@ -111,6 +111,17 @@ func (o *Orchestrator) superviseDecisions(now time.Time) []supervisorAction {
 			continue
 		}
 
+		// A manager that hasn't reached running yet (still queued, or mid-checkout
+		// now that starts run in the background) is NOT idle — it is coming up. Its
+		// UpdatedAt is stamped at creation and doesn't advance while it waits, so
+		// without this guard a manager that takes a while to place looks "quiet" and
+		// gets poked. The poke then finds no live run and resume-steers a manager
+		// that never delivered its objective prompt — exactly how a brand-new
+		// manager ended up blindly asking the user what to work on. Leave it to the
+		// scheduler; only a live manager can be idle.
+		if mgr.Status != model.SessionRunning {
+			continue
+		}
 		// Live manager: only poke one that has actually been quiet (a manager
 		// streaming output right now has a fresh UpdatedAt and is left alone).
 		if now.Sub(mgr.UpdatedAt) < superviseIdleAfter {
@@ -295,13 +306,35 @@ func (o *Orchestrator) objectiveStateSnapshot(objectiveID string) string {
 	return b.String()
 }
 
-// idleManagerPokeMessage is the re-poke text for a live but stalled manager.
+// idleManagerPokeMessage is the re-poke text for a live but stalled manager. It
+// restates the objective up front: a manager whose initial prompt never landed
+// (a startup race, a dropped resume) has no other way to recover what it is
+// supposed to be doing, and would otherwise burn the poke asking the user for
+// scope it was already given.
 func (o *Orchestrator) idleManagerPokeMessage(objectiveID string) string {
-	return "No workers are currently running for this objective, so nothing is making progress right now.\n\n" +
-		o.objectiveStateSnapshot(objectiveID) +
-		"\nDecide the next step now. If the objective is complete and every PR has merged, call " +
+	var b strings.Builder
+	if obj, err := o.st.GetObjective(objectiveID); err == nil {
+		fmt.Fprintf(&b, "You are the manager for this objective:\n\n%s\n\n",
+			clampForPoke(strings.TrimSpace(obj.Prompt)))
+	}
+	b.WriteString("No workers are currently running for this objective, so nothing is making progress right now.\n\n")
+	b.WriteString(o.objectiveStateSnapshot(objectiveID))
+	b.WriteString("\nDecide the next step now. If the objective is complete and every PR has merged, call " +
 		"mark_objective_done. If work remains, spawn the next worker. If you are blocked on a decision only " +
-		"the user can make, call ask_user. Do not end your turn without taking one of these actions."
+		"the user can make, call ask_user. Do not end your turn without taking one of these actions.")
+	return b.String()
+}
+
+// clampForPoke bounds the restated objective so the poke (typed into the live
+// pane via send-keys) stays a manageable size; a manager that needs the full
+// detail can read the issue/PR with its own tools.
+func clampForPoke(s string) string {
+	const max = 6000
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "\n\n…(objective truncated; read the linked issue/PR for the full text)"
 }
 
 // resumeManagerContext frames the state snapshot for a freshly respawned manager.
