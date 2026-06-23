@@ -112,9 +112,11 @@ func (s *Scheduler) Run(ctx context.Context) {
 	t := time.NewTicker(s.interval)
 	gc := time.NewTicker(workspaceGCInterval)
 	load := time.NewTicker(loadProbeInterval)
+	reconcile := time.NewTicker(orphanReconcileInterval)
 	defer t.Stop()
 	defer gc.Stop()
 	defer load.Stop()
+	defer reconcile.Stop()
 	// Sweep stale checkouts left by a previous process at startup, then on a tick.
 	go s.o.ReclaimWorkspaces(ctx)
 	// Sample target load before the first placements so they are load-aware from
@@ -137,6 +139,11 @@ func (s *Scheduler) Run(ctx context.Context) {
 		case <-load.C:
 			// Probe asynchronously: a slow/hung SSH probe must not stall scheduling.
 			go s.o.ProbeTargetLoads(ctx)
+		case <-reconcile.C:
+			// Heal sessions stranded "running" with no live run (a watcher that
+			// died without emitting terminal). Cheap and DB-only, but run off the
+			// scheduling thread for symmetry with the other periodic sweeps.
+			go s.ReconcileOrphans(ctx)
 		}
 	}
 }
@@ -220,6 +227,70 @@ func (s *Scheduler) Tick(ctx context.Context) (int, error) {
 		}(sess.ID)
 	}
 	return started, nil
+}
+
+// orphanReconcileInterval is how often the scheduler heals sessions stranded in
+// a live status (starting/running) with no live run backing them. It is not
+// latency-sensitive — a strand only deadlocks its objective, it does not corrupt
+// anything — so it runs far less often than the scheduling tick.
+var orphanReconcileInterval = 1 * time.Minute
+
+// orphanGrace is how long a starting/running row may have no live run before the
+// reconciler treats it as orphaned. The in-flight (isStarting) guard already
+// covers a scheduler-launched StartRun for its whole duration; this grace is the
+// margin for a direct StartRun that bypasses beginStart (the operator restart
+// endpoint) and for clock skew on updated_at, so a just-launched session whose
+// run is still wiring up is never yanked.
+var orphanGrace = 90 * time.Second
+
+// ReconcileOrphans requeues sessions whose row says starting/running but which
+// have no live run in memory and no StartRun in flight — i.e. the in-memory run
+// whose watcher should drive them to a terminal state is gone (a missed tmux
+// exit, a provider goroutine that stopped, a re-adopt after restart that later
+// lost the session). Such a row is stranded forever: it never reaches terminal,
+// so a worker/follow-up's manager waits on a completion that never comes, and the
+// "don't spawn a duplicate" guards stop it from replacing the dead child.
+//
+// RecoverInterrupted only sweeps once at startup (when every live-status row is
+// by definition unbacked), so a strand that happens mid-life is never cleaned up
+// — this is the periodic counterpart. Requeuing routes the session back through
+// StartRun, which re-adopts a still-live tmux, resumes a recoverable conversation,
+// or fails cleanly; a clean failure is itself the fix, because it finally
+// re-engages the waiting manager.
+func (s *Scheduler) ReconcileOrphans(ctx context.Context) {
+	sessions, err := s.o.st.ListSessionsByStatuses(model.SessionStarting, model.SessionRunning)
+	if err != nil {
+		return
+	}
+	cutoff := s.o.st.Now().Add(-orphanGrace)
+	requeued := 0
+	for _, sess := range sessions {
+		if sess.UpdatedAt.After(cutoff) {
+			continue // recently touched; a start may still be registering its run
+		}
+		s.o.mu.Lock()
+		_, live := s.o.runs[sess.ID]
+		s.o.mu.Unlock()
+		if live {
+			continue // a real run is driving it
+		}
+		if s.isStarting(sess.ID) {
+			continue // StartRun in flight (e.g. a multi-minute checkout)
+		}
+		ok, err := s.o.st.RequeueSession(sess.ID)
+		if err != nil || !ok {
+			continue // moved to terminal under us, or a transient DB error
+		}
+		_ = s.o.emit(sess.ID, model.MsgSystem, model.KindStatus,
+			"no live process backed this running session; requeued to restart it", nil)
+		s.o.audit(sess.ObjectiveID, sess.ID, "session_reconciled",
+			"requeued orphaned "+string(sess.Status)+" session with no live run", nil)
+		requeued++
+	}
+	if requeued > 0 {
+		s.o.notifyChange()
+		s.Wake() // run a tick now so the requeued sessions restart promptly
+	}
 }
 
 // dependencyState reports whether a session's declared dependencies are all
