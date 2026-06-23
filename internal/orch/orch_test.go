@@ -1991,6 +1991,46 @@ func TestNotifyManagerOfMerge_RevivesParkedManager(t *testing.T) {
 	}
 }
 
+// A small opening prompt stays inline (positional argv), but an oversized one is
+// written to a file on the target and replaced by a short bootstrap pointing at
+// it — so a big prompt can't blow the command-line size limit.
+func TestExternalizeLargePrompt_OffloadsToFileWhenBig(t *testing.T) {
+	o, st := newTestOrch(t)
+	o.SetWorkspacePreparer(workspace.New())
+	tgt := &model.Target{Name: "local", Kind: model.TargetLocal, Status: model.TargetOnline,
+		WorkRoot: t.TempDir(), CapacitySessions: 4}
+	if err := st.CreateTarget(tgt); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	sess := &model.Session{Role: model.RoleManager, Agent: model.AgentClaude,
+		Mode: model.ModeInteractive, Status: model.SessionQueued}
+	if err := st.CreateSession(sess); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// Small prompt: left exactly as-is.
+	small := agent.Spec{Prompt: "do the thing"}
+	if got := o.externalizeLargePrompt(context.Background(), sess, tgt, small); got.Prompt != small.Prompt {
+		t.Fatalf("small prompt should stay inline, got %q", got.Prompt)
+	}
+
+	// Large prompt: offloaded to the file, replaced by a bootstrap referencing it.
+	big := strings.Repeat("x", maxInlinePromptBytes+1)
+	path := promptFilePath(sess.ID)
+	t.Cleanup(func() { _ = os.Remove(path) })
+	got := o.externalizeLargePrompt(context.Background(), sess, tgt, agent.Spec{Prompt: big})
+	if strings.Contains(got.Prompt, big) || !strings.Contains(got.Prompt, path) {
+		t.Fatalf("large prompt should be replaced by a bootstrap referencing %s, got len=%d", path, len(got.Prompt))
+	}
+	onDisk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("prompt file not written: %v", err)
+	}
+	if string(onDisk) != big {
+		t.Fatalf("prompt file content mismatch: %d bytes on disk", len(onDisk))
+	}
+}
+
 // terminateSession drives a (queued) session through the legal lifecycle to a
 // terminal state: queued -> starting -> running -> final.
 func terminateSession(t *testing.T, st *store.Store, id string, final model.SessionStatus) {
