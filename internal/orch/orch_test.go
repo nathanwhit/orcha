@@ -2121,6 +2121,84 @@ func TestReclaimWorkspaces(t *testing.T) {
 	}
 }
 
+// While an objective is still active, a finished worker's isolated checkout is
+// reclaimed once a PR has been published from its branch — but a not-yet-published
+// worker, a manager's checkout, and a checkout a pending dependent will inherit are
+// all left alone.
+func TestReclaimWorkspaces_EagerWorkerCheckouts(t *testing.T) {
+	o, st := newTestOrch(t)
+	tgt := addTarget(t, st, "local", model.TargetLocal, 4)
+
+	obj := &model.Objective{Title: "active", Prompt: "p", Status: model.ObjectiveActive}
+	_ = st.CreateObjective(obj)
+
+	mkdir := func(name string) string {
+		d := filepath.Join(t.TempDir(), name)
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	// A finished worker on a branch, optionally with a published PR and a checkout.
+	worker := func(name, branch string, status model.SessionStatus, role model.SessionRole, published bool) (*model.Session, *model.Workspace, string) {
+		s := &model.Session{ObjectiveID: obj.ID, Role: role, Agent: model.AgentClaude, Status: status}
+		if err := st.CreateSession(s); err != nil {
+			t.Fatal(err)
+		}
+		path := mkdir(name)
+		ws := &model.Workspace{ObjectiveID: obj.ID, TargetID: tgt.ID, SessionID: s.ID,
+			Kind: model.WorkspaceIsolated, BranchName: branch, Path: path, Status: model.WorkspaceReady}
+		if err := st.CreateWorkspace(ws); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.UpdateSessionRuntime(s.ID, func(se *model.Session) { se.WorkspaceID = ws.ID }); err != nil {
+			t.Fatal(err)
+		}
+		if published {
+			if err := st.CreatePR(&model.PullRequest{ObjectiveID: obj.ID, CreatedBySessionID: s.ID,
+				Repo: "octo/repo", Number: len(branch), Branch: branch, BaseBranch: "main", Status: model.PROpen}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return s, ws, path
+	}
+
+	// Reclaimed: finished implementer whose branch was published.
+	_, spentWS, spentPath := worker("spent", "orcha/impl-a", model.SessionSucceeded, model.RoleImplementer, true)
+	// Kept: finished implementer with no PR yet (manager may still publish from it).
+	_, freshWS, freshPath := worker("fresh", "orcha/impl-b", model.SessionSucceeded, model.RoleImplementer, false)
+	// Kept: the manager's own checkout (long-lived) even though a PR exists.
+	_, mgrWS, mgrPath := worker("mgr", "orcha/impl-c", model.SessionSucceeded, model.RoleManager, true)
+
+	// Kept: a published worker that a pending (non-terminal) dependent will inherit.
+	depFrom, depWS, depPath := worker("dep", "orcha/impl-d", model.SessionSucceeded, model.RoleImplementer, true)
+	pending := &model.Session{ObjectiveID: obj.ID, Role: model.RoleValidator, Agent: model.AgentClaude,
+		Status: model.SessionQueued, Metadata: model.JSONMap{"depends_on": []string{depFrom.ID}}}
+	if err := st.CreateSession(pending); err != nil {
+		t.Fatal(err)
+	}
+
+	o.ReclaimWorkspaces(context.Background())
+
+	if _, err := os.Stat(spentPath); !os.IsNotExist(err) {
+		t.Fatalf("published worker's checkout should be reclaimed, stat err=%v", err)
+	}
+	if ws, _ := st.GetWorkspace(spentWS.ID); ws.Status != model.WorkspaceArchived {
+		t.Fatalf("reclaimed workspace should be archived, got %s", ws.Status)
+	}
+	for name, kept := range map[string]struct {
+		path string
+		id   string
+	}{"unpublished": {freshPath, freshWS.ID}, "manager": {mgrPath, mgrWS.ID}, "pending-dependent": {depPath, depWS.ID}} {
+		if _, err := os.Stat(kept.path); err != nil {
+			t.Fatalf("%s checkout must be kept, stat err=%v", name, err)
+		}
+		if ws, _ := st.GetWorkspace(kept.id); ws.Status != model.WorkspaceReady {
+			t.Fatalf("%s workspace must stay ready, got %s", name, ws.Status)
+		}
+	}
+}
+
 func TestFailingChecksPR_SpawnsCIFollowup(t *testing.T) {
 	o, st := newTestOrch(t)
 	addTarget(t, st, "local", model.TargetLocal, 4)
