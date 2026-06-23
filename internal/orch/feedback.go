@@ -223,6 +223,79 @@ func (o *Orchestrator) notifyManagerOfMerge(pr *model.PullRequest) {
 	_ = o.Steer(context.Background(), mgr.ID, msg)
 }
 
+// notifyManagerOfFollowup re-engages the objective's manager when a PR/CI
+// follow-up finishes WITHOUT landing its fix. Follow-ups are spawned parentless on
+// purpose — the PR pipeline owns their happy path (a successful push re-runs CI, a
+// merge revives the manager), so notifyManagerOfChild ignores them. But a follow-up
+// that FAILED has no supervisor: the manager that should retry, re-scope, or
+// ask_user never hears about it, and the objective silently stalls on a still-red
+// PR. (This is exactly how a disk-full push failure was papered over as "succeeded"
+// and the objective went quiet.) So on a non-success outcome, tell the manager —
+// reviving a parked one, since a failed follow-up is an actionable event.
+func (o *Orchestrator) notifyManagerOfFollowup(child *model.Session, success bool) {
+	if success {
+		return // happy path is owned by the PR pipeline (CI re-run / merge)
+	}
+	prNum := 0
+	if prID, _ := child.Metadata["pr_id"].(string); prID != "" {
+		if pr, err := o.st.GetPR(prID); err == nil && pr != nil {
+			prNum = pr.Number
+		}
+	}
+	mgr := o.activeManagerFor(child.ObjectiveID)
+	if mgr == nil {
+		// Parked objective with no live manager: revive one so the failure is acted
+		// on (mirrors notifyManagerOfMerge), but respect the respawn budget so a
+		// follow-up that keeps failing can't spin up managers without end.
+		obj, err := o.st.GetObjective(child.ObjectiveID)
+		if err != nil || obj.Status != model.ObjectiveActive {
+			return
+		}
+		if o.countManagers(child.ObjectiveID) >= maxManagerSessions {
+			o.audit(child.ObjectiveID, "", "followup_failed_no_manager",
+				fmt.Sprintf("%s for PR #%d failed but manager budget is exhausted", child.Role, prNum), nil)
+			return
+		}
+		o.audit(child.ObjectiveID, "", "manager_notified_followup_failed",
+			fmt.Sprintf("%s for PR #%d failed; reviving manager", child.Role, prNum), nil)
+		o.respawnManager(supervisorAction{
+			objectiveID: child.ObjectiveID,
+			prompt:      obj.Prompt,
+			agent:       o.lastManagerAgent(child.ObjectiveID),
+		})
+		return
+	}
+	msg := fmt.Sprintf(
+		"A %s (session %s) for PR #%d FAILED — it did NOT update the PR, so CI is still red. Summary: %s\n"+
+			"Do not assume the fix landed. Decide how to proceed: inspect the failure, re-issue "+
+			"address_pr_feedback with sharper scope, or ask_user if you are blocked.",
+		child.Role, child.ID, prNum, relaySummary(child))
+	o.audit(child.ObjectiveID, mgr.ID, "manager_notified_followup_failed",
+		fmt.Sprintf("%s for PR #%d failed", child.Role, prNum), model.JSONMap{"child": child.ID})
+	_ = o.Steer(context.Background(), mgr.ID, msg)
+}
+
+// followupAdvancedPR reports whether a follow-up actually moved its PR's head —
+// the proof it pushed a fix. A successful update_pr advances the PR row's HeadSHA
+// past the BaseSHA the follow-up's PR-branch workspace was checked out at; if they
+// still match, no push landed. Conservative: when the SHAs can't be resolved it
+// returns true, so a missing-data case never manufactures a false failure.
+func (o *Orchestrator) followupAdvancedPR(child *model.Session) bool {
+	prID, _ := child.Metadata["pr_id"].(string)
+	if prID == "" || child.WorkspaceID == "" {
+		return true
+	}
+	ws, err := o.st.GetWorkspace(child.WorkspaceID)
+	if err != nil || ws == nil || ws.BaseSHA == "" {
+		return true
+	}
+	pr, err := o.st.GetPR(prID)
+	if err != nil || pr == nil || pr.HeadSHA == "" {
+		return true
+	}
+	return pr.HeadSHA != ws.BaseSHA
+}
+
 // hasActivePRFollowup reports whether a non-terminal follow-up is already working
 // the given PR — so the conflict/feedback path doesn't dispatch a duplicate while
 // one is in flight (and does re-dispatch once a prior attempt has finished).

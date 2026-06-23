@@ -1610,6 +1610,100 @@ func TestManagerNotify_WaitsForPendingDependents(t *testing.T) {
 	}
 }
 
+// A CI follow-up's success is only real if it advanced the PR head (i.e. its push
+// landed). followupAdvancedPR is the structural check that catches a follow-up
+// which "succeeded" without pushing anything.
+func TestFollowupAdvancedPR_RequiresPRHeadToMove(t *testing.T) {
+	o, st := newTestOrch(t)
+	obj, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "o/r", Number: 7, Branch: "b", Status: model.PROpen, HeadSHA: "sha0"}
+	if err := st.CreatePR(pr); err != nil {
+		t.Fatalf("pr: %v", err)
+	}
+	ws := &model.Workspace{ObjectiveID: obj.ID, Kind: model.WorkspacePRBranch, Status: model.WorkspaceReady, BaseSHA: "sha0", BranchName: "b"}
+	if err := st.CreateWorkspace(ws); err != nil {
+		t.Fatalf("ws: %v", err)
+	}
+	child := &model.Session{ObjectiveID: obj.ID, Role: model.RoleCIFollowup, Agent: model.AgentCodex,
+		Status: model.SessionRunning, WorkspaceID: ws.ID, Metadata: model.JSONMap{"pr_id": pr.ID}}
+	if err := st.CreateSession(child); err != nil {
+		t.Fatalf("sess: %v", err)
+	}
+
+	// PR head still equals the workspace base — nothing was pushed.
+	if o.followupAdvancedPR(child) {
+		t.Fatal("expected followupAdvancedPR=false when the PR head still equals the workspace base")
+	}
+	// A successful update_pr advances the PR head.
+	if _, err := st.UpdatePR(pr.ID, func(p *model.PullRequest) { p.HeadSHA = "sha1" }); err != nil {
+		t.Fatalf("update pr: %v", err)
+	}
+	if !o.followupAdvancedPR(child) {
+		t.Fatal("expected followupAdvancedPR=true once the PR head moved past base")
+	}
+}
+
+func lastUserMessage(t *testing.T, st *store.Store, sessionID string) string {
+	t.Helper()
+	msgs, _ := st.MessagesAfter(sessionID, 0, 200)
+	last := ""
+	for _, m := range msgs {
+		if m.Source == model.MsgUser {
+			last = m.Content
+		}
+	}
+	return last
+}
+
+// A non-success follow-up must reach the objective's manager (the supervisor),
+// while a successful one must not bother it (the PR pipeline owns the happy path).
+func TestNotifyManagerOfFollowup_FailureReachesLiveManager(t *testing.T) {
+	o, st := newTestOrch(t)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	obj, mgr, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	_, _ = st.UpdateSessionStatus(mgr.ID, model.SessionRunning)
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "o/r", Number: 9, Branch: "b", Status: model.PROpen}
+	_ = st.CreatePR(pr)
+	child := &model.Session{ObjectiveID: obj.ID, Role: model.RoleCIFollowup, Agent: model.AgentCodex,
+		Status: model.SessionFailed, Title: "Follow-up: PR #9", Metadata: model.JSONMap{"pr_id": pr.ID}}
+	_ = st.CreateSession(child)
+
+	// A successful follow-up does not steer the manager.
+	o.notifyManagerOfFollowup(child, true)
+	if msg := lastUserMessage(t, st, mgr.ID); msg != "" {
+		t.Fatalf("a successful follow-up should not steer the manager; got %q", msg)
+	}
+	// A failed one does, telling it the PR was not fixed.
+	o.notifyManagerOfFollowup(child, false)
+	msg := lastUserMessage(t, st, mgr.ID)
+	if !strings.Contains(msg, "FAILED") || !strings.Contains(msg, "#9") {
+		t.Fatalf("failed follow-up should steer the manager about PR #9; got %q", msg)
+	}
+}
+
+// On a parked objective (no live manager) a failed follow-up revives one, so the
+// failure is not silently dropped.
+func TestNotifyManagerOfFollowup_RevivesParkedManager(t *testing.T) {
+	o, st := newTestOrch(t)
+	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
+	obj, mgr, _ := o.CreateObjective(NewObjectiveSpec{Title: "x", Prompt: "p"})
+	// Drive the manager to a terminal state: the objective is parked with none live.
+	for _, s := range []model.SessionStatus{model.SessionStarting, model.SessionRunning, model.SessionSucceeded} {
+		_, _ = st.UpdateSessionStatus(mgr.ID, s)
+	}
+	pr := &model.PullRequest{ObjectiveID: obj.ID, Repo: "o/r", Number: 11, Branch: "b", Status: model.PROpen}
+	_ = st.CreatePR(pr)
+	child := &model.Session{ObjectiveID: obj.ID, Role: model.RoleCIFollowup, Agent: model.AgentClaude,
+		Status: model.SessionFailed, Title: "Follow-up: PR #11", Metadata: model.JSONMap{"pr_id": pr.ID}}
+	_ = st.CreateSession(child)
+
+	before := o.countManagers(obj.ID)
+	o.notifyManagerOfFollowup(child, false)
+	if after := o.countManagers(obj.ID); after != before+1 {
+		t.Fatalf("a failed follow-up on a parked objective should revive a manager: before=%d after=%d", before, after)
+	}
+}
+
 func TestMarkObjectiveDone_GatedOnOpenPRs(t *testing.T) {
 	o, st := newTestOrch(t)
 	o.RegisterProvider(agent.NewFake(model.AgentClaude, true, nil))
