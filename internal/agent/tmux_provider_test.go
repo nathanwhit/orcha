@@ -183,8 +183,11 @@ func TestTmuxProvider_AttachPTY(t *testing.T) {
 	}
 }
 
-// An orchestrator restart must ADOPT a still-live tmux session — the TUI keeps
-// its full context — never kill and recreate it.
+// With no ResumeCommand configured, an orchestrator restart falls back to
+// ADOPTING a still-live tmux session as-is (the TUI keeps its full context).
+// Providers that CAN resume (Codex/Claude) instead relaunch — see
+// TestTmuxProvider_ResumeRelaunchesWhenResumeCommandSet — so the agent reconnects
+// its MCP to the new process rather than hanging on the dead one.
 func TestTmuxProvider_ResumeAdoptsLiveSession(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
@@ -256,6 +259,78 @@ func TestTmuxProvider_ResumeAdoptsLiveSession(t *testing.T) {
 	case <-sawDone:
 	case <-time.After(6 * time.Second):
 		t.Fatal("no done event after cancel")
+	}
+}
+
+// When a ResumeCommand is configured (Codex/Claude), an orchestrator restart must
+// RELAUNCH the agent in place rather than adopt the still-live process: the live
+// agent's MCP connection died with the previous orchestrator and it will not
+// reconnect, so adopting it would silently wedge every tool call. Relaunching
+// kills the stale process and starts fresh (the resume command continues the
+// conversation), which is what restores a working MCP connection.
+func TestTmuxProvider_ResumeRelaunchesWhenResumeCommandSet(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	const id = "tmux-relaunch-1"
+
+	// A config that knows how to resume: the resume command prints a distinct
+	// marker and then blocks (cat) so the recreated session stays alive.
+	cfg := TmuxConfig{
+		Kind: model.AgentOther,
+		ResumeCommand: func(spec Spec) []string {
+			return []string{"bash", "-c", "echo RELAUNCH-MARKER; exec cat"}
+		},
+	}
+
+	// First process: a live shell session with a marker on screen.
+	p1 := NewTmux(cfg)
+	h1, ev1, err := p1.StartSession(context.Background(), Spec{SessionID: id})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	go func() {
+		for range ev1 {
+		}
+	}()
+	if err := p1.SendInput(h1, "echo STALE-MARKER"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	waitForScreen(t, p1, h1, "STALE-MARKER")
+
+	// "Restart": a fresh provider instance resumes. With a ResumeCommand set it must
+	// kill the stale session and recreate it — the recreate announcement fires and
+	// the prior STALE-MARKER is gone, replaced by the resume command's output.
+	p2 := NewTmux(cfg)
+	h2, ev2, err := p2.ResumeSession(context.Background(), id, Spec{SessionID: id})
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	announced := make(chan string, 1)
+	go func() {
+		for ev := range ev2 {
+			if ev.Kind == EventStatus {
+				select {
+				case announced <- ev.Content:
+				default:
+				}
+			}
+		}
+	}()
+	select {
+	case msg := <-announced:
+		if !strings.Contains(msg, "recreated") {
+			t.Fatalf("status = %q, want recreate announcement", msg)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no status event after resume")
+	}
+	waitForScreen(t, p2, h2, "RELAUNCH-MARKER")
+	if screen, err := p2.Snapshot(h2); err == nil && strings.Contains(screen.Content, "STALE-MARKER") {
+		t.Fatalf("stale process was adopted, not relaunched:\n%s", screen.Content)
+	}
+	if err := p2.CancelSession(h2); err != nil {
+		t.Fatalf("cancel: %v", err)
 	}
 }
 
