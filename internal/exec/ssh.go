@@ -103,10 +103,15 @@ func remoteCommand(cmd Command) string {
 // also what delivers SIGHUP to the remote process group on disconnect.
 func (s *SSHExecutor) Start(ctx context.Context, cmd Command) (Process, error) {
 	remote := remoteCommand(cmd)
-	args := append(s.sshArgs(cmd.Stdin == ""), remote)
+	// A feed-and-wait write (CloseStdin) is not interactive even when its content
+	// is empty: it must run WITHOUT a pty so the stdin EOF reaches the remote
+	// reader instead of being swallowed by -tt.
+	interactive := cmd.Stdin == "" && !cmd.CloseStdin
+	args := append(s.sshArgs(interactive), remote)
 	// The remote command carries Dir/Env/Stdin semantics, so the local ssh
-	// command needs only the initial stdin forwarded.
-	return s.local.Start(ctx, Command{Name: "ssh", Args: args, Stdin: cmd.Stdin})
+	// command needs only the initial stdin forwarded — and closed when the remote
+	// command expects EOF.
+	return s.local.Start(ctx, Command{Name: "ssh", Args: args, Stdin: cmd.Stdin, CloseStdin: cmd.CloseStdin})
 }
 
 // CleanCapture runs cmd on the remote host WITHOUT allocating a tty, so its

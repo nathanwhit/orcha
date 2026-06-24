@@ -176,6 +176,28 @@ func TestLocal_StdinClosedForFeedAndWait(t *testing.T) {
 	}
 }
 
+// The deadlock that actually bricked prod: an EMPTY feed-and-wait write. With no
+// content, Stdin == "" reads as an interactive session and the pipe is left open,
+// so `cat`/`tee` block on stdin forever. CloseStdin opts the empty write into the
+// write-and-close path so it still sees EOF and exits.
+func TestLocal_EmptyStdinClosedWithCloseStdin(t *testing.T) {
+	l := NewLocal()
+	done := make(chan struct{})
+	var err error
+	go func() {
+		defer close(done)
+		_, err = RunCapture(context.Background(), l, Command{Name: "cat", Stdin: "", CloseStdin: true})
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunCapture with empty Stdin + CloseStdin hung — pipe was not closed (the manager-wedge deadlock)")
+	}
+	if err != nil {
+		t.Fatalf("RunCapture: %v", err)
+	}
+}
+
 func TestRemoteCommandRendering(t *testing.T) {
 	got := remoteCommand(Command{
 		Dir:  "/home/bot/work/sess",
