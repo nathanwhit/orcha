@@ -250,11 +250,17 @@ func (o *Orchestrator) StartRun(ctx context.Context, sessionID string) (*Run, er
 }
 
 // maxInlinePromptBytes is the largest opening prompt passed inline as a positional
-// argument. Above it the prompt is written to a file and replaced by a bootstrap.
-// The kernel cap is ~128KB per argv string (MAX_ARG_STRLEN), less after the shell/
-// tmux/SSH escaping a remote launch adds; 32KB stays comfortably clear while still
-// covering essentially every real objective prompt inline.
-const maxInlinePromptBytes = 32 * 1024
+// argument. Above it the prompt is written to a file and replaced by a short
+// bootstrap that points the agent at it.
+//
+// The binding limit is NOT the kernel's ~128KB MAX_ARG_STRLEN but tmux's own
+// command-length cap, which is far lower: a remote `tmux new-session` was measured
+// (on the prod SSH box) to start failing with "command too long" between 12KB and
+// 16KB of total command — and a ~17KB reviewer prompt did exactly that in prod,
+// because 32KB let it through inline. 8KB keeps the assembled command (agent flags
+// + the --mcp-config JSON + worst-case shell-escaping inflation + the prompt) well
+// under tmux's cap; anything larger is externalized to a file instead.
+const maxInlinePromptBytes = 8 * 1024
 
 // externalizeLargePrompt moves an oversized opening prompt off the command line.
 // The interactive providers pass the first prompt as a positional argv argument,
