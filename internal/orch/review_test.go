@@ -98,6 +98,16 @@ func TestReviewGate_OnHoldsAndSpawnsAdversary(t *testing.T) {
 	if fp, _ := rv.Metadata["review_fingerprint"].(string); fp != diffFingerprint("DIFF-V1") {
 		t.Fatalf("reviewer fingerprint = %q, want %q", fp, diffFingerprint("DIFF-V1"))
 	}
+	// The reviewer inherits the implementer's actual checkout (its branch with the
+	// change applied) rather than a clean tree, so it depends on the implementer.
+	if deps := dependencyIDs(rv); len(deps) != 1 || deps[0] != impl.ID {
+		t.Fatalf("reviewer should inherit the implementer's checkout (depends_on=[%s]), got %v", impl.ID, deps)
+	}
+	// The diff is NOT inlined into the prompt anymore — that bloat blew tmux's
+	// command-length cap. The reviewer reads it from its own checkout instead.
+	if strings.Contains(rv.Goal, "DIFF-V1") {
+		t.Fatal("reviewer prompt must not embed the diff text; it reads the change from its checkout")
+	}
 	gotImpl, _ := o.st.GetSession(impl.ID)
 	if _, ok := pendingPublishSpec(gotImpl); !ok {
 		t.Fatal("publish intent was not stashed on the implementer")
@@ -134,6 +144,36 @@ func TestReviewGate_ApproveOpensPR(t *testing.T) {
 	}
 	if len(f.Pushes) != 1 {
 		t.Fatalf("expected exactly one push, got %d", len(f.Pushes))
+	}
+}
+
+// The reviewer now shares the implementer's checkout and may commit a fix, which
+// moves the diff. Its own approval must still publish — the verdict is pinned to
+// the diff as it stands at submit, not the pre-review one — rather than bouncing
+// into an endless re-review of the change it just fixed.
+func TestReviewGate_ReviewerFixShipsWithApproval(t *testing.T) {
+	o, obj, mgr, impl, f := reviewGateFixture(t, true)
+	if _, err := o.PublishPR(context.Background(), impl.ID, PublishSpec{Title: "t", Body: "b", CommitMessage: "c"}); err == nil {
+		t.Fatal("first publish should be held")
+	}
+	rv := reviewersFor(o, obj.ID)[0]
+	_ = o.Cancel(mgr.ID, false)
+
+	// The reviewer committed a fix on the shared branch — the diff moved V1 -> V2.
+	gotImpl, _ := o.st.GetSession(impl.ID)
+	ws, _ := o.st.GetWorkspace(gotImpl.WorkspaceID)
+	f.SetDiffText(ws.Path, "DIFF-V2")
+
+	ctx := mcp.WithSession(context.Background(), rv.ID)
+	msg, err := o.mcpSubmitReview(ctx, map[string]any{"verdict": "approve", "summary": "found and fixed a bug"})
+	if err != nil {
+		t.Fatalf("submit_review approve: %v", err)
+	}
+	if !strings.Contains(msg, "opened PR") {
+		t.Fatalf("approve after a reviewer-authored fix must publish the (now-fixed) change, got %q", msg)
+	}
+	if prs, _ := o.st.ListPRsByObjective(obj.ID); len(prs) != 1 || prs[0].Status != model.PROpen {
+		t.Fatalf("expected exactly one open PR including the reviewer's fix, got %+v", prs)
 	}
 }
 
