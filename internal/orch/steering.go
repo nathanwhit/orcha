@@ -146,7 +146,7 @@ func (o *Orchestrator) buildSpec(sess *model.Session, ws *model.Workspace, tgt *
 		spec.PermissionMode = o.cfg.WorkerPermissionMode // shell so it can commit
 		spec.OneShot = true
 		if spec.Prompt != "" {
-			spec.Prompt = followupSystemPreamble + o.scratchNote(sess, tgt) + completionInstruction + "\n\n" + spec.Prompt
+			spec.Prompt = followupSystemPreamble + submoduleNote + o.scratchNote(sess, tgt) + completionInstruction + "\n\n" + spec.Prompt
 		}
 	// Adversarial reviewer spawned by the review gate (bound to a reviewed
 	// session): it gets the dedicated review surface (submit_review/create_note/
@@ -162,7 +162,7 @@ func (o *Orchestrator) buildSpec(sess *model.Session, ws *model.Workspace, tgt *
 		spec.PermissionMode = o.cfg.WorkerPermissionMode
 		spec.OneShot = true
 		if spec.Prompt != "" {
-			spec.Prompt = reviewerSystemPreamble + repoMemoryNote + o.scratchNote(sess, tgt) + completionInstruction + "\n\n" + spec.Prompt
+			spec.Prompt = reviewerSystemPreamble + repoMemoryNote + submoduleNote + o.scratchNote(sess, tgt) + completionInstruction + "\n\n" + spec.Prompt
 		}
 	// Other coding workers run one-shot in a checkout and do not publish. They get
 	// the small worker tool surface (report_result/create_note/ask_user) so they
@@ -175,7 +175,7 @@ func (o *Orchestrator) buildSpec(sess *model.Session, ws *model.Workspace, tgt *
 		spec.PermissionMode = o.cfg.WorkerPermissionMode
 		spec.OneShot = true
 		if spec.Prompt != "" {
-			spec.Prompt = workerSystemPreamble + repoMemoryNote + o.scratchNote(sess, tgt) + completionInstruction + "\n\n" + spec.Prompt
+			spec.Prompt = workerSystemPreamble + repoMemoryNote + submoduleNote + o.scratchNote(sess, tgt) + completionInstruction + "\n\n" + spec.Prompt
 		}
 	}
 	return spec
@@ -208,6 +208,11 @@ func (o *Orchestrator) scratchNote(sess *model.Session, tgt *model.Target) strin
 // watcher could mistake for the agent actually emitting it.
 var completionInstruction = "\n\nIMPORTANT — when you are completely finished (after committing), print this exact marker, " +
 	agent.TurnDoneSentinel + ", on a line by itself as the very last thing you output, with nothing after it. That marker is how the team learns your work is done."
+
+// submoduleNote warns coding agents that a very large git submodule may not be
+// checked out in their workspace: prep skips outsized submodules (e.g. a
+// web-platform-tests suite) to stay fast, so a task that needs one must init it.
+const submoduleNote = "\n\nLARGE SUBMODULES: a very large git submodule (e.g. a web-platform-tests suite) may NOT be checked out in your workspace — prep skips outsized ones to stay fast. If your task needs one, run `git submodule update --init <path>` to materialize it first."
 
 // followupSystemPreamble orients a PR follow-up agent. It must decide and act —
 // the orchestrator does not respond on its behalf.

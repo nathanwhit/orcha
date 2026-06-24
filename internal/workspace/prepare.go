@@ -136,6 +136,19 @@ func (p *Preparer) updateSubmodules(ctx context.Context, ex exec.Executor, spec 
 		p.warmSubmoduleMirror(ctx, ex, cache, u)
 	}
 
+	// Don't materialize a submodule whose pinned tree dwarfs the superproject:
+	// writing that many files is what dominates prep (denoland/deno's WPT suite is
+	// ~160k files — roughly 3x the rest of the repo — and is bulk test data a
+	// typical worker never touches). Such submodules are left uninitialized; a
+	// worker that actually needs one runs `git submodule update --init <path>`
+	// itself. The size is read from the warmed cache, so nothing is written to disk
+	// to make the call. Determined generically by file count — no repo-specific
+	// paths baked in.
+	keep, skipped := p.partitionSubmodulesBySize(ctx, ex, spec, cache)
+	if len(skipped) > 0 && len(keep) == 0 {
+		return nil // every submodule was too large to check out eagerly
+	}
+
 	args := []string{"-C", spec.Dir, "submodule", "update", "--init", "--recursive",
 		"--checkout", "--jobs", submoduleJobs}
 	if len(urls) > 0 {
@@ -144,6 +157,12 @@ func (p *Preparer) updateSubmodules(ctx context.Context, ex exec.Executor, spec 
 		// prep while the cache persists, so the alternate this leaves behind stays
 		// valid for the workspace's lifetime.
 		args = append(args, "--reference", cache)
+	}
+	if len(skipped) > 0 {
+		// Restrict the update to the kept paths; an explicit pathspec leaves the
+		// large submodules uninitialized instead of checking them out.
+		args = append(args, "--")
+		args = append(args, keep...)
 	}
 	if _, err := p.run(ctx, ex, "", args...); err != nil {
 		return fmt.Errorf("workspace: init submodules for %s: %w", spec.Branch, err)
@@ -202,6 +221,52 @@ func (p *Preparer) submoduleURLs(ctx context.Context, ex exec.Executor, spec Spe
 // submodules.
 func (p *Preparer) submodulePaths(ctx context.Context, ex exec.Executor, spec Spec) []string {
 	return p.configValues(ctx, ex, "-C", spec.Dir, "config", "--file", ".gitmodules", "--get-regexp", `^submodule\..*\.path$`)
+}
+
+// maxEagerSubmoduleFiles is the file-count ceiling above which a submodule is NOT
+// checked out during prep. The superproject working tree is itself ~50k files, so
+// a submodule larger than this is bulk test data (the WPT suite) whose
+// materialization dominates prep and which a typical worker (build, lint, unit
+// tests) never needs. A var, not a const, so tests can lower it; <= 0 disables the
+// skip entirely (check out every submodule, the old behavior).
+var maxEagerSubmoduleFiles = 50000
+
+// partitionSubmodulesBySize splits the repo's submodules into the ones small
+// enough to check out now (keep) and the ones too large to materialize eagerly
+// (skipped), counting each submodule's pinned tree from the warmed cache WITHOUT
+// writing any working tree. A submodule whose size can't be determined is kept, so
+// the rule never silently drops a submodule it merely failed to measure.
+func (p *Preparer) partitionSubmodulesBySize(ctx context.Context, ex exec.Executor, spec Spec, cache string) (keep, skipped []string) {
+	for _, path := range p.submodulePaths(ctx, ex, spec) {
+		if maxEagerSubmoduleFiles > 0 {
+			if n, ok := p.submoduleFileCount(ctx, ex, spec, cache, path); ok && n > maxEagerSubmoduleFiles {
+				skipped = append(skipped, path)
+				continue
+			}
+		}
+		keep = append(keep, path)
+	}
+	return keep, skipped
+}
+
+// submoduleFileCount returns how many files the submodule at path carries at the
+// commit the superproject pins, read from the warmed cache's object store (the
+// pin's tree is present there after warmSubmoduleMirror added the submodule as a
+// remote and fetched it). ok is false when the count can't be determined — a
+// missing object, an unreadable tree — so the caller treats that as "keep".
+func (p *Preparer) submoduleFileCount(ctx context.Context, ex exec.Executor, spec Spec, cache, path string) (int, bool) {
+	sha, err := p.capture(ctx, ex, "-C", spec.Dir, "rev-parse", "HEAD:"+path)
+	if err != nil || sha == "" {
+		return 0, false
+	}
+	out, err := p.capture(ctx, ex, "-C", cache, "ls-tree", "-r", "--name-only", sha)
+	if err != nil {
+		return 0, false
+	}
+	if out = strings.TrimSpace(out); out == "" {
+		return 0, false
+	}
+	return strings.Count(out, "\n") + 1, true
 }
 
 // configValues runs a `git config --get-regexp` query and returns the values of

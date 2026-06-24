@@ -158,6 +158,65 @@ func TestPrepareIsolated_InitsSubmodules(t *testing.T) {
 	}
 }
 
+// TestPrepareIsolated_SkipsOversizedSubmodule: a submodule whose tree is larger
+// than maxEagerSubmoduleFiles is left UNINITIALIZED (not checked out), so prep
+// doesn't pay to materialize bulk test data (denoland/deno's WPT suite, ~160k
+// files) a typical worker never touches — while a small submodule alongside it is
+// still checked out as normal. The size is decided generically by file count, not
+// by any hardcoded path.
+func TestPrepareIsolated_SkipsOversizedSubmodule(t *testing.T) {
+	hermeticGit(t)
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
+	t.Setenv("GIT_CONFIG_VALUE_0", "always")
+
+	// Lower the ceiling so a tiny test submodule trips the "too large" rule.
+	defer func(n int) { maxEagerSubmoduleFiles = n }(maxEagerSubmoduleFiles)
+	maxEagerSubmoduleFiles = 2
+
+	bare, seed := seedBare(t)
+	root := t.TempDir()
+
+	mkSub := func(name string, files []string) string {
+		subBare := filepath.Join(root, name+".git")
+		git(t, root, "init", "--bare", "-b", "main", subBare)
+		subSeed := filepath.Join(root, name+"seed")
+		git(t, root, "init", "-b", "main", subSeed)
+		for _, f := range files {
+			write(t, subSeed, f, "x\n")
+		}
+		git(t, subSeed, "add", ".")
+		git(t, subSeed, "commit", "-m", "seed")
+		git(t, subSeed, "remote", "add", "origin", subBare)
+		git(t, subSeed, "push", "-u", "origin", "main")
+		return subBare
+	}
+	smallBare := mkSub("small", []string{"a.txt"})                   // 1 file  -> kept
+	largeBare := mkSub("large", []string{"a.txt", "b.txt", "c.txt"}) // 3 files -> skipped (>2)
+
+	git(t, seed, "submodule", "add", smallBare, "vendor/small")
+	git(t, seed, "submodule", "add", largeBare, "vendor/large")
+	git(t, seed, "commit", "-m", "add submodules")
+	git(t, seed, "push", "origin", "main")
+
+	work := filepath.Join(t.TempDir(), "work")
+	ws := filepath.Join(work, "ws")
+	if err := New().PrepareIsolated(context.Background(), exec.NewLocal(), Spec{
+		WorkRoot: work, RepoURL: bare, Dir: ws, Base: "main", Branch: "feat",
+	}); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+
+	// The small submodule is checked out as usual.
+	if _, err := os.Stat(filepath.Join(ws, "vendor", "small", "a.txt")); err != nil {
+		t.Fatalf("small submodule should be checked out: %v", err)
+	}
+	// The oversized one is left uninitialized — its files are never materialized.
+	if _, err := os.Stat(filepath.Join(ws, "vendor", "large", "a.txt")); !os.IsNotExist(err) {
+		t.Fatalf("oversized submodule should NOT be checked out, but a.txt is present (err=%v)", err)
+	}
+}
+
 // TestPrepareIsolated_SubmoduleMirrorCache: submodule objects must be served from
 // the per-repo mirror cache, not refetched from the network on every prep. After
 // a prepare, the cache should hold the submodule as a remote and the prepared
