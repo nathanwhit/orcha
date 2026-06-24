@@ -2167,8 +2167,14 @@ func TestReclaimWorkspaces_EagerWorkerCheckouts(t *testing.T) {
 	_, spentWS, spentPath := worker("spent", "orcha/impl-a", model.SessionSucceeded, model.RoleImplementer, true)
 	// Kept: finished implementer with no PR yet (manager may still publish from it).
 	_, freshWS, freshPath := worker("fresh", "orcha/impl-b", model.SessionSucceeded, model.RoleImplementer, false)
-	// Kept: the manager's own checkout (long-lived) even though a PR exists.
-	_, mgrWS, mgrPath := worker("mgr", "orcha/impl-c", model.SessionSucceeded, model.RoleManager, true)
+	// Kept: the live manager's own checkout (running → non-terminal → in use).
+	_, mgrWS, mgrPath := worker("mgr", "orcha/impl-c", model.SessionRunning, model.RoleManager, false)
+	// Reclaimed: a finished reviewer never authors a PR, so its (often huge: WPT +
+	// build) checkout is spent the moment it goes terminal — no publish needed.
+	_, revWS, revPath := worker("rev", "", model.SessionSucceeded, model.RoleReviewer, false)
+	// Reclaimed: a dead manager (a respawn always gets a fresh checkout, never
+	// inherits this one), so its checkout is spent too.
+	_, deadMgrWS, deadMgrPath := worker("deadmgr", "", model.SessionFailed, model.RoleManager, false)
 
 	// Kept: a published worker that a pending (non-terminal) dependent will inherit.
 	depFrom, depWS, depPath := worker("dep", "orcha/impl-d", model.SessionSucceeded, model.RoleImplementer, true)
@@ -2180,11 +2186,16 @@ func TestReclaimWorkspaces_EagerWorkerCheckouts(t *testing.T) {
 
 	o.ReclaimWorkspaces(context.Background())
 
-	if _, err := os.Stat(spentPath); !os.IsNotExist(err) {
-		t.Fatalf("published worker's checkout should be reclaimed, stat err=%v", err)
-	}
-	if ws, _ := st.GetWorkspace(spentWS.ID); ws.Status != model.WorkspaceArchived {
-		t.Fatalf("reclaimed workspace should be archived, got %s", ws.Status)
+	for name, r := range map[string]struct {
+		path string
+		id   string
+	}{"published-worker": {spentPath, spentWS.ID}, "reviewer": {revPath, revWS.ID}, "dead-manager": {deadMgrPath, deadMgrWS.ID}} {
+		if _, err := os.Stat(r.path); !os.IsNotExist(err) {
+			t.Fatalf("%s checkout should be reclaimed, stat err=%v", name, err)
+		}
+		if ws, _ := st.GetWorkspace(r.id); ws.Status != model.WorkspaceArchived {
+			t.Fatalf("reclaimed %s workspace should be archived, got %s", name, ws.Status)
+		}
 	}
 	for name, kept := range map[string]struct {
 		path string
