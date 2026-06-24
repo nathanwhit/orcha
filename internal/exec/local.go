@@ -85,12 +85,13 @@ func (l *LocalExecutor) Start(ctx context.Context, cmd Command) (Process, error)
 
 	p := &localProcess{cmd: c, stdout: stdout, stderr: stderr, stdin: stdin, pgid: c.Process.Pid}
 
-	if cmd.Stdin != "" {
+	if cmd.Stdin != "" || cmd.CloseStdin {
 		go func() {
 			_, _ = io.WriteString(stdin, cmd.Stdin)
 			// Command.Stdin is the complete input: close the pipe so a read-to-EOF
-			// command (tee, cat, git apply) sees EOF and exits. Only the
-			// no-initial-stdin branch leaves the pipe open, for steering via Stdin().
+			// command (tee, cat, git apply) sees EOF and exits. CloseStdin opts an
+			// empty-input feed-and-wait into this path too (an empty Stdin alone
+			// otherwise leaves the pipe open, for steering via Stdin()).
 			_ = stdin.Close()
 		}()
 	}

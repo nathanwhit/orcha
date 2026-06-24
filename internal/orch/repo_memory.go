@@ -332,7 +332,11 @@ func writeMemoryFile(ctx context.Context, ex exec.Executor, wsPath, baseDir, rel
 // exits — over SSH this runs without a pty so the EOF actually reaches the remote
 // tee (a forced -tt pty would swallow it and hang). Works local or over SSH.
 func writeWorkspaceFile(ctx context.Context, ex exec.Executor, dir, rel, content string) error {
-	_, err := exec.RunCapture(ctx, ex, exec.Command{Name: "tee", Args: []string{rel}, Dir: dir, Stdin: content})
+	// CloseStdin so even empty content (a memory file an agent blanked) sends EOF
+	// and tee exits — without it an empty Stdin reads as interactive, the pipe is
+	// left open, and tee hangs forever (over SSH the -tt pty swallows the EOF). A
+	// single 0-byte memory row hanging here on resume wedged every manager once.
+	_, err := exec.RunCapture(ctx, ex, exec.Command{Name: "tee", Args: []string{rel}, Dir: dir, Stdin: content, CloseStdin: true})
 	return err
 }
 

@@ -2304,6 +2304,78 @@ func TestReclaimWorkspaces_EagerWorkerCheckouts(t *testing.T) {
 	}
 }
 
+// A reviewer is told to commit any fix it makes; that commit lives only on its
+// review branch, never pushed or merged. Reclaiming the checkout must NOT destroy
+// it — checkoutHasUnmergedCommits keeps any checkout whose branch advanced past
+// its base. (Regression for the disk-cleanup that wiped a reviewer's compiled-run
+// follow-up.)
+func TestReclaimWorkspaces_KeepsReviewerCheckoutWithUnmergedCommit(t *testing.T) {
+	o, st := newTestOrch(t)
+	tgt := addTarget(t, st, "local", model.TargetLocal, 4)
+
+	obj := &model.Objective{Title: "active", Prompt: "p", Status: model.ObjectiveActive}
+	_ = st.CreateObjective(obj)
+
+	// Make two real git checkouts: one a reviewer left an extra commit on, one a
+	// reviewer touched nothing (HEAD still == base).
+	mkRepo := func(name string, extraCommit bool) (path, base string) {
+		path = filepath.Join(t.TempDir(), name)
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		tgit(t, path, "init", "-q", "-b", "main")
+		if err := os.WriteFile(filepath.Join(path, "f.txt"), []byte("base\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		tgit(t, path, "add", "-A")
+		tgit(t, path, "commit", "-qm", "base")
+		base = tgit(t, path, "rev-parse", "HEAD")
+		if extraCommit {
+			if err := os.WriteFile(filepath.Join(path, "fix.txt"), []byte("review fix\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			tgit(t, path, "add", "-A")
+			tgit(t, path, "commit", "-qm", "fix(node): reviewer-authored follow-up")
+		}
+		return path, base
+	}
+
+	reviewer := func(name string, extraCommit bool) (*model.Workspace, string) {
+		s := &model.Session{ObjectiveID: obj.ID, Role: model.RoleReviewer, Agent: model.AgentClaude, Status: model.SessionSucceeded}
+		if err := st.CreateSession(s); err != nil {
+			t.Fatal(err)
+		}
+		path, base := mkRepo(name, extraCommit)
+		ws := &model.Workspace{ObjectiveID: obj.ID, TargetID: tgt.ID, SessionID: s.ID,
+			Kind: model.WorkspaceIsolated, Path: path, BaseSHA: base, Status: model.WorkspaceReady}
+		if err := st.CreateWorkspace(ws); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.UpdateSessionRuntime(s.ID, func(se *model.Session) { se.WorkspaceID = ws.ID }); err != nil {
+			t.Fatal(err)
+		}
+		return ws, path
+	}
+
+	keepWS, keepPath := reviewer("with-commit", true)  // must be kept (unmerged work)
+	dropWS, dropPath := reviewer("no-commit", false)   // safe to reclaim (HEAD == base)
+
+	o.ReclaimWorkspaces(context.Background())
+
+	if _, err := os.Stat(keepPath); err != nil {
+		t.Fatalf("reviewer checkout with an unmerged commit must be kept, stat err=%v", err)
+	}
+	if ws, _ := st.GetWorkspace(keepWS.ID); ws.Status != model.WorkspaceReady {
+		t.Fatalf("kept checkout must stay ready, got %s", ws.Status)
+	}
+	if _, err := os.Stat(dropPath); !os.IsNotExist(err) {
+		t.Fatalf("reviewer checkout with no commits should be reclaimed, stat err=%v", err)
+	}
+	if ws, _ := st.GetWorkspace(dropWS.ID); ws.Status != model.WorkspaceArchived {
+		t.Fatalf("reclaimed checkout should be archived, got %s", ws.Status)
+	}
+}
+
 func TestFailingChecksPR_SpawnsCIFollowup(t *testing.T) {
 	o, st := newTestOrch(t)
 	addTarget(t, st, "local", model.TargetLocal, 4)

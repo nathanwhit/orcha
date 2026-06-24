@@ -19,6 +19,12 @@ type Command struct {
 	Name  string   // executable
 	Args  []string // arguments
 	Stdin string   // optional stdin written once then closed
+	// CloseStdin forces the stdin pipe written-and-closed even when Stdin is empty,
+	// so a read-to-EOF command (tee, cat, git apply) sees EOF and exits — and over
+	// SSH suppresses the interactive pty whose -tt would otherwise swallow that EOF.
+	// Without it an empty Stdin reads as an interactive session and the pipe is left
+	// open for steering, which makes an empty feed-and-wait write hang forever.
+	CloseStdin bool
 }
 
 // Process is a running command. Callers read Stdout/Stderr concurrently and
