@@ -174,14 +174,21 @@ func firstLine(s string) string {
 // ensureWorkspace, since RoleReviewer needs an isolated workspace) and the diff
 // inlined into its goal. It carries the reviewed session id and the diff
 // fingerprint in metadata so submit_review and the gate can correlate the verdict.
-func (o *Orchestrator) spawnReviewer(ctx context.Context, impl *model.Session, repo, diff, fp string) (*model.Session, error) {
+func (o *Orchestrator) spawnReviewer(ctx context.Context, impl *model.Session, repo, fp string) (*model.Session, error) {
 	reviewer := o.otherProvider(impl.Agent)
 	meta := model.JSONMap{
 		"reviews_session":    impl.ID,
 		"review_fingerprint": fp,
+		// Inherit the implementer's ACTUAL checkout (its branch with the change
+		// applied) instead of a clean tree with the diff pasted into the prompt. The
+		// implementer is terminal by review time, so there is no concurrent writer.
+		// This is the fix for three problems at once: the diff no longer bloats the
+		// launch command (which blew tmux's length cap and took the fleet down), the
+		// reviewer can actually build/test the real change, and any fix it commits
+		// lands on the branch the PR ships from — no stranded review commits.
+		"depends_on": []string{impl.ID},
 	}
-	// Inherit the implementer's repo source so the reviewer checks out the same
-	// repo/base to navigate the code and run tests.
+	// Inherit the implementer's repo source too (for forge ops / fallback).
 	for _, k := range []string{"repo", "push_repo", "clone_url", "base_branch"} {
 		if v, ok := impl.Metadata[k].(string); ok && v != "" {
 			meta[k] = v
@@ -193,17 +200,24 @@ func (o *Orchestrator) spawnReviewer(ctx context.Context, impl *model.Session, r
 	if g := o.reviewGuidanceFor(repo); g != "" {
 		guidanceSection = fmt.Sprintf("Project-specific review guidance from the maintainers — weight this heavily:\n%s\n\n", g)
 	}
+	// Point the reviewer at the change in its own checkout rather than inlining it.
+	diffHint := "Run `git diff` against the base branch (and `git log -p`) to see exactly what changed."
+	if ws, err := o.st.GetWorkspace(impl.WorkspaceID); err == nil && ws != nil && ws.BaseSHA != "" {
+		diffHint = fmt.Sprintf("Run `git diff %s..HEAD` and `git log -p %s..HEAD` to see exactly what changed.", ws.BaseSHA, ws.BaseSHA)
+	}
 	goal := fmt.Sprintf(
-		"Adversarially review the change below before it ships as a PR.\n\n"+
+		"Adversarially review the implementer's change before it ships as a PR.\n\n"+
 			"The implementer was given this task:\n%s\n\n"+
-			"The change to review (diff vs base):\n%s\n\n"+
+			"YOUR CHECKOUT IS THE CHANGE: you are on the implementer's branch with the work "+
+			"applied. %s Build and run the relevant tests for real.\n\n"+
 			"%s"+
-			"You have your own fresh checkout to read the code and run the build/tests. "+
 			"Find real problems — bugs, regressions, missed requirements, broken or missing "+
-			"tests, security issues — do not rubber-stamp. When done, call submit_review with "+
-			"verdict %q only if it is genuinely ready to ship, or %q with specific, actionable "+
-			"findings (file:line). That tool call is how you finish your review.",
-		strings.TrimSpace(impl.Goal), strings.TrimSpace(diff), guidanceSection, reviewApprove, reviewRequestChanges)
+			"tests, security issues — do not rubber-stamp. If you find a clear, contained fix you "+
+			"MAY make and commit it on this branch (it will ship with the PR); otherwise report it "+
+			"as a finding. When done, call submit_review with verdict %q only if it is genuinely "+
+			"ready to ship, or %q with specific, actionable findings (file:line). That tool call is "+
+			"how you finish your review.",
+		strings.TrimSpace(impl.Goal), diffHint, guidanceSection, reviewApprove, reviewRequestChanges)
 
 	spec := SpawnSpec{
 		Role:     model.RoleReviewer,
@@ -267,6 +281,17 @@ func (o *Orchestrator) mcpSubmitReview(ctx context.Context, args map[string]any)
 	impl, err := o.st.GetSession(implID)
 	if err != nil {
 		return "", err
+	}
+	// The reviewer shares the implementer's checkout and MAY have committed a fix
+	// onto the branch. That changes the diff, which would move the fingerprint and
+	// make PublishPR reject this very approval as "stale" — spawning an endless
+	// re-review. So pin the verdict to the diff AS IT STANDS NOW (post-fix), which
+	// is exactly what the publish will ship. Falls back to the spawn-time
+	// fingerprint if the checkout can't be read.
+	if implWS, werr := o.st.GetWorkspace(impl.WorkspaceID); werr == nil && implWS != nil && implWS.Path != "" {
+		if d, derr := o.forgeForWorkspace(implWS).Diff(ctx, implWS.Path); derr == nil {
+			fp = diffFingerprint(d)
+		}
 	}
 
 	findingsText := summary
