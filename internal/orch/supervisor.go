@@ -20,10 +20,23 @@ var superviseIdleAfter = 90 * time.Second
 // is retried at most once per cooldown rather than every scheduler tick.
 var supervisePokeCooldown = 90 * time.Second
 
-// maxManagerSessions caps how many manager sessions an objective may accumulate
-// (the original plus respawns). Past this, the supervisor stops respawning and
-// asks the user instead of spinning up managers forever.
+// maxManagerSessions caps how many GENUINE manager attempts an objective may
+// accumulate (the original plus respawns that actually reached running). Past
+// this, the supervisor stops respawning and asks the user — repeated real
+// failures mean the work is stuck, not the infrastructure.
+//
+// A manager that died at workspace-prepare without ever running is an INFRA
+// failure (a full disk, an unreachable target), not a stuck objective, and must
+// not count: otherwise a transient host outage burns the whole budget and
+// permanently bricks recovery even after the infra heals — exactly what stranded
+// objective a8641186 behind three disk-full respawns.
 const maxManagerSessions = 4
+
+// maxManagerSpawns is a hard ceiling on TOTAL manager sessions including infra
+// deaths. Infra deaths are free against maxManagerSessions so transient outages
+// recover, but an objective whose target is PERSISTENTLY unplaceable would
+// otherwise respawn forever; this bounds it so it still escalates to a human.
+const maxManagerSpawns = 16
 
 // supervisorAction is a decision the supervisor made for one objective. kind is
 // "poke" (re-engage the live manager), "respawn" (the objective has no live
@@ -95,7 +108,7 @@ func (o *Orchestrator) superviseDecisions(now time.Time) []supervisorAction {
 			// No live manager and no open PR: nothing can react to worker
 			// completions, so the objective is stuck. Respawn one — unless it has
 			// already burned through too many managers, in which case ask the user.
-			if o.countManagers(obj.ID) >= maxManagerSessions {
+			if o.managerRespawnExhausted(obj.ID) {
 				if o.markPoked(obj.ID, now) {
 					out = append(out, supervisorAction{kind: "escalate", objectiveID: obj.ID})
 				}
@@ -187,7 +200,7 @@ func (o *Orchestrator) markPoked(objectiveID string, now time.Time) bool {
 }
 
 // countManagers returns how many manager sessions an objective has had (live or
-// terminal) — its respawn budget is measured against this.
+// terminal), counting every spawn regardless of how it ended.
 func (o *Orchestrator) countManagers(objectiveID string) int {
 	sessions, err := o.st.ListSessionsByObjective(objectiveID)
 	if err != nil {
@@ -200,6 +213,35 @@ func (o *Orchestrator) countManagers(objectiveID string) int {
 		}
 	}
 	return n
+}
+
+// managerRespawnExhausted reports whether an objective has used up its manager
+// respawn budget and should escalate to a human instead of respawning again. It
+// counts GENUINE attempts (managers that actually reached running, plus any still
+// in flight) against maxManagerSessions — a manager that died at workspace-prepare
+// without ever running is an infra failure and is excluded, so a transient host
+// outage doesn't permanently strand the objective. A separate hard ceiling
+// (maxManagerSpawns) on TOTAL spawns still bounds an objective whose target is
+// persistently unplaceable so it escalates rather than respawning forever.
+func (o *Orchestrator) managerRespawnExhausted(objectiveID string) bool {
+	sessions, err := o.st.ListSessionsByObjective(objectiveID)
+	if err != nil {
+		return false
+	}
+	total, genuine := 0, 0
+	for _, s := range sessions {
+		if s.Role != model.RoleManager {
+			continue
+		}
+		total++
+		// In flight, or it actually ran (StartedAt is stamped only on the
+		// transition to running) — either way a real attempt. A terminal manager
+		// with no StartedAt never got past prepare: an infra death, not counted.
+		if !s.Status.IsTerminal() || s.StartedAt != nil {
+			genuine++
+		}
+	}
+	return genuine >= maxManagerSessions || total >= maxManagerSpawns
 }
 
 // lastManagerAgent returns the agent kind of the objective's most recent manager
