@@ -251,7 +251,7 @@ func (o *Orchestrator) notifyManagerOfFollowup(child *model.Session, success boo
 		if err != nil || obj.Status != model.ObjectiveActive {
 			return
 		}
-		if o.countManagers(child.ObjectiveID) >= maxManagerSessions {
+		if o.managerRespawnExhausted(child.ObjectiveID) {
 			o.audit(child.ObjectiveID, "", "followup_failed_no_manager",
 				fmt.Sprintf("%s for PR #%d failed but manager budget is exhausted", child.Role, prNum), nil)
 			return

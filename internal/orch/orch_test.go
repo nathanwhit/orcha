@@ -2005,6 +2005,80 @@ func TestSupervisor_RespawnsManagerThenEscalates(t *testing.T) {
 	}
 }
 
+// A manager that dies at workspace-prepare without ever running is an infra
+// failure (full disk, unreachable target) and must NOT count against the respawn
+// budget — otherwise a transient outage permanently strands the objective even
+// after the infra heals. Only genuine attempts (a manager that reached running)
+// exhaust the budget; a separate hard ceiling still bounds an unplaceable target.
+func TestManagerRespawn_InfraDeathsDontExhaustBudget(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	obj := &model.Objective{Title: "x", Prompt: "p", Status: model.ObjectiveActive}
+	if err := st.CreateObjective(obj); err != nil {
+		t.Fatal(err)
+	}
+
+	// An infra death: created, placed, then failed at prepare — never reaching
+	// running, so StartedAt is never stamped.
+	infraDeath := func() {
+		m, err := o.CreateSession(SpawnSpec{ObjectiveID: obj.ID, Role: model.RoleManager,
+			Agent: model.AgentClaude, Mode: model.ModeInteractive, Title: "Manager"})
+		if err != nil {
+			t.Fatalf("create manager: %v", err)
+		}
+		if _, err := st.UpdateSessionStatus(m.ID, model.SessionFailed); err != nil {
+			t.Fatalf("fail manager: %v", err)
+		}
+	}
+
+	// Many more infra deaths than maxManagerSessions — none ever ran, so the budget
+	// is NOT exhausted and the objective can still respawn.
+	for i := 0; i < maxManagerSessions+2; i++ {
+		infraDeath()
+	}
+	if o.managerRespawnExhausted(obj.ID) {
+		t.Fatal("infra deaths (never reached running) must not exhaust the genuine respawn budget")
+	}
+
+	// Genuine attempts (terminateSession walks through running, stamping StartedAt)
+	// DO count: maxManagerSessions of them exhausts the budget.
+	for i := 0; i < maxManagerSessions; i++ {
+		m, err := o.CreateSession(SpawnSpec{ObjectiveID: obj.ID, Role: model.RoleManager,
+			Agent: model.AgentClaude, Mode: model.ModeInteractive, Title: "Manager"})
+		if err != nil {
+			t.Fatalf("create manager: %v", err)
+		}
+		terminateSession(t, st, m.ID, model.SessionFailed)
+	}
+	if !o.managerRespawnExhausted(obj.ID) {
+		t.Fatal("maxManagerSessions genuine failures must exhaust the respawn budget")
+	}
+}
+
+// The hard total ceiling still escalates an objective whose target can never place
+// its manager, so infra deaths don't respawn forever.
+func TestManagerRespawn_HardCeilingBoundsInfraLoop(t *testing.T) {
+	o, st := newTestOrch(t)
+	addTarget(t, st, "local", model.TargetLocal, 4)
+	obj := &model.Objective{Title: "x", Prompt: "p", Status: model.ObjectiveActive}
+	if err := st.CreateObjective(obj); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < maxManagerSpawns; i++ {
+		m, err := o.CreateSession(SpawnSpec{ObjectiveID: obj.ID, Role: model.RoleManager,
+			Agent: model.AgentClaude, Mode: model.ModeInteractive, Title: "Manager"})
+		if err != nil {
+			t.Fatalf("create manager: %v", err)
+		}
+		if _, err := st.UpdateSessionStatus(m.ID, model.SessionFailed); err != nil {
+			t.Fatalf("fail manager: %v", err)
+		}
+	}
+	if !o.managerRespawnExhausted(obj.ID) {
+		t.Fatalf("after %d total spawns the hard ceiling must escalate even for infra deaths", maxManagerSpawns)
+	}
+}
+
 // openEscalations counts an objective's standing supervisor escalations — open
 // questions with no asking session (worker/manager asks always carry one).
 func openEscalations(t *testing.T, st *store.Store, objectiveID string) int {
