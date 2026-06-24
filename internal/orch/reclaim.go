@@ -2,6 +2,8 @@ package orch
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/nathanwhit/orcha/internal/agent"
 	"github.com/nathanwhit/orcha/internal/exec"
@@ -128,14 +130,58 @@ func (o *Orchestrator) reclaimSpentCheckouts(ctx context.Context, obj *model.Obj
 		}
 		// Only roles that author their own branch/PR need the publish gate — the
 		// manager might still publish from them. Reviewers, validators and dead
-		// managers never publish, so a terminal one is immediately spent.
+		// managers never publish, so a terminal one is immediately spent. But a
+		// reviewer is told to commit any fix it makes, and that commit lives ONLY on
+		// this ephemeral checkout's branch — never pushed or merged — so reclaiming
+		// a checkout whose branch advanced past its base would silently destroy it.
+		// Keep it instead; disk is the cheaper loss. (Published-PR checkouts are
+		// exempt: their commits are safely on the PR, which is the whole point of the
+		// publish gate.)
 		if rolePublishesPR(owner.Role) {
 			spent := publishedBySession[ws.SessionID] || (ws.BranchName != "" && publishedBranch[ws.BranchName])
 			if !spent {
 				continue
 			}
+		} else if o.checkoutHasUnmergedCommits(ctx, ws) {
+			o.audit(ws.ObjectiveID, ws.SessionID, "reclaim_skipped_unmerged",
+				"kept "+string(owner.Role)+" checkout: branch has commits not on any published PR",
+				model.JSONMap{"workspace_id": ws.ID, "branch": ws.BranchName})
+			continue
 		}
 		o.reclaimWorkspace(ctx, ws)
+	}
+}
+
+// checkoutHasUnmergedCommits reports whether ws's branch has commits beyond the
+// base it was cut from — work that exists ONLY in this checkout. A reviewer that
+// "fixes and commits" leaves the fix on its review branch, never pushed or merged,
+// so this is the guard against reclaiming (and thus destroying) it. It returns
+// false when there is provably nothing to lose (the dir is gone, or HEAD is still
+// the base) and true otherwise, including on a transient probe failure with the
+// dir still present — keeping a checkout costs disk; dropping one costs the work.
+func (o *Orchestrator) checkoutHasUnmergedCommits(ctx context.Context, ws *model.Workspace) bool {
+	if ws.BaseSHA == "" || ws.Path == "" || ws.TargetID == "" {
+		return false // nothing to compare against — preserve prior reclaim behavior
+	}
+	tgt, err := o.st.GetTarget(ws.TargetID)
+	if err != nil {
+		return false // target gone → the dir is unreachable, nothing to keep
+	}
+	ex := agent.NewExecutor(tgt)
+	// One round-trip that distinguishes "gone/not-a-repo" (reclaim) from a real
+	// HEAD (compare) from an unreachable target (keep, via RunCapture error).
+	script := fmt.Sprintf(`if [ ! -e %q ]; then echo GONE; elif [ ! -d %q/.git ]; then echo NOGIT; else git -C %q rev-parse HEAD; fi`,
+		ws.Path, ws.Path, ws.Path)
+	out, err := exec.RunCapture(ctx, ex, exec.Command{Name: "sh", Args: []string{"-c", script}})
+	if err != nil {
+		return true // could not probe a present checkout — don't risk destroying work
+	}
+	head := strings.TrimSpace(out)
+	switch head {
+	case "GONE", "NOGIT", "":
+		return false
+	default:
+		return head != ws.BaseSHA
 	}
 }
 
