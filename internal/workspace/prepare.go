@@ -221,6 +221,22 @@ func (p *Preparer) reconcileSubmodulePins(ctx context.Context, ex exec.Executor,
 			continue // not a gitlink in this tree
 		}
 		sub := join(spec.Dir, path)
+		// Only touch a submodule that's actually checked out as its own repo. An
+		// oversized submodule left uninitialized (partitionSubmodulesBySize) is an
+		// empty placeholder dir with NO .git, so every `git -C <sub>` below walks UP
+		// and resolves to the SUPERPROJECT instead: the rev-parse then reads the
+		// superproject's HEAD (so cur != rec always holds) and the `checkout --force`
+		// DETACHES the superproject onto the submodule's pinned commit. That is how a
+		// skipped tests/wpt/suite detached denoland/deno's HEAD onto a WPT commit —
+		// the worker then committed off its orcha work branch and the published PR had
+		// no commits. (The bare `rev-parse HEAD` guard below can't catch this: against
+		// the superproject the command SUCCEEDS, it just returns the wrong HEAD.)
+		// `--show-superproject-working-tree` is non-empty only when <sub> genuinely is
+		// a submodule of a superproject, and empty when git escaped to the superproject
+		// (or the dir isn't an initialized submodule), so gate the reset on it.
+		if sup, err := p.capture(ctx, ex, "-C", sub, "rev-parse", "--show-superproject-working-tree"); err != nil || sup == "" {
+			continue // not an initialized submodule (git -C would escape to the superproject)
+		}
 		cur, err := p.capture(ctx, ex, "-C", sub, "rev-parse", "HEAD")
 		if err != nil {
 			continue // submodule not initialized
