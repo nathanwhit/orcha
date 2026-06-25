@@ -237,3 +237,43 @@ func (s *Store) ReleaseTargetSlot(targetID string) error {
 		 WHERE id = ?`, targetID)
 	return err
 }
+
+// ReconcileTargetSlots recomputes every target's available_sessions from actual
+// occupancy: capacity minus the non-terminal, capacity-consuming (non-manager)
+// sessions bound to it. available_sessions is otherwise maintained incrementally
+// — debited on claim, credited at terminal — so a crash between claim and the
+// runtime update, or a change in WHAT counts against capacity (managers became
+// exempt), can drift it and permanently shrink a target's usable slots. Run once
+// at startup, before the scheduler, to heal that drift. It is idempotent.
+// Returns the number of targets whose counter it corrected.
+func (s *Store) ReconcileTargetSlots() (int, error) {
+	targets, err := s.ListTargets()
+	if err != nil {
+		return 0, err
+	}
+	corrected := 0
+	for _, t := range targets {
+		var used int
+		if err := s.db.QueryRow(
+			`SELECT COUNT(*) FROM sessions
+			 WHERE target_id = ? AND role <> ? AND status NOT IN (?,?,?)`,
+			t.ID, string(model.RoleManager),
+			string(model.SessionSucceeded), string(model.SessionFailed), string(model.SessionCanceled),
+		).Scan(&used); err != nil {
+			return corrected, err
+		}
+		avail := t.CapacitySessions - used
+		if avail < 0 {
+			avail = 0
+		}
+		if avail == t.AvailableSessions {
+			continue
+		}
+		if _, err := s.db.Exec(
+			`UPDATE targets SET available_sessions = ? WHERE id = ?`, avail, t.ID); err != nil {
+			return corrected, err
+		}
+		corrected++
+	}
+	return corrected, nil
+}

@@ -12,6 +12,16 @@ type TargetRequest struct {
 	RequiredLabels []string
 	ProjectPath    string // for build/cache locality preference
 	PinnedTargetID string // explicit user pinning
+	// IgnoreWorkerCapacity places this session without consuming, or being gated
+	// by, a target's per-session worker capacity. Set for interactive managers:
+	// they are long-lived per-objective supervisors that sit idle most of their
+	// life, so charging them the same slots workers need lets accumulated idle
+	// managers fill a target and starve real work — a fleet with N total slots
+	// could otherwise hold at most N managers and zero workers. This mirrors the
+	// existing exemption from the global worker-concurrency cap
+	// (CountActiveWorkerSessions / Scheduler.Tick). Managers remain bounded by
+	// the load gate and the per-objective respawn limit.
+	IgnoreWorkerCapacity bool
 }
 
 // SelectTarget picks a schedulable target satisfying the request. It considers:
@@ -31,7 +41,7 @@ func (o *Orchestrator) SelectTarget(req TargetRequest) (*model.Target, error) {
 				if !t.Status.CanSchedule() {
 					return nil, fmt.Errorf("%w: pinned target %s is %s", ErrNoTarget, t.Name, t.Status)
 				}
-				if t.AvailableSessions <= 0 {
+				if !req.IgnoreWorkerCapacity && t.AvailableSessions <= 0 {
 					return nil, fmt.Errorf("%w: pinned target %s is at capacity", ErrNoTarget, t.Name)
 				}
 				if !hasLabels(t, req.RequiredLabels) {
@@ -49,7 +59,7 @@ func (o *Orchestrator) SelectTarget(req TargetRequest) (*model.Target, error) {
 		if !t.Status.CanSchedule() { // draining/offline/disabled excluded
 			continue
 		}
-		if t.AvailableSessions <= 0 {
+		if !req.IgnoreWorkerCapacity && t.AvailableSessions <= 0 {
 			continue
 		}
 		if !hasLabels(t, req.RequiredLabels) {
@@ -178,15 +188,26 @@ func (o *Orchestrator) PlaceSession(sessionID string, req TargetRequest) (*model
 	if err != nil {
 		return nil, err
 	}
-	// Atomic claim — enforces capacity and draining at the store layer.
-	if err := o.st.ClaimTargetSlot(target.ID); err != nil {
-		return nil, err
+	// Managers don't consume a worker slot, so they bind to the target without
+	// claiming one. SelectTarget already excluded draining/offline targets, so
+	// the atomic claim — whose job is to stop concurrent schedulers
+	// oversubscribing capacity — has nothing to enforce for a manager. Keyed on
+	// the durable session role (not req) so it can never disagree with
+	// releaseTargetSlot, which must skip the matching release.
+	claimsSlot := !sessionExemptFromCapacity(sess)
+	if claimsSlot {
+		// Atomic claim — enforces capacity and draining at the store layer.
+		if err := o.st.ClaimTargetSlot(target.ID); err != nil {
+			return nil, err
+		}
 	}
 	if _, err := o.st.UpdateSessionRuntime(sessionID, func(s *model.Session) {
 		s.TargetID = target.ID
 	}); err != nil {
 		// Roll back the claim so we never leak capacity.
-		_ = o.st.ReleaseTargetSlot(target.ID)
+		if claimsSlot {
+			_ = o.st.ReleaseTargetSlot(target.ID)
+		}
 		return nil, err
 	}
 	o.audit(sess.ObjectiveID, sessionID, "session_placed",
@@ -194,9 +215,24 @@ func (o *Orchestrator) PlaceSession(sessionID string, req TargetRequest) (*model
 	return target, nil
 }
 
-// releaseTargetSlot frees the capacity a session held, if any.
+// releaseTargetSlot frees the capacity a session held, if any. A session exempt
+// from worker capacity (a manager) never claimed a slot, so it must not release
+// one either — crediting capacity that was never debited would let the target
+// oversubscribe real workers.
 func (o *Orchestrator) releaseTargetSlot(sess *model.Session) {
+	if sessionExemptFromCapacity(sess) {
+		return
+	}
 	if sess.TargetID != "" {
 		_ = o.st.ReleaseTargetSlot(sess.TargetID)
 	}
+}
+
+// sessionExemptFromCapacity reports whether a session is placed without
+// consuming a target's per-session worker capacity. Interactive managers are
+// long-lived supervisors that sit idle most of their life; see
+// TargetRequest.IgnoreWorkerCapacity for the full rationale. Claim, release, and
+// the slot reconcile all key off this single predicate so they stay in lockstep.
+func sessionExemptFromCapacity(sess *model.Session) bool {
+	return sess.Role == model.RoleManager
 }

@@ -105,6 +105,10 @@ func (o *Orchestrator) targetRequestFor(sess *model.Session) TargetRequest {
 			req.PinnedTargetID = ws.TargetID
 		}
 	}
+	// Managers don't consume per-target worker capacity (see
+	// TargetRequest.IgnoreWorkerCapacity), so an idle pool of them can't fill a
+	// target and starve workers.
+	req.IgnoreWorkerCapacity = sessionExemptFromCapacity(sess)
 	return req
 }
 
