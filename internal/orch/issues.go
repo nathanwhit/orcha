@@ -65,7 +65,7 @@ func (o *Orchestrator) syncRepoMentions(ctx context.Context, p *model.Project, b
 		if err != nil {
 			continue // transient; retry next poll (no claim recorded yet)
 		}
-		o.triggerIssueObjective(ctx, p, iss, "comment:"+c.ExternalID, c.Author, "an @-mention")
+		o.triggerIssueObjective(ctx, p, iss, "comment:"+c.ExternalID, c.Author, "an @-mention", c.Body)
 	}
 }
 
@@ -89,7 +89,10 @@ func (o *Orchestrator) syncRepoAssignments(ctx context.Context, p *model.Project
 		if eventID != "" {
 			ext = "assigned:" + eventID
 		}
-		o.triggerIssueObjective(ctx, p, iss, ext, actor, "an assignment")
+		// An assignment carries no message body to relay, so note is empty: a
+		// re-assignment of an already-active issue just no-ops (there's nothing to
+		// route), exactly as before.
+		o.triggerIssueObjective(ctx, p, iss, ext, actor, "an assignment", "")
 	}
 }
 
@@ -97,7 +100,7 @@ func (o *Orchestrator) syncRepoAssignments(ctx context.Context, p *model.Project
 // the issue, and acknowledges it. The claim is recorded before the objective is
 // created so a concurrent poll can't double-spawn; if creation fails the claim is
 // rolled back so a later poll retries.
-func (o *Orchestrator) triggerIssueObjective(ctx context.Context, p *model.Project, iss forge.Issue, externalID, requester, via string) {
+func (o *Orchestrator) triggerIssueObjective(ctx context.Context, p *model.Project, iss forge.Issue, externalID, requester, via, note string) {
 	inserted, err := o.st.RecordIssueTask(p.Repo, iss.Number, externalID)
 	if err != nil || !inserted {
 		return // already handled (or store error) — don't act twice
@@ -108,7 +111,16 @@ func (o *Orchestrator) triggerIssueObjective(ctx context.Context, p *model.Proje
 	// objective just contends for the same scarce manager/target slots and muddies
 	// the dashboard. The claim stays recorded so this event isn't re-evaluated;
 	// once the prior objective is terminal a later re-trigger starts fresh work.
+	//
+	// But a fresh COMMENT on an in-flight issue is mid-flight guidance ("look at
+	// PR #X first", "also handle Windows") — dropping it is how a coworker's
+	// pointer silently reached no one. So instead of returning empty-handed, route
+	// the comment to the objective's manager. Assignments carry no note and still
+	// just no-op here.
 	if existing, err := o.st.ActiveObjectiveForIssue(p.Repo, iss.Number); err == nil && existing != "" {
+		if strings.TrimSpace(note) != "" {
+			o.routeIssueCommentToManager(ctx, p.Repo, iss, existing, requester, note)
+		}
 		return
 	}
 	obj, _, err := o.CreateObjective(NewObjectiveSpec{
@@ -128,6 +140,61 @@ func (o *Orchestrator) triggerIssueObjective(ctx context.Context, p *model.Proje
 		fmt.Sprintf("created objective from issue #%d via %s by @%s", iss.Number, via, requester),
 		model.JSONMap{"repo": p.Repo, "issue": iss.Number, "requester": requester})
 	_ = o.forge.CommentIssue(ctx, p.Repo, iss.Number, issueAckBody(iss.Number))
+}
+
+// routeIssueCommentToManager delivers a new comment on an actively-worked issue
+// to the manager driving that issue's objective, so guidance left on the issue
+// after work began (a pointer to prior art, a correction, an added constraint)
+// reaches the team instead of being dropped. Each comment is claimed once
+// (RecordIssueTask, by the caller) before we get here, so a re-poll never
+// re-delivers the same one.
+//
+// If a live manager is driving the objective it is steered in place. If the
+// objective has parked with no live manager (e.g. its PR is up and awaiting
+// review), a new human comment is an actionable event, so we revive a manager —
+// mirroring notifyManagerOfMerge/notifyManagerOfFollowup — with the comment baked
+// into its resume prompt so it isn't lost. Revival respects the manager respawn
+// budget so a stream of comments can't drive an unbounded respawn loop.
+func (o *Orchestrator) routeIssueCommentToManager(ctx context.Context, repo string, iss forge.Issue, objectiveID, requester, body string) {
+	msg := fmt.Sprintf(
+		"New comment from @%s on issue #%d (%q), which you are working on:\n\n%s\n\n"+
+			"Take it into account. If it changes the plan, steer or re-scope your workers "+
+			"(message_session) accordingly; if it asks something you can answer, reply via the "+
+			"related PR (comment_pr) or just proceed.",
+		requester, iss.Number, iss.Title, strings.TrimSpace(body))
+
+	if mgr := o.activeManagerFor(objectiveID); mgr != nil {
+		o.audit(objectiveID, mgr.ID, "issue_comment_routed",
+			fmt.Sprintf("routed issue #%d comment from @%s to manager", iss.Number, requester),
+			model.JSONMap{"repo": repo, "issue": iss.Number, "requester": requester})
+		_ = o.Steer(ctx, mgr.ID, msg)
+		return
+	}
+
+	// No live manager. Only revive for a genuinely ACTIVE objective: a
+	// waiting_user one is parked on an open dashboard question and has no clean
+	// session to resume into, so record the comment and leave it for the human.
+	obj, err := o.st.GetObjective(objectiveID)
+	if err != nil || obj.Status != model.ObjectiveActive {
+		o.audit(objectiveID, "", "issue_comment_unrouted",
+			fmt.Sprintf("issue #%d comment from @%s not routed: no active manager", iss.Number, requester),
+			model.JSONMap{"repo": repo, "issue": iss.Number, "requester": requester})
+		return
+	}
+	if o.managerRespawnExhausted(objectiveID) {
+		o.audit(objectiveID, "", "issue_comment_unrouted",
+			fmt.Sprintf("issue #%d comment from @%s not routed: manager respawn budget exhausted", iss.Number, requester),
+			model.JSONMap{"repo": repo, "issue": iss.Number, "requester": requester})
+		return
+	}
+	o.audit(objectiveID, "", "issue_comment_routed",
+		fmt.Sprintf("routed issue #%d comment from @%s; reviving manager", iss.Number, requester),
+		model.JSONMap{"repo": repo, "issue": iss.Number, "requester": requester})
+	o.respawnManager(supervisorAction{
+		objectiveID: objectiveID,
+		prompt:      obj.Prompt + "\n\n" + msg,
+		agent:       o.lastManagerAgent(objectiveID),
+	})
 }
 
 // mentionsLogin reports whether body @-mentions login (case-insensitive), as a

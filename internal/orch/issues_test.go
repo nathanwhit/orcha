@@ -74,6 +74,73 @@ func TestIssueTrigger_MentionByAllowedUserCreatesObjective(t *testing.T) {
 	}
 }
 
+func TestIssueTrigger_CommentRoutedToActiveManager(t *testing.T) {
+	o, f := issueTriggerOrch(t)
+	addTarget(t, o.st, "local", model.TargetLocal, 4)
+	f.SetIssue("acme/widgets", forge.Issue{
+		Number: 20, Title: "Fix the deadlock", Body: "It hangs.",
+		URL: "https://github.com/acme/widgets/issues/20",
+	})
+
+	// First mention from an allowlisted user spins up the objective + manager.
+	first := forge.IssueComment{IssueNumber: 20, ExternalID: "c1", Author: "alice", Body: "@orcha-bot please fix this"}
+	f.SetIssueComments(first)
+	o.SyncIssueTriggers(context.Background())
+
+	objs := objectivesForIssue(t, o, 20)
+	if len(objs) != 1 {
+		t.Fatalf("want 1 objective for issue #20, got %d", len(objs))
+	}
+	mgr := o.activeManagerFor(objs[0].ID)
+	if mgr == nil {
+		t.Fatal("expected a live manager for the triggered objective")
+	}
+	_, _ = o.st.UpdateSessionStatus(mgr.ID, model.SessionRunning)
+
+	// A coworker leaves a pointer comment WHILE the issue is being worked. The
+	// re-poll lists both comments; c1 is already claimed, c2 is new.
+	second := forge.IssueComment{IssueNumber: 20, ExternalID: "c2", Author: "alice",
+		Body: "@orcha-bot you might want to look into PR #999 first"}
+	f.SetIssueComments(first, second)
+	o.SyncIssueTriggers(context.Background())
+
+	// It must NOT spawn a second objective for the same issue...
+	if got := objectivesForIssue(t, o, 20); len(got) != 1 {
+		t.Fatalf("a comment on an in-flight issue must not duplicate the objective, got %d", len(got))
+	}
+	// ...and it must NOT post another ack comment (routing is not a new trigger).
+	if len(f.IssueComments) != 1 {
+		t.Fatalf("routing a comment should not post another ack, got %+v", f.IssueComments)
+	}
+	// ...the comment is steered to the manager: its body reaches the transcript.
+	msgs, _ := o.st.MessagesAfter(mgr.ID, 0, 50)
+	var routed string
+	for _, m := range msgs {
+		if m.Source == model.MsgUser && strings.Contains(m.Content, "PR #999") {
+			routed = m.Content
+		}
+	}
+	if routed == "" {
+		t.Fatal("the coworker's pointer comment was not routed to the manager")
+	}
+	if !strings.Contains(routed, "@alice") || !strings.Contains(routed, "#20") {
+		t.Fatalf("routed message should attribute the commenter and issue, got %q", routed)
+	}
+
+	// Re-polling the same comments delivers nothing new (claimed once).
+	o.SyncIssueTriggers(context.Background())
+	again, _ := o.st.MessagesAfter(mgr.ID, 0, 50)
+	n := 0
+	for _, m := range again {
+		if m.Source == model.MsgUser && strings.Contains(m.Content, "PR #999") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("the same comment should route exactly once, got %d deliveries", n)
+	}
+}
+
 func TestIssueTrigger_MentionByDisallowedUserIgnored(t *testing.T) {
 	o, f := issueTriggerOrch(t)
 	f.SetIssue("acme/widgets", forge.Issue{Number: 6, Title: "Do a thing"})
