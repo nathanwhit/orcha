@@ -27,6 +27,7 @@ func (o *Orchestrator) ManagerMCPHandler() http.Handler {
 		o.toolPublishPR(),
 		o.toolUpdatePR(),
 		o.toolCommentPR(),
+		o.toolCommentIssue(),
 		o.toolAddressPRFeedback(),
 		o.toolListChildren(),
 		o.toolMessageSession(),
@@ -129,6 +130,20 @@ func (o *Orchestrator) toolCommentPR() mcp.Tool {
 			"\"no changes needed\"); those are noise. pr_id accepts the Orcha pr_id or the GitHub PR number.",
 		InputSchema: mcpObj(map[string]any{"pr_id": mcpStr, "body": mcpStr}, "pr_id", "body"),
 		Handler:     o.mcpCommentPR,
+	}
+}
+
+func (o *Orchestrator) toolCommentIssue() mcp.Tool {
+	return mcp.Tool{
+		Name: "comment_issue",
+		Description: "Leave a PUBLIC comment, as the bot, on the GitHub ISSUE this objective is working — " +
+			"visible to the issue reporter and watchers. Use it to reply to someone who commented on the issue: " +
+			"answer a question, acknowledge a pointer, or say why you're not doing something. Same discipline as " +
+			"comment_pr — NOT for status, progress, or CI/build noise; keep it short and specific. The target is " +
+			"the issue this objective was created from, so you do NOT pass a number. This is the ONLY way to " +
+			"reply on the issue — never use the gh CLI.",
+		InputSchema: mcpObj(map[string]any{"body": mcpStr}, "body"),
+		Handler:     o.mcpCommentIssue,
 	}
 }
 
@@ -333,6 +348,17 @@ func (o *Orchestrator) mcpCommentPR(ctx context.Context, args map[string]any) (s
 		return "", err
 	}
 	return "comment posted.", nil
+}
+
+func (o *Orchestrator) mcpCommentIssue(ctx context.Context, args map[string]any) (string, error) {
+	objID := o.callerObjective(ctx)
+	if objID == "" {
+		return "", fmt.Errorf("no objective bound to request")
+	}
+	if err := o.CommentIssue(ctx, objID, mcp.StringArg(args, "body")); err != nil {
+		return "", err
+	}
+	return "comment posted on the issue.", nil
 }
 
 func (o *Orchestrator) mcpAddressPRFeedback(ctx context.Context, args map[string]any) (string, error) {

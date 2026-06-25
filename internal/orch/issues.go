@@ -2,6 +2,7 @@ package orch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -159,8 +160,8 @@ func (o *Orchestrator) routeIssueCommentToManager(ctx context.Context, repo stri
 	msg := fmt.Sprintf(
 		"New comment from @%s on issue #%d (%q), which you are working on:\n\n%s\n\n"+
 			"Take it into account. If it changes the plan, steer or re-scope your workers "+
-			"(message_session) accordingly; if it asks something you can answer, reply via the "+
-			"related PR (comment_pr) or just proceed.",
+			"(message_session) accordingly; if it asks something you can answer, reply on the "+
+			"issue with comment_issue (or on the related PR with comment_pr); otherwise just proceed.",
 		requester, iss.Number, iss.Title, strings.TrimSpace(body))
 
 	if mgr := o.activeManagerFor(objectiveID); mgr != nil {
@@ -195,6 +196,37 @@ func (o *Orchestrator) routeIssueCommentToManager(ctx context.Context, repo stri
 		prompt:      obj.Prompt + "\n\n" + msg,
 		agent:       o.lastManagerAgent(objectiveID),
 	})
+}
+
+// CommentIssue posts a PUBLIC comment, as the bot, on the GitHub issue that
+// produced the objective — the sanctioned path for replying on the issue thread
+// (e.g. answering a question a routed comment asked, or acknowledging a pointer)
+// instead of an agent reaching for the raw gh CLI out-of-band, which posts
+// untracked and bypasses these guardrails. Like CommentPR it tags the body with
+// the bot marker so the mention monitor never re-ingests orcha's own reply.
+func (o *Orchestrator) CommentIssue(ctx context.Context, objectiveID, body string) error {
+	if o.forge == nil {
+		return errors.New("orch: no forge configured")
+	}
+	if strings.TrimSpace(body) == "" {
+		return errors.New("orch: empty issue comment")
+	}
+	repo, number, ok, err := o.st.IssueForObjective(objectiveID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("orch: objective %s is not tied to a GitHub issue, so there is nothing to comment on", objectiveID)
+	}
+	if !strings.Contains(body, orchaBotMarker) {
+		body = body + "\n\n" + orchaBotMarker
+	}
+	if err := o.forge.CommentIssue(ctx, repo, number, body); err != nil {
+		return err
+	}
+	o.audit(objectiveID, "", "issue_comment", fmt.Sprintf("posted a comment on issue #%d", number),
+		model.JSONMap{"repo": repo, "issue": number})
+	return nil
 }
 
 // mentionsLogin reports whether body @-mentions login (case-insensitive), as a

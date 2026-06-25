@@ -45,7 +45,7 @@ func TestMCPSurfaces_ToolScoping(t *testing.T) {
 	o, _ := newTestOrch(t)
 
 	manager := listTools(t, o.ManagerMCPHandler())
-	wantManager := []string{"address_pr_feedback", "ask_user", "cancel_session", "comment_pr",
+	wantManager := []string{"address_pr_feedback", "ask_user", "cancel_session", "comment_issue", "comment_pr",
 		"create_note", "list_children", "mark_objective_done", "message_session", "publish_pr", "spawn_session", "update_pr"}
 	if strings.Join(manager, ",") != strings.Join(wantManager, ",") {
 		t.Fatalf("manager surface = %v, want %v", manager, wantManager)

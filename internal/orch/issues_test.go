@@ -8,6 +8,7 @@ import (
 
 	"github.com/nathanwhit/orcha/internal/agent"
 	"github.com/nathanwhit/orcha/internal/forge"
+	"github.com/nathanwhit/orcha/internal/mcp"
 	"github.com/nathanwhit/orcha/internal/model"
 )
 
@@ -138,6 +139,53 @@ func TestIssueTrigger_CommentRoutedToActiveManager(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("the same comment should route exactly once, got %d deliveries", n)
+	}
+}
+
+func TestCommentIssue_PostsToIssueWithMarker(t *testing.T) {
+	o, f := issueTriggerOrch(t)
+	addTarget(t, o.st, "local", model.TargetLocal, 4)
+	f.SetIssue("acme/widgets", forge.Issue{Number: 30, Title: "Bug", Body: "x"})
+	f.SetIssueComments(forge.IssueComment{IssueNumber: 30, ExternalID: "c1", Author: "alice", Body: "@orcha-bot fix it"})
+	o.SyncIssueTriggers(context.Background())
+
+	objs := objectivesForIssue(t, o, 30)
+	if len(objs) != 1 {
+		t.Fatalf("want 1 objective for issue #30, got %d", len(objs))
+	}
+	mgr := o.activeManagerFor(objs[0].ID)
+	if mgr == nil {
+		t.Fatal("expected a live manager")
+	}
+
+	// One ack comment exists from the trigger; the manager now replies on the issue.
+	before := len(f.IssueComments)
+	ctx := mcp.WithSession(context.Background(), mgr.ID)
+	if _, err := o.mcpCommentIssue(ctx, map[string]any{"body": "Thanks — looking into it now."}); err != nil {
+		t.Fatalf("comment_issue: %v", err)
+	}
+	if len(f.IssueComments) != before+1 {
+		t.Fatalf("expected one new issue comment, got %d (was %d)", len(f.IssueComments), before)
+	}
+	last := f.IssueComments[len(f.IssueComments)-1]
+	if last.Number != 30 || !strings.Contains(last.Body, "looking into it") {
+		t.Fatalf("comment not posted to issue #30: %+v", last)
+	}
+	// The bot marker must be appended so the mention monitor never re-ingests it.
+	if !strings.Contains(last.Body, orchaBotMarker) {
+		t.Fatalf("issue comment must carry the bot marker, got %q", last.Body)
+	}
+
+	// The reply resolves to the objective's issue with no number argument: the
+	// manager can only comment on the issue it is working.
+	other, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "manual objective", Prompt: "p"})
+	om := &model.Session{ObjectiveID: other.ID, Role: model.RoleManager, Status: model.SessionRunning}
+	if err := o.st.CreateSession(om); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	octx := mcp.WithSession(context.Background(), om.ID)
+	if _, err := o.mcpCommentIssue(octx, map[string]any{"body": "hi"}); err == nil {
+		t.Fatal("comment_issue on an objective not tied to an issue must error")
 	}
 }
 
