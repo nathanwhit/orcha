@@ -225,6 +225,34 @@ func TestShQuote(t *testing.T) {
 	}
 }
 
+// TestSSHArgs_MultiplexesNonTTYOnly: short non-tty commands (workspace prep
+// fires ~50-60 of them) must reuse one SSH connection via ControlMaster, but the
+// long-lived interactive -tt sessions must NOT — their cancellation relies on a
+// per-connection process-group SIGHUP, so they must never share or outlive a
+// persisted master.
+func TestSSHArgs_MultiplexesNonTTYOnly(t *testing.T) {
+	s := NewSSH(SSHConfig{Host: "h", User: "u"})
+
+	nonTTY := strings.Join(s.sshArgs(false), " ")
+	if !strings.Contains(nonTTY, "ControlMaster=auto") {
+		t.Fatalf("non-tty args should enable connection multiplexing, got: %s", nonTTY)
+	}
+	if !strings.Contains(nonTTY, "ControlPersist=") || !strings.Contains(nonTTY, "ControlPath=") {
+		t.Fatalf("non-tty multiplexing needs ControlPersist + ControlPath, got: %s", nonTTY)
+	}
+	if strings.Contains(nonTTY, "-tt") {
+		t.Fatalf("non-tty args must not force a pty, got: %s", nonTTY)
+	}
+
+	tty := strings.Join(s.sshArgs(true), " ")
+	if strings.Contains(tty, "ControlMaster") {
+		t.Fatalf("interactive -tt args must NOT multiplex, got: %s", tty)
+	}
+	if !strings.Contains(tty, "-tt") {
+		t.Fatalf("interactive args should force a pty, got: %s", tty)
+	}
+}
+
 // TestSSH_Live runs against a real host when ORCHA_SSH_TEST_HOST is set
 // (e.g. ORCHA_SSH_TEST_HOST=localhost with Remote Login enabled). It verifies
 // streaming, exit codes, and remote process-group cancellation over SSH.

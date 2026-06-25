@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // SSHConfig describes how to reach a remote target over SSH.
@@ -48,6 +51,25 @@ func (s *SSHExecutor) target() string {
 	return s.cfg.Host
 }
 
+// controlDir is a private directory for SSH ControlPath sockets, created once.
+// "" means it could not be created, which disables multiplexing (fail open: the
+// command still runs, just without connection reuse).
+var (
+	controlDirOnce sync.Once
+	controlDirPath string
+)
+
+func controlDir() string {
+	controlDirOnce.Do(func() {
+		d := filepath.Join(os.TempDir(), fmt.Sprintf("orcha-ssh-%d", os.Getuid()))
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return // leave controlDirPath empty -> multiplexing disabled
+		}
+		controlDirPath = d
+	})
+	return controlDirPath
+}
+
 // sshArgs builds the ssh invocation prefix (without the remote command).
 func (s *SSHExecutor) sshArgs(tty bool) []string {
 	args := []string{
@@ -58,6 +80,19 @@ func (s *SSHExecutor) sshArgs(tty bool) []string {
 	if tty {
 		// Force a pty so the remote process group gets SIGHUP on disconnect.
 		args = append(args, "-tt")
+	} else if dir := controlDir(); dir != "" {
+		// Reuse ONE SSH connection across the many short commands a session fires:
+		// workspace prep alone issues ~50-60 git subcommands, and without reuse each
+		// pays a fresh TCP+crypto handshake plus the remote login shell (~1.15s vs
+		// ~0.19s multiplexed). Scoped to the non-tty path on purpose — the long-lived
+		// interactive (-tt) sessions cancel by per-connection process-group SIGHUP, so
+		// they must never share or outlive a persisted master. %C is a fixed-length
+		// hash of the connection parameters, keeping the socket path short.
+		args = append(args,
+			"-o", "ControlMaster=auto",
+			"-o", "ControlPersist=60",
+			"-o", "ControlPath="+filepath.Join(dir, "%C"),
+		)
 	}
 	if s.cfg.Port != 0 {
 		args = append(args, "-p", itoa(s.cfg.Port))
