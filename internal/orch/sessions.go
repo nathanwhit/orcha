@@ -185,6 +185,7 @@ func (o *Orchestrator) StartRun(ctx context.Context, sessionID string) (*Run, er
 	spec := o.buildSpec(sess, ws, tgt)
 
 	runCtx, cancel := context.WithCancel(ctx)
+	spec = o.withBuildThrottle(runCtx, sess, tgt, spec)
 
 	// A fresh interactive start delivers its opening prompt as a positional argv
 	// argument, which is size-bounded and fragile for big inputs. Move an oversized

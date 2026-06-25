@@ -122,6 +122,14 @@ the scheduler then runs — no manual restart. Dependencies that fail/cancel can
 their dependents; exhausted providers park the session and ask the user instead
 of respinning. Flags: `-max-concurrent`, `-schedule-interval`.
 
+Worker Rust builds are throttled separately from session concurrency. By
+default orcha injects a target-local `cargo` shim for coding workers and allows
+one build-like Cargo command per target at a time; the shim heartbeats its slot,
+reclaims stale slots, and runs unthrottled instead of blocking forever if it
+cannot acquire a slot before `-build-lease-timeout`. Flags:
+`-max-rust-builds`, `-cargo-build-jobs`, `-build-lease-timeout`,
+`-build-lease-stale`.
+
 ## Manager tool-calling
 
 Every objective starts with a manager session. The manager *agent* drives the

@@ -51,7 +51,7 @@ func NewClaude(cfg ClaudeConfig) *ProcessProvider {
 		args = append(args, claudeControlArgs(spec)...)
 		args = append(args, cfg.ExtraArgs...)
 		dir := workDirFor(spec)
-		return exec.Command{Name: bin, Args: args, Dir: dir}
+		return exec.Command{Name: bin, Args: args, Dir: dir, Env: spec.Env}
 	}
 	return NewProcessProvider(ProcessConfig{
 		Kind:        model.AgentClaude,

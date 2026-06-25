@@ -109,7 +109,7 @@ func (p *TmuxProvider) StartSession(ctx context.Context, spec Spec) (Handle, <-c
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
-	if err := ctrl.NewSession(runCtx, name, dir, command); err != nil {
+	if err := ctrl.NewSession(runCtx, name, dir, command, spec.Env); err != nil {
 		cancel()
 		return nil, nil, err
 	}
@@ -180,7 +180,7 @@ func (p *TmuxProvider) ResumeSession(ctx context.Context, sessionID string, spec
 		dir := workDirFor(spec)
 		ensureDir(ctx, ex, dir)
 		runCtx, cancel := context.WithCancel(ctx)
-		if err := ctrl.NewSession(runCtx, name, dir, p.cfg.ResumeCommand(spec)); err != nil {
+		if err := ctrl.NewSession(runCtx, name, dir, p.cfg.ResumeCommand(spec), spec.Env); err != nil {
 			cancel()
 			return nil, nil, err
 		}

@@ -135,7 +135,7 @@ func (o *Orchestrator) probeUsage(ctx context.Context, ex exec.Executor, dir str
 		cancel()
 	}()
 
-	if err := ctrl.NewSession(ctx, name, dir, p.launch); err != nil {
+	if err := ctrl.NewSession(ctx, name, dir, p.launch, nil); err != nil {
 		return usageReading{}, false
 	}
 	// Wait for the TUI to boot, clearing any blocking startup dialog (folder

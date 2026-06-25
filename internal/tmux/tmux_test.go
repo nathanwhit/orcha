@@ -27,7 +27,7 @@ func TestTmux_InteractiveShell(t *testing.T) {
 	t.Cleanup(func() { _ = c.KillSession(ctx, name) })
 
 	// Empty command => the target's default interactive shell.
-	if err := c.NewSession(ctx, name, "", nil); err != nil {
+	if err := c.NewSession(ctx, name, "", nil, nil); err != nil {
 		t.Fatalf("new-session: %v", err)
 	}
 	if ok, _ := c.HasSession(ctx, name); !ok {
@@ -66,7 +66,7 @@ func TestTmux_PipePaneStreamsOutput(t *testing.T) {
 	t.Cleanup(func() { _ = c.KillSession(ctx, name) })
 
 	logPath := t.TempDir() + "/pane.log"
-	if err := c.NewSession(ctx, name, "", nil); err != nil {
+	if err := c.NewSession(ctx, name, "", nil, nil); err != nil {
 		t.Fatalf("new-session: %v", err)
 	}
 	if err := c.PipePane(ctx, name, "cat >> "+logPath); err != nil {

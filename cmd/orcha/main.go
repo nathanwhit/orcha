@@ -42,6 +42,10 @@ func main() {
 		realForge    = flag.Bool("real-forge", false, "use the real git+gh forge (needs real workspace checkouts) instead of the in-memory fake")
 		maxConc      = flag.Int("max-concurrent", 32, "max concurrent worker sessions across all targets (managers are exempt; per-target capacity still applies)")
 		maxLoad      = flag.Float64("max-load-per-core", 1.5, "load-aware scheduling: skip a target for new sessions when its 1-min load average per core is at/above this (running sessions are unaffected; 0 disables probing+gating)")
+		maxRustBuild = flag.Int("max-rust-builds", 1, "max concurrent cargo build-like commands per target for worker sessions via an injected cargo shim (0 disables; timeout/stale locks fail open)")
+		cargoJobs    = flag.Int("cargo-build-jobs", 0, "when >0, set CARGO_BUILD_JOBS for shimmed cargo build-like commands unless the worker already set it")
+		buildWait    = flag.Duration("build-lease-timeout", 20*time.Minute, "max time a cargo command waits for an orcha build slot before running unthrottled")
+		buildStale   = flag.Duration("build-lease-stale", 30*time.Minute, "age after which an unheartbeathed cargo build slot is stale and can be reclaimed")
 		schedEvery   = flag.Duration("schedule-interval", 2*time.Second, "scheduler idle tick interval")
 		mcpBase      = flag.String("mcp-base-url", "http://127.0.0.1:8080", "base URL where the manager MCP tool surface is reachable by agent CLIs")
 		showVersion  = flag.Bool("version", false, "print version and exit")
@@ -84,11 +88,15 @@ func main() {
 	defer st.Close()
 
 	o := orch.New(st, orch.Config{
-		Guards:               orch.DefaultGuards(),
-		ProviderFallback:     []model.AgentKind{model.AgentClaude, model.AgentCodex},
-		ManagerMCPBaseURL:    *mcpBase,
-		WorkerPermissionMode: *workerPerm,
-		MaxLoadPerCore:       *maxLoad,
+		Guards:                 orch.DefaultGuards(),
+		ProviderFallback:       []model.AgentKind{model.AgentClaude, model.AgentCodex},
+		ManagerMCPBaseURL:      *mcpBase,
+		WorkerPermissionMode:   *workerPerm,
+		MaxLoadPerCore:         *maxLoad,
+		MaxRustBuildsPerTarget: *maxRustBuild,
+		CargoBuildJobs:         *cargoJobs,
+		BuildLeaseTimeout:      *buildWait,
+		BuildLeaseStaleAfter:   *buildStale,
 		IssueTriggers: orch.IssueTriggerConfig{
 			BotLogin:      *issueBot,
 			AllowedLogins: splitCSV(*issueAllow),
