@@ -158,6 +158,52 @@ func TestPrepareIsolated_InitsSubmodules(t *testing.T) {
 	}
 }
 
+// TestPrepareIsolated_SkipSubmodulesLeavesThemUninitialized: with
+// SkipSubmodules set (a manager checkout), the superproject is checked out but
+// NO submodule is materialized — that's where prep's minutes go, and a manager
+// only reads the superproject source. The repo files are still present.
+func TestPrepareIsolated_SkipSubmodulesLeavesThemUninitialized(t *testing.T) {
+	hermeticGit(t)
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
+	t.Setenv("GIT_CONFIG_VALUE_0", "always")
+
+	bare, seed := seedBare(t)
+	root := t.TempDir()
+
+	subBare := filepath.Join(root, "sub.git")
+	git(t, root, "init", "--bare", "-b", "main", subBare)
+	subSeed := filepath.Join(root, "subseed")
+	git(t, root, "init", "-b", "main", subSeed)
+	write(t, subSeed, "lib.txt", "from submodule\n")
+	git(t, subSeed, "add", ".")
+	git(t, subSeed, "commit", "-m", "sub commit")
+	git(t, subSeed, "remote", "add", "origin", subBare)
+	git(t, subSeed, "push", "-u", "origin", "main")
+
+	git(t, seed, "submodule", "add", subBare, "vendor/sub")
+	git(t, seed, "commit", "-m", "add submodule")
+	git(t, seed, "push", "origin", "main")
+
+	work := filepath.Join(t.TempDir(), "work")
+	ws := filepath.Join(work, "ws")
+	if err := New().PrepareIsolated(context.Background(), exec.NewLocal(), Spec{
+		WorkRoot: work, RepoURL: bare, Dir: ws, Base: "main", Branch: "mgr",
+		SkipSubmodules: true,
+	}); err != nil {
+		t.Fatalf("prepare (skip submodules): %v", err)
+	}
+
+	// Superproject is present...
+	if _, err := os.Stat(filepath.Join(ws, "README.md")); err != nil {
+		t.Fatalf("superproject should be checked out: %v", err)
+	}
+	// ...but the submodule working tree was never materialized.
+	if _, err := os.Stat(filepath.Join(ws, "vendor", "sub", "lib.txt")); !os.IsNotExist(err) {
+		t.Fatalf("submodule should be left uninitialized, but lib.txt is present (err=%v)", err)
+	}
+}
+
 // TestPrepareIsolated_SkipsOversizedSubmodule: a submodule whose tree is larger
 // than maxEagerSubmoduleFiles is left UNINITIALIZED (not checked out), so prep
 // doesn't pay to materialize bulk test data (denoland/deno's WPT suite, ~160k

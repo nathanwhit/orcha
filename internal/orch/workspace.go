@@ -84,6 +84,12 @@ func (o *Orchestrator) prepareIsolatedOn(ctx context.Context, sess *model.Sessio
 		perr := o.preparer.PrepareIsolated(ctx, ex, workspace.Spec{
 			WorkRoot: target.WorkRoot, RepoURL: cloneURL, Dir: dir, Base: baseRef, Branch: branch,
 			PushURL: pushURL,
+			// A manager only reads the superproject to scope work; it never builds or
+			// runs the suites that live in submodules. Submodule materialization is
+			// the bulk of prep time (minutes on denoland/deno) and it all sits on the
+			// manager's startup critical path, so skip it — the manager comes up in
+			// seconds. Coding workers still get full submodules.
+			SkipSubmodules: sess.Role == model.RoleManager,
 		})
 		if perr != nil {
 			_ = o.st.SetWorkspaceStatus(ws.ID, model.WorkspaceFailed)
@@ -155,7 +161,10 @@ func (o *Orchestrator) ensureWorkspace(ctx context.Context, sess *model.Session,
 	// The manager gets a checkout too, when there is one to give: grounded in
 	// the actual code it scopes work precisely (real file references) instead
 	// of asking the user things the repo answers. Unlike coding workers, no
-	// repo is not an error — it runs from a scratch dir and can ask_user.
+	// repo is not an error — it runs from a scratch dir and can ask_user. Its
+	// checkout skips submodules (prepareIsolatedOn): they're the bulk of prep
+	// time and a manager reads only the superproject, so this keeps manager
+	// startup to seconds instead of minutes.
 	if sess.Role == model.RoleManager {
 		if repo == "" && cloneURL == "" {
 			return nil
