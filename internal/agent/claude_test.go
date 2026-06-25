@@ -183,3 +183,51 @@ func TestClaudeControlArgs_DisablesCoAuthorByline(t *testing.T) {
 		t.Fatalf("expected a settings override disabling the co-author byline, got %q", settings)
 	}
 }
+
+func settingsArg(t *testing.T, args []string) string {
+	t.Helper()
+	for i, a := range args {
+		if a == "--settings" && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	t.Fatalf("no --settings token in %q", args)
+	return ""
+}
+
+// bypassPermissions does NOT auto-approve custom MCP tools (Claude requires MCP
+// tools to be explicitly allowlisted even under bypass), so the orcha tool
+// surface is gated solely by the allowlist. We carry it through BOTH the
+// --allowedTools flag and settings.permissions.allow so a single launch/resume
+// or CLI-wildcard edge can't drop a manager into per-tool permission prompts.
+func TestClaudeControlArgs_AllowedToolsAlsoRideSettingsPermissions(t *testing.T) {
+	args := claudeControlArgs(Spec{
+		PermissionMode: "bypassPermissions",
+		AllowedTools:   []string{"mcp__orcha", "Read"},
+	})
+	var s struct {
+		Permissions struct {
+			Allow []string `json:"allow"`
+		} `json:"permissions"`
+	}
+	if err := json.Unmarshal([]byte(settingsArg(t, args)), &s); err != nil {
+		t.Fatalf("settings is not valid JSON: %v", err)
+	}
+	if got := strings.Join(s.Permissions.Allow, ","); got != "mcp__orcha,Read" {
+		t.Fatalf("settings.permissions.allow = %q, want the AllowedTools list", got)
+	}
+}
+
+// With no AllowedTools there is nothing to pre-approve, so no permissions block
+// is emitted (and the settings stay valid JSON).
+func TestClaudeControlArgs_NoAllowedToolsOmitsPermissions(t *testing.T) {
+	args := claudeControlArgs(Spec{PermissionMode: "default"})
+	settings := settingsArg(t, args)
+	if strings.Contains(settings, "permissions") {
+		t.Fatalf("did not expect a permissions block with no AllowedTools, got %q", settings)
+	}
+	var any map[string]any
+	if err := json.Unmarshal([]byte(settings), &any); err != nil {
+		t.Fatalf("settings is not valid JSON: %v", err)
+	}
+}
