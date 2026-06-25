@@ -86,10 +86,25 @@ func claudeControlArgs(spec Spec) []string {
 		// prompt, which silently became "tool rules" instead of the prompt.
 		args = append(args, "--allowedTools="+strings.Join(spec.AllowedTools, ","))
 	}
-	// Don't stamp orcha's commits and PRs with a "Co-Authored-By: Claude" byline:
-	// the work is the team's, not the model's, and the attribution is noise on the
-	// PR. Injected as an inline settings override so it applies to every session.
-	args = append(args, "--settings", `{"includeCoAuthoredBy":false}`)
+	// Inline settings override applied to every session. Two things ride here:
+	//   - includeCoAuthoredBy:false — don't stamp orcha's commits/PRs with a
+	//     "Co-Authored-By: Claude" byline; the work is the team's, not the model's,
+	//     and the attribution is noise on the PR.
+	//   - permissions.allow mirrors AllowedTools. The --allowedTools flag already
+	//     pre-approves these, but bypassPermissions mode does NOT cover custom MCP
+	//     tools — Claude requires MCP tools to be explicitly allowlisted even under
+	//     bypass — so orcha's whole tool surface (mcp__orcha*) is gated SOLELY by the
+	//     allowlist. Emitting it through settings too is belt-and-suspenders: it is a
+	//     second, independent approval path, so a single launch/resume edge or a CLI
+	//     version whose --allowedTools MCP-wildcard match drifts can't drop a manager
+	//     into per-tool permission prompts (an interactive manager that prompts just
+	//     hangs until a human intervenes).
+	settings := map[string]any{"includeCoAuthoredBy": false}
+	if len(spec.AllowedTools) > 0 {
+		settings["permissions"] = map[string]any{"allow": spec.AllowedTools}
+	}
+	sb, _ := json.Marshal(settings)
+	args = append(args, "--settings", string(sb))
 	return args
 }
 
