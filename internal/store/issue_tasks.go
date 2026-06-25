@@ -40,6 +40,27 @@ func (s *Store) ActiveObjectiveForIssue(repo string, number int) (string, error)
 	return id, err
 }
 
+// IssueForObjective returns the (repo, number) of the issue that produced the
+// objective, or ok=false when the objective wasn't triggered from an issue. Only
+// the trigger that minted the objective has its objective_id set
+// (SetIssueTaskObjective); routed follow-up comments leave objective_id empty, so
+// this resolves to the single source issue.
+func (s *Store) IssueForObjective(objectiveID string) (repo string, number int, ok bool, err error) {
+	if objectiveID == "" {
+		return "", 0, false, nil
+	}
+	err = s.db.QueryRow(
+		`SELECT repo, number FROM issue_tasks WHERE objective_id = ? ORDER BY created_at LIMIT 1`,
+		objectiveID).Scan(&repo, &number)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", 0, false, nil
+	}
+	if err != nil {
+		return "", 0, false, err
+	}
+	return repo, number, true, nil
+}
+
 // SetIssueTaskObjective records which objective a claimed trigger produced.
 func (s *Store) SetIssueTaskObjective(repo string, number int, externalID, objectiveID string) error {
 	_, err := s.db.Exec(

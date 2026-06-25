@@ -8,6 +8,7 @@ import (
 
 	"github.com/nathanwhit/orcha/internal/agent"
 	"github.com/nathanwhit/orcha/internal/forge"
+	"github.com/nathanwhit/orcha/internal/mcp"
 	"github.com/nathanwhit/orcha/internal/model"
 )
 
@@ -71,6 +72,120 @@ func TestIssueTrigger_MentionByAllowedUserCreatesObjective(t *testing.T) {
 	o.SyncIssueTriggers(context.Background())
 	if objs := objectivesForIssue(t, o, 5); len(objs) != 1 {
 		t.Fatalf("dedup failed: %d objectives after second poll", len(objs))
+	}
+}
+
+func TestIssueTrigger_CommentRoutedToActiveManager(t *testing.T) {
+	o, f := issueTriggerOrch(t)
+	addTarget(t, o.st, "local", model.TargetLocal, 4)
+	f.SetIssue("acme/widgets", forge.Issue{
+		Number: 20, Title: "Fix the deadlock", Body: "It hangs.",
+		URL: "https://github.com/acme/widgets/issues/20",
+	})
+
+	// First mention from an allowlisted user spins up the objective + manager.
+	first := forge.IssueComment{IssueNumber: 20, ExternalID: "c1", Author: "alice", Body: "@orcha-bot please fix this"}
+	f.SetIssueComments(first)
+	o.SyncIssueTriggers(context.Background())
+
+	objs := objectivesForIssue(t, o, 20)
+	if len(objs) != 1 {
+		t.Fatalf("want 1 objective for issue #20, got %d", len(objs))
+	}
+	mgr := o.activeManagerFor(objs[0].ID)
+	if mgr == nil {
+		t.Fatal("expected a live manager for the triggered objective")
+	}
+	_, _ = o.st.UpdateSessionStatus(mgr.ID, model.SessionRunning)
+
+	// A coworker leaves a pointer comment WHILE the issue is being worked. The
+	// re-poll lists both comments; c1 is already claimed, c2 is new.
+	second := forge.IssueComment{IssueNumber: 20, ExternalID: "c2", Author: "alice",
+		Body: "@orcha-bot you might want to look into PR #999 first"}
+	f.SetIssueComments(first, second)
+	o.SyncIssueTriggers(context.Background())
+
+	// It must NOT spawn a second objective for the same issue...
+	if got := objectivesForIssue(t, o, 20); len(got) != 1 {
+		t.Fatalf("a comment on an in-flight issue must not duplicate the objective, got %d", len(got))
+	}
+	// ...and it must NOT post another ack comment (routing is not a new trigger).
+	if len(f.IssueComments) != 1 {
+		t.Fatalf("routing a comment should not post another ack, got %+v", f.IssueComments)
+	}
+	// ...the comment is steered to the manager: its body reaches the transcript.
+	msgs, _ := o.st.MessagesAfter(mgr.ID, 0, 50)
+	var routed string
+	for _, m := range msgs {
+		if m.Source == model.MsgUser && strings.Contains(m.Content, "PR #999") {
+			routed = m.Content
+		}
+	}
+	if routed == "" {
+		t.Fatal("the coworker's pointer comment was not routed to the manager")
+	}
+	if !strings.Contains(routed, "@alice") || !strings.Contains(routed, "#20") {
+		t.Fatalf("routed message should attribute the commenter and issue, got %q", routed)
+	}
+
+	// Re-polling the same comments delivers nothing new (claimed once).
+	o.SyncIssueTriggers(context.Background())
+	again, _ := o.st.MessagesAfter(mgr.ID, 0, 50)
+	n := 0
+	for _, m := range again {
+		if m.Source == model.MsgUser && strings.Contains(m.Content, "PR #999") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("the same comment should route exactly once, got %d deliveries", n)
+	}
+}
+
+func TestCommentIssue_PostsToIssueWithMarker(t *testing.T) {
+	o, f := issueTriggerOrch(t)
+	addTarget(t, o.st, "local", model.TargetLocal, 4)
+	f.SetIssue("acme/widgets", forge.Issue{Number: 30, Title: "Bug", Body: "x"})
+	f.SetIssueComments(forge.IssueComment{IssueNumber: 30, ExternalID: "c1", Author: "alice", Body: "@orcha-bot fix it"})
+	o.SyncIssueTriggers(context.Background())
+
+	objs := objectivesForIssue(t, o, 30)
+	if len(objs) != 1 {
+		t.Fatalf("want 1 objective for issue #30, got %d", len(objs))
+	}
+	mgr := o.activeManagerFor(objs[0].ID)
+	if mgr == nil {
+		t.Fatal("expected a live manager")
+	}
+
+	// One ack comment exists from the trigger; the manager now replies on the issue.
+	before := len(f.IssueComments)
+	ctx := mcp.WithSession(context.Background(), mgr.ID)
+	if _, err := o.mcpCommentIssue(ctx, map[string]any{"body": "Thanks — looking into it now."}); err != nil {
+		t.Fatalf("comment_issue: %v", err)
+	}
+	if len(f.IssueComments) != before+1 {
+		t.Fatalf("expected one new issue comment, got %d (was %d)", len(f.IssueComments), before)
+	}
+	last := f.IssueComments[len(f.IssueComments)-1]
+	if last.Number != 30 || !strings.Contains(last.Body, "looking into it") {
+		t.Fatalf("comment not posted to issue #30: %+v", last)
+	}
+	// The bot marker must be appended so the mention monitor never re-ingests it.
+	if !strings.Contains(last.Body, orchaBotMarker) {
+		t.Fatalf("issue comment must carry the bot marker, got %q", last.Body)
+	}
+
+	// The reply resolves to the objective's issue with no number argument: the
+	// manager can only comment on the issue it is working.
+	other, _, _ := o.CreateObjective(NewObjectiveSpec{Title: "manual objective", Prompt: "p"})
+	om := &model.Session{ObjectiveID: other.ID, Role: model.RoleManager, Status: model.SessionRunning}
+	if err := o.st.CreateSession(om); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	octx := mcp.WithSession(context.Background(), om.ID)
+	if _, err := o.mcpCommentIssue(octx, map[string]any{"body": "hi"}); err == nil {
+		t.Fatal("comment_issue on an objective not tied to an issue must error")
 	}
 }
 
