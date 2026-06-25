@@ -326,6 +326,83 @@ func TestPrepareIsolated_SkipsOversizedSubmoduleWarmCache(t *testing.T) {
 	}
 }
 
+// TestPrepareIsolated_SkippedSubmoduleKeepsSuperprojectOnBranch: a skipped
+// oversized submodule must never corrupt the SUPERPROJECT. The skipped submodule
+// is left as an empty placeholder dir with no .git, so a `git -C <sub>` command
+// walks up and resolves to the superproject — and reconcileSubmodulePins must NOT
+// let its `checkout --force <pin>` detach the superproject onto the submodule's
+// pinned commit. Regression for the prod incident where a skipped tests/wpt/suite
+// detached denoland/deno's HEAD onto a WPT commit: the worker committed off its
+// orcha work branch, so the published PR had no commits between base and head and
+// the whole change had to be redone. Reproduces on the SECOND prep, when the cache
+// already carries the oversized submodule's pin object (a local clone hardlinks it
+// into the superproject), the same warm-cache condition production runs under.
+func TestPrepareIsolated_SkippedSubmoduleKeepsSuperprojectOnBranch(t *testing.T) {
+	hermeticGit(t)
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
+	t.Setenv("GIT_CONFIG_VALUE_0", "always")
+
+	defer func(n int) { maxEagerSubmoduleFiles = n }(maxEagerSubmoduleFiles)
+	maxEagerSubmoduleFiles = 2
+
+	bare, seed := seedBare(t)
+	root := t.TempDir()
+	mkSub := func(name string, files []string) string {
+		subBare := filepath.Join(root, name+".git")
+		git(t, root, "init", "--bare", "-b", "main", subBare)
+		subSeed := filepath.Join(root, name+"seed")
+		git(t, root, "init", "-b", "main", subSeed)
+		for _, f := range files {
+			write(t, subSeed, f, "x\n")
+		}
+		git(t, subSeed, "add", ".")
+		git(t, subSeed, "commit", "-m", "seed")
+		git(t, subSeed, "remote", "add", "origin", subBare)
+		git(t, subSeed, "push", "-u", "origin", "main")
+		return subBare
+	}
+	// A kept submodule alongside the skipped one: with only an oversized submodule,
+	// updateSubmodules early-returns (len(keep)==0) before reconcile ever runs, so
+	// the escape can't fire. The real deno repo always has small kept submodules
+	// (std, node_compat) next to the skipped WPT suite — mirror that here.
+	smallBare := mkSub("small", []string{"a.txt"})                   // 1 file  -> kept
+	largeBare := mkSub("large", []string{"a.txt", "b.txt", "c.txt"}) // 3 files -> skipped (>2)
+	git(t, seed, "submodule", "add", smallBare, "vendor/small")
+	git(t, seed, "submodule", "add", largeBare, "vendor/large")
+	git(t, seed, "commit", "-m", "add submodules")
+	git(t, seed, "push", "origin", "main")
+	wantHead := git(t, seed, "rev-parse", "HEAD")
+
+	work := filepath.Join(t.TempDir(), "work")
+	p := New()
+	ctx := context.Background()
+	// First prep warms the cache with the oversized submodule's objects.
+	if err := p.PrepareIsolated(ctx, exec.NewLocal(), Spec{
+		WorkRoot: work, RepoURL: bare, Dir: filepath.Join(work, "ws1"), Base: "main", Branch: "feat1",
+	}); err != nil {
+		t.Fatalf("prep1: %v", err)
+	}
+	// Second prep: the cache now carries the oversized submodule's pin object, so a
+	// reconcile that escapes through the empty submodule dir could actually check it
+	// out in the superproject. It must not — the superproject must stay on its branch.
+	ws2 := filepath.Join(work, "ws2")
+	if err := p.PrepareIsolated(ctx, exec.NewLocal(), Spec{
+		WorkRoot: work, RepoURL: bare, Dir: ws2, Base: "main", Branch: "feat2",
+	}); err != nil {
+		t.Fatalf("prep2: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(ws2, "vendor", "large", "a.txt")); !os.IsNotExist(err) {
+		t.Fatalf("oversized submodule should be skipped (err=%v)", err)
+	}
+	if got := git(t, ws2, "rev-parse", "--abbrev-ref", "HEAD"); got != "feat2" {
+		t.Fatalf("superproject HEAD should stay on work branch feat2, got %q (detached onto submodule pin?)", got)
+	}
+	if got := git(t, ws2, "rev-parse", "HEAD"); got != wantHead {
+		t.Fatalf("superproject HEAD at %q, want base %q (submodule pin leaked into the superproject)", got, wantHead)
+	}
+}
+
 // TestPrepareIsolated_SubmoduleMirrorCache: submodule objects must be served from
 // the per-repo mirror cache, not refetched from the network on every prep. After
 // a prepare, the cache should hold the submodule as a remote and the prepared
