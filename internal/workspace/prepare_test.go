@@ -217,6 +217,69 @@ func TestPrepareIsolated_SkipsOversizedSubmodule(t *testing.T) {
 	}
 }
 
+// TestPrepareIsolated_SkipsOversizedSubmoduleWarmCache: the oversized-submodule
+// skip must still hold on a SECOND prep, when the cache already has the
+// submodule's objects. This guards the selective-warm reorder: we stop
+// re-warming a submodule the cache already shows is oversized (to avoid refetching
+// WPT every prep), so the size decision must still come out "skip" from the warm
+// cache rather than defaulting to "keep" and checking it out.
+func TestPrepareIsolated_SkipsOversizedSubmoduleWarmCache(t *testing.T) {
+	hermeticGit(t)
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
+	t.Setenv("GIT_CONFIG_VALUE_0", "always")
+
+	defer func(n int) { maxEagerSubmoduleFiles = n }(maxEagerSubmoduleFiles)
+	maxEagerSubmoduleFiles = 2
+
+	bare, seed := seedBare(t)
+	root := t.TempDir()
+	mkSub := func(name string, files []string) string {
+		subBare := filepath.Join(root, name+".git")
+		git(t, root, "init", "--bare", "-b", "main", subBare)
+		subSeed := filepath.Join(root, name+"seed")
+		git(t, root, "init", "-b", "main", subSeed)
+		for _, f := range files {
+			write(t, subSeed, f, "x\n")
+		}
+		git(t, subSeed, "add", ".")
+		git(t, subSeed, "commit", "-m", "seed")
+		git(t, subSeed, "remote", "add", "origin", subBare)
+		git(t, subSeed, "push", "-u", "origin", "main")
+		return subBare
+	}
+	smallBare := mkSub("small", []string{"a.txt"})
+	largeBare := mkSub("large", []string{"a.txt", "b.txt", "c.txt"})
+	git(t, seed, "submodule", "add", smallBare, "vendor/small")
+	git(t, seed, "submodule", "add", largeBare, "vendor/large")
+	git(t, seed, "commit", "-m", "add submodules")
+	git(t, seed, "push", "origin", "main")
+
+	work := filepath.Join(t.TempDir(), "work")
+	p := New()
+	ctx := context.Background()
+	// First prep warms the cache with both submodules' objects.
+	if err := p.PrepareIsolated(ctx, exec.NewLocal(), Spec{
+		WorkRoot: work, RepoURL: bare, Dir: filepath.Join(work, "ws1"), Base: "main", Branch: "feat1",
+	}); err != nil {
+		t.Fatalf("prep1: %v", err)
+	}
+	// Second prep: the cache is warm, so the oversized submodule is sized from it
+	// without a re-warm — and must still be skipped.
+	ws2 := filepath.Join(work, "ws2")
+	if err := p.PrepareIsolated(ctx, exec.NewLocal(), Spec{
+		WorkRoot: work, RepoURL: bare, Dir: ws2, Base: "main", Branch: "feat2",
+	}); err != nil {
+		t.Fatalf("prep2: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(ws2, "vendor", "small", "a.txt")); err != nil {
+		t.Fatalf("small submodule should be checked out on warm-cache prep: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(ws2, "vendor", "large", "a.txt")); !os.IsNotExist(err) {
+		t.Fatalf("oversized submodule should stay skipped on warm-cache prep, but a.txt is present (err=%v)", err)
+	}
+}
+
 // TestPrepareIsolated_SubmoduleMirrorCache: submodule objects must be served from
 // the per-repo mirror cache, not refetched from the network on every prep. After
 // a prepare, the cache should hold the submodule as a remote and the prepared

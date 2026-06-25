@@ -128,12 +128,25 @@ func (p *Preparer) updateSubmodules(ctx context.Context, ex exec.Executor, spec 
 	if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "submodule", "init"); err != nil {
 		return fmt.Errorf("workspace: submodule init for %s: %w", spec.Branch, err)
 	}
-	urls := p.submoduleURLs(ctx, ex, spec)
-
 	cache := p.cachePath(spec)
-	for _, u := range urls {
-		// Best-effort: a warm failure just falls back to a network fetch below.
-		p.warmSubmoduleMirror(ctx, ex, cache, u)
+	paths := p.submodulePaths(ctx, ex, spec)
+
+	// Warm each submodule's mirror so the update below sources objects from local
+	// disk — but DON'T re-warm one the cache already shows is oversized (denoland/
+	// deno's WPT suite is ~160k files). It is left out of the checkout anyway
+	// (partitionSubmodulesBySize), so fetching its objects on every prep is pure
+	// waste — the single biggest line item left in a warm-cache prep. A submodule
+	// the cache can't yet size (cold, or a freshly bumped pin) is still warmed, so
+	// it can be counted and, if small, checked out.
+	for _, path := range paths {
+		if n, ok := p.submoduleFileCount(ctx, ex, spec, cache, path); ok &&
+			maxEagerSubmoduleFiles > 0 && n > maxEagerSubmoduleFiles {
+			continue
+		}
+		if url := p.submoduleURLForPath(ctx, ex, spec, path); url != "" {
+			// Best-effort: a warm failure just falls back to a network fetch below.
+			p.warmSubmoduleMirror(ctx, ex, cache, url)
+		}
 	}
 
 	// Don't materialize a submodule whose pinned tree dwarfs the superproject:
@@ -151,7 +164,7 @@ func (p *Preparer) updateSubmodules(ctx context.Context, ex exec.Executor, spec 
 
 	args := []string{"-C", spec.Dir, "submodule", "update", "--init", "--recursive",
 		"--checkout", "--jobs", submoduleJobs}
-	if len(urls) > 0 {
+	if len(paths) > 0 {
 		// The cache holds the submodule objects (warmed above); reference it so the
 		// per-submodule clones source from local disk. Workspaces are wiped each
 		// prep while the cache persists, so the alternate this leaves behind stays
@@ -207,12 +220,34 @@ func (p *Preparer) reconcileSubmodulePins(ctx context.Context, ex exec.Executor,
 	}
 }
 
-// submoduleURLs returns the resolved (absolute) URL of every initialized
-// submodule, read from .git/config after `submodule init`. Returns nil for a
-// repo with no submodules (the --get-regexp exits non-zero on no match, which is
-// the no-submodule case, not a failure).
-func (p *Preparer) submoduleURLs(ctx context.Context, ex exec.Executor, spec Spec) []string {
-	return p.configValues(ctx, ex, "-C", spec.Dir, "config", "--get-regexp", `^submodule\..*\.url$`)
+// submoduleURLForPath returns the resolved (absolute) URL of the submodule whose
+// .gitmodules path is path, read from .git/config after `submodule init`
+// (relative URLs are resolved against origin there). "" when not found. Used to
+// warm only the mirrors we actually intend to keep, instead of all of them.
+func (p *Preparer) submoduleURLForPath(ctx context.Context, ex exec.Executor, spec Spec, path string) string {
+	// Path↔name lives in .gitmodules; the resolved url is copied into .git/config
+	// by `submodule init` (relative urls resolved against origin there).
+	out, err := p.capture(ctx, ex, "-C", spec.Dir, "config", "--file", ".gitmodules", "--get-regexp", `^submodule\..*\.path$`)
+	if err != nil {
+		return ""
+	}
+	name := ""
+	for _, line := range strings.Split(out, "\n") {
+		key, val, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if !ok || strings.TrimSpace(val) != path || !strings.HasPrefix(key, "submodule.") {
+			continue
+		}
+		name = strings.TrimSuffix(strings.TrimPrefix(key, "submodule."), ".path")
+		break
+	}
+	if name == "" {
+		return ""
+	}
+	url, err := p.capture(ctx, ex, "-C", spec.Dir, "config", "--get", "submodule."+name+".url")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(url)
 }
 
 // submodulePaths returns the path of every submodule declared in .gitmodules
@@ -397,9 +432,14 @@ func (p *Preparer) base(ctx context.Context, ex exec.Executor, spec Spec) error 
 	return nil
 }
 
-// run executes a git subcommand and returns combined output.
+// run executes a git subcommand and returns its stdout. It goes through the
+// clean (non-tty) capture path: prep fires dozens of these short commands, and a
+// tty per command both prevents SSH connection reuse (multiplexing is scoped to
+// the non-tty path) and drags the remote login shell in on every call. git emits
+// progress on stderr (folded into the error on failure), so stdout is all the
+// callers here need.
 func (p *Preparer) run(ctx context.Context, ex exec.Executor, dir string, args ...string) (string, error) {
-	out, err := exec.RunCapture(ctx, ex, exec.Command{Dir: dir, Name: p.git(), Args: args})
+	out, err := exec.Capture(ctx, ex, exec.Command{Dir: dir, Name: p.git(), Args: args})
 	if err != nil {
 		return out, fmt.Errorf("%s: %w", strings.TrimSpace(out), err)
 	}
