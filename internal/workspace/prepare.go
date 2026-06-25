@@ -54,6 +54,14 @@ type Spec struct {
 	// guarantee), while its PUSH url becomes PushURL, so a plain
 	// `git push origin <branch>` lands on the fork.
 	PushURL string
+	// SkipSubmodules leaves submodules uninitialized after the checkout. Set for
+	// sessions that only READ the superproject source — managers — never build it
+	// or run the test suites the submodules carry. Materializing submodules is the
+	// dominant cost of preparing a big repo (minutes on denoland/deno: its std,
+	// node_compat and bench suites), so skipping it turns a manager's multi-minute
+	// startup into seconds. A session that ever needs a submodule can still
+	// `git submodule update --init <path>` itself.
+	SkipSubmodules bool
 }
 
 // PrepareIsolated creates a fresh isolated checkout with a new Branch based on
@@ -99,6 +107,12 @@ func (p *Preparer) checkoutNewBranch(ctx context.Context, ex exec.Executor, spec
 	}
 	if _, err := p.run(ctx, ex, "", "-C", spec.Dir, "checkout", "-B", spec.Branch, start); err != nil {
 		return fmt.Errorf("workspace: check out %s at %s: %w", spec.Branch, start, err)
+	}
+	if spec.SkipSubmodules {
+		// Read-only sessions (managers) skip submodule materialization — the
+		// dominant cost of prep and pure dead time on their critical path, since
+		// they never build or run the suites those submodules carry. See Spec.
+		return nil
 	}
 	return p.updateSubmodules(ctx, ex, spec)
 }
