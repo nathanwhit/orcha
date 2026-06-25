@@ -706,6 +706,12 @@ func (o *Orchestrator) RecoverInterrupted() int {
 	if n, err := o.st.DeduplicatePRs(); err == nil && n > 0 {
 		o.audit("", "", "prs_deduped", fmt.Sprintf("removed %d duplicate PR row(s)", n), nil)
 	}
+	// Heal target capacity counters drifted by a crash mid-claim or by managers
+	// becoming capacity-exempt, so a stale available_sessions can't permanently
+	// starve a target. Runs before the scheduler's first tick.
+	if n, err := o.st.ReconcileTargetSlots(); err == nil && n > 0 {
+		o.audit("", "", "target_slots_reconciled", fmt.Sprintf("corrected %d target capacity counter(s)", n), nil)
+	}
 	sessions, err := o.st.RequeueInterruptedSessions()
 	if err != nil || len(sessions) == 0 {
 		return 0
