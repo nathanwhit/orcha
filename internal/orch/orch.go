@@ -70,6 +70,22 @@ type Config struct {
 	// toward the less-loaded target among acceptable ones. 0 disables load-aware
 	// scheduling entirely (no probing, no gate). Stale/missing samples fail open.
 	MaxLoadPerCore float64
+	// MaxRustBuildsPerTarget throttles concurrent Cargo build-like commands for
+	// coding workers on one target by injecting an orcha-owned cargo shim into
+	// PATH. 0 disables the shim. The shim is fail-open: if it cannot acquire a
+	// slot before BuildLeaseTimeout, or if anything about the lock path is broken,
+	// it warns and runs the real cargo anyway.
+	MaxRustBuildsPerTarget int
+	// CargoBuildJobs, when >0, is exported as CARGO_BUILD_JOBS for shimmed cargo
+	// commands unless the worker already set it.
+	CargoBuildJobs int
+	// BuildLeaseTimeout bounds how long a cargo command waits for a build slot
+	// before failing open. Zero uses a conservative default.
+	BuildLeaseTimeout time.Duration
+	// BuildLeaseStaleAfter controls stale slot cleanup. The shim heartbeats held
+	// slots, so this should exceed the heartbeat interval and normal process
+	// stalls, but does not need to exceed the longest build.
+	BuildLeaseStaleAfter time.Duration
 }
 
 // IssueTriggerConfig governs the issue-trigger monitor. BotLogin is the GitHub
@@ -143,6 +159,15 @@ func New(st *store.Store, cfg Config) *Orchestrator {
 	}
 	if cfg.MCPTunnelPort == 0 {
 		cfg.MCPTunnelPort = 18080
+	}
+	if cfg.MaxRustBuildsPerTarget < 0 {
+		cfg.MaxRustBuildsPerTarget = 0
+	}
+	if cfg.BuildLeaseTimeout <= 0 {
+		cfg.BuildLeaseTimeout = 20 * time.Minute
+	}
+	if cfg.BuildLeaseStaleAfter <= 0 {
+		cfg.BuildLeaseStaleAfter = 30 * time.Minute
 	}
 	return &Orchestrator{
 		st:        st,

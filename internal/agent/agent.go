@@ -22,6 +22,9 @@ type Spec struct {
 	Workspace      *model.Workspace
 	Target         *model.Target
 	Metadata       model.JSONMap
+	// Env carries extra KEY=VALUE entries for the session process. Providers
+	// append these to the target's inherited environment.
+	Env []string
 	// MCP maps an MCP server name to its URL (e.g. {"orcha": "http://.../mcp/<id>"}).
 	// Providers that support MCP (Claude) expose these tools to the session.
 	MCP map[string]string
@@ -60,9 +63,9 @@ const (
 	// backpressure — never use it for control decisions.
 	EventProgress EventKind = "progress"
 	EventStdout   EventKind = "stdout"
-	EventStderr     EventKind = "stderr"
-	EventUsage      EventKind = "usage"
-	EventError      EventKind = "error"
+	EventStderr   EventKind = "stderr"
+	EventUsage    EventKind = "usage"
+	EventError    EventKind = "error"
 	// EventDone signals the provider finished; Success indicates the outcome.
 	EventDone EventKind = "done"
 )

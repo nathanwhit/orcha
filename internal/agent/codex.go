@@ -42,7 +42,7 @@ func NewCodex(cfg CodexConfig) *ProcessProvider {
 	build := func(spec Spec) exec.Command {
 		dir := workDirFor(spec)
 		threadID, _ := spec.Metadata["provider_session_id"].(string)
-		return exec.Command{Name: bin, Args: codexArgs(cfg.Model, cfg.ExtraArgs, threadID, spec.PermissionMode, spec.MCP), Dir: dir}
+		return exec.Command{Name: bin, Args: codexArgs(cfg.Model, cfg.ExtraArgs, threadID, spec.PermissionMode, spec.MCP), Dir: dir, Env: spec.Env}
 	}
 	return NewProcessProvider(ProcessConfig{
 		Kind:        model.AgentCodex,

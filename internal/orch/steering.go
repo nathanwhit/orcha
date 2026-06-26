@@ -83,6 +83,7 @@ func (o *Orchestrator) resumeWithSteer(ctx context.Context, sess *model.Session,
 	spec.CompactContext += "\n\nSTEER: " + text
 
 	runCtx, cancel := context.WithCancel(ctx)
+	spec = o.withBuildThrottle(runCtx, sess, tgt, spec)
 	handle, events, err := prov.ResumeSession(runCtx, sess.ID, spec)
 	if err != nil {
 		cancel()

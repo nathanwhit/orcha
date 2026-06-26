@@ -56,14 +56,18 @@ func (c *Controller) run(ctx context.Context, args ...string) (string, error) {
 }
 
 // NewSession creates a detached session named name, starting in dir and running
-// command (its argv). An empty command launches the target's default shell — a
-// real interactive shell. If a session by that name exists it is replaced.
-func (c *Controller) NewSession(ctx context.Context, name, dir string, command []string) error {
+// command (its argv). Env entries are installed into the new tmux session
+// environment. An empty command launches the target's default shell — a real
+// interactive shell. If a session by that name exists it is replaced.
+func (c *Controller) NewSession(ctx context.Context, name, dir string, command, env []string) error {
 	_ = c.KillSession(ctx, name) // ensure a clean slate
 	args := []string{"new-session", "-d", "-s", name,
 		"-x", itoa(c.cols), "-y", itoa(c.rows)}
 	if dir != "" {
 		args = append(args, "-c", dir)
+	}
+	for _, e := range env {
+		args = append(args, "-e", e)
 	}
 	args = append(args, command...) // empty => default shell
 	_, err := c.run(ctx, args...)
