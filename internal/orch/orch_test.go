@@ -2431,8 +2431,8 @@ func TestReclaimWorkspaces_KeepsReviewerCheckoutWithUnmergedCommit(t *testing.T)
 		return ws, path
 	}
 
-	keepWS, keepPath := reviewer("with-commit", true)  // must be kept (unmerged work)
-	dropWS, dropPath := reviewer("no-commit", false)   // safe to reclaim (HEAD == base)
+	keepWS, keepPath := reviewer("with-commit", true) // must be kept (unmerged work)
+	dropWS, dropPath := reviewer("no-commit", false)  // safe to reclaim (HEAD == base)
 
 	o.ReclaimWorkspaces(context.Background())
 

@@ -192,6 +192,38 @@ func (s *Store) SetTargetLoad(id string, loadPerCore float64, memAvailMB int, at
 	return tx.Commit()
 }
 
+// SetTargetDisk records a target's latest sampled work-root free disk into its
+// metadata (free_disk_mb, disk_probed_at) and stamps last_seen_at, preserving any
+// other metadata keys. Used by the disk-guard probe.
+func (s *Store) SetTargetDisk(id string, freeDiskMB int, at time.Time) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var md model.JSONMap
+	err = tx.QueryRow(`SELECT metadata FROM targets WHERE id = ?`, id).Scan(&md)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if md == nil {
+		md = model.JSONMap{}
+	}
+	md["free_disk_mb"] = freeDiskMB
+	md["disk_probed_at"] = at.UTC().Format(time.RFC3339)
+
+	if _, err := tx.Exec(
+		`UPDATE targets SET metadata = ?, last_seen_at = ? WHERE id = ?`, md, at, id,
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // ClaimTargetSlot atomically reserves one session slot on a target. It enforces
 // the scheduling status (only online targets accept new sessions) and capacity
 // limits in a single transaction, so concurrent schedulers cannot oversubscribe
