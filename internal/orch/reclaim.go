@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/nathanwhit/orcha/internal/agent"
 	"github.com/nathanwhit/orcha/internal/exec"
@@ -89,16 +90,31 @@ func (o *Orchestrator) ReclaimWorkspaces(ctx context.Context) {
 //     filled the box (a single failed reviewer's WPT + build checkout was 47G).
 //   - A checkout a pending dependent will inherit (dependents inherit a Ready
 //     isolated checkout, and run only after their dependency is terminal).
-//   - A shared or pr_branch checkout (only WorkspaceIsolated is ever reclaimed here).
+//
+// It also reclaims a pr_branch checkout once its PR is TERMINAL (merged/closed),
+// even while the objective is still active. A terminal PR never gets another
+// follow-up, so its checkout is spent — and a follow-up always pushes its commits
+// to the PR, so a terminal PR's branch has nothing unpushed to lose. This is the
+// exact disk-full incident: a closed PR's multi-GB pr_branch checkout sat on the
+// orch host for hours because the objective stayed active. An OPEN PR's checkout
+// is kept (a new follow-up may reuse it). pr_branch reclaim is PATH-aware: many
+// workspace rows across re-preps share one dir, so a dir a live session still
+// occupies is never yanked. Shared/scratch checkouts are never reclaimed here.
 func (o *Orchestrator) reclaimSpentCheckouts(ctx context.Context, obj *model.Objective, sessions []*model.Session, wss []*model.Workspace, inUse map[string]bool) {
 	// Branches/sessions a PR has already been published from — the signal that an
 	// isolated worker checkout has served its purpose.
 	publishedBranch := map[string]bool{}
 	publishedBySession := map[string]bool{}
+	// Branches whose PR is terminal (merged/closed): their pr_branch checkouts are
+	// spent the moment the PR closes, even mid-objective.
+	terminalPRBranch := map[string]bool{}
 	if prs, err := o.st.ListPRsByObjective(obj.ID); err == nil {
 		for _, pr := range prs {
 			if pr.Branch != "" {
 				publishedBranch[pr.Branch] = true
+				if pr.Status == model.PRMerged || pr.Status == model.PRClosed {
+					terminalPRBranch[pr.Branch] = true
+				}
 			}
 			if pr.CreatedBySessionID != "" {
 				publishedBySession[pr.CreatedBySessionID] = true
@@ -116,39 +132,67 @@ func (o *Orchestrator) reclaimSpentCheckouts(ctx context.Context, obj *model.Obj
 			neededByPendingDependent[dep] = true
 		}
 	}
+	// Paths a live (non-terminal) session still occupies. pr_branch checkouts are
+	// shared by PATH across re-preps (many rows, one on-disk dir), so reclaim must
+	// key on the path, not just the workspace id, or it could rm a dir out from
+	// under a running follow-up that holds a different row on the same path.
+	inUsePaths := map[string]bool{}
+	for _, ws := range wss {
+		if inUse[ws.ID] && ws.Path != "" {
+			inUsePaths[ws.Path] = true
+		}
+	}
 
 	for _, ws := range wss {
-		if inUse[ws.ID] || ws.Kind != model.WorkspaceIsolated || ws.SessionID == "" {
+		if inUse[ws.ID] || ws.SessionID == "" {
 			continue
 		}
 		if neededByPendingDependent[ws.SessionID] {
 			continue
 		}
-		owner, err := o.st.GetSession(ws.SessionID)
-		if err != nil || owner == nil || !owner.Status.IsTerminal() {
-			continue
-		}
-		// Only roles that author their own branch/PR need the publish gate — the
-		// manager might still publish from them. Reviewers, validators and dead
-		// managers never publish, so a terminal one is immediately spent. But a
-		// reviewer is told to commit any fix it makes, and that commit lives ONLY on
-		// this ephemeral checkout's branch — never pushed or merged — so reclaiming
-		// a checkout whose branch advanced past its base would silently destroy it.
-		// Keep it instead; disk is the cheaper loss. (Published-PR checkouts are
-		// exempt: their commits are safely on the PR, which is the whole point of the
-		// publish gate.)
-		if rolePublishesPR(owner.Role) {
-			spent := publishedBySession[ws.SessionID] || (ws.BranchName != "" && publishedBranch[ws.BranchName])
-			if !spent {
+		switch ws.Kind {
+		case model.WorkspaceIsolated:
+			owner, err := o.st.GetSession(ws.SessionID)
+			if err != nil || owner == nil || !owner.Status.IsTerminal() {
 				continue
 			}
-		} else if o.checkoutHasUnmergedCommits(ctx, ws) {
-			o.audit(ws.ObjectiveID, ws.SessionID, "reclaim_skipped_unmerged",
-				"kept "+string(owner.Role)+" checkout: branch has commits not on any published PR",
-				model.JSONMap{"workspace_id": ws.ID, "branch": ws.BranchName})
-			continue
+			// Only roles that author their own branch/PR need the publish gate — the
+			// manager might still publish from them. Reviewers, validators and dead
+			// managers never publish, so a terminal one is immediately spent. But a
+			// reviewer is told to commit any fix it makes, and that commit lives ONLY
+			// on this ephemeral checkout's branch — never pushed or merged — so
+			// reclaiming a checkout whose branch advanced past its base would silently
+			// destroy it. Keep it instead; disk is the cheaper loss. (Published-PR
+			// checkouts are exempt: their commits are safely on the PR, which is the
+			// whole point of the publish gate.)
+			if rolePublishesPR(owner.Role) {
+				spent := publishedBySession[ws.SessionID] || (ws.BranchName != "" && publishedBranch[ws.BranchName])
+				if !spent {
+					continue
+				}
+			} else if o.checkoutHasUnmergedCommits(ctx, ws) {
+				o.audit(ws.ObjectiveID, ws.SessionID, "reclaim_skipped_unmerged",
+					"kept "+string(owner.Role)+" checkout: branch has commits not on any published PR",
+					model.JSONMap{"workspace_id": ws.ID, "branch": ws.BranchName})
+				continue
+			}
+			o.reclaimWorkspace(ctx, ws)
+		case model.WorkspacePRBranch:
+			// Reclaim only when the PR this branch belongs to is terminal
+			// (merged/closed) and no live session still occupies the shared dir. A
+			// follow-up pushes its commits to the PR, so a terminal PR's checkout has
+			// nothing unpushed to lose; an open PR's is kept for a future follow-up.
+			// (checkoutHasUnmergedCommits is deliberately NOT used here: a pr_branch's
+			// BaseSHA is the pre-follow-up PR head, so it reads "has commits" after any
+			// successful pushed follow-up — the terminal-PR gate is the safe signal.)
+			if ws.BranchName == "" || !terminalPRBranch[ws.BranchName] {
+				continue
+			}
+			if inUsePaths[ws.Path] {
+				continue
+			}
+			o.reclaimWorkspace(ctx, ws)
 		}
-		o.reclaimWorkspace(ctx, ws)
 	}
 }
 
@@ -183,6 +227,66 @@ func (o *Orchestrator) checkoutHasUnmergedCommits(ctx context.Context, ws *model
 	default:
 		return head != ws.BaseSHA
 	}
+}
+
+// cacheGCInterval is the minimum time between bare-mirror gc runs on one target.
+// gc repacks a multi-GB mirror, and the mirror only grows slowly, so it runs far
+// less often than checkout reclaim. Throttled per target.
+var cacheGCInterval = 6 * time.Hour
+
+// MaintainCaches runs `git gc` on each schedulable target's bare mirror caches so
+// the shared mirror — fetched into on every checkout — does not grow without
+// bound. It was observed at 21G (~a third of a 74G orch-host disk) because gc
+// never ran: reclaim deliberately leaves the mirror in place (it's reused), but
+// "left in place" silently became "never compacted". gc takes the repo's own
+// gc.pid lock, so it is safe to run while checkouts clone from / fetch into the
+// same mirror; the default prune grace avoids racing a just-created object. It is
+// throttled per target via cacheGCInterval and a no-op without a real preparer.
+func (o *Orchestrator) MaintainCaches(ctx context.Context) {
+	if o.preparer == nil {
+		return // no real checkouts (e.g. unit tests): no mirror to maintain
+	}
+	sub := o.preparer.CacheSubdir
+	if sub == "" {
+		sub = ".orcha-cache"
+	}
+	targets, err := o.st.ListTargets()
+	if err != nil {
+		return
+	}
+	now := o.st.Now()
+	for _, t := range targets {
+		if !t.Status.CanSchedule() || t.WorkRoot == "" {
+			continue
+		}
+		o.cacheGCMu.Lock()
+		last := o.lastCacheGC[t.ID]
+		due := last.IsZero() || now.Sub(last) >= cacheGCInterval
+		if due {
+			o.lastCacheGC[t.ID] = now
+		}
+		o.cacheGCMu.Unlock()
+		if !due {
+			continue
+		}
+		go o.gcTargetCaches(ctx, t, sub)
+	}
+}
+
+// gcTargetCaches runs `git gc` on every bare mirror under a target's cache dir.
+// One generous-timeout shell command per target; failures are non-fatal (the
+// mirror just stays larger until the next pass).
+func (o *Orchestrator) gcTargetCaches(ctx context.Context, t *model.Target, sub string) {
+	cctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	defer cancel()
+	cacheDir := strings.TrimRight(t.WorkRoot, "/") + "/" + sub
+	// Glob the mirrors but quote the dir prefix so an unusual work root can't break
+	// the loop; gc --quiet keeps a clean run silent.
+	script := fmt.Sprintf(`for d in %s/*.git; do [ -d "$d" ] || continue; git -C "$d" gc --quiet 2>/dev/null; done`, shQuote(cacheDir))
+	if _, err := exec.RunCapture(cctx, agent.NewExecutor(t), exec.Command{Name: "sh", Args: []string{"-c", script}}); err != nil {
+		return
+	}
+	o.audit("", "", "cache_gc", "compacted bare mirror cache on "+t.Name, model.JSONMap{"target_id": t.ID})
 }
 
 // rolePublishesPR reports whether a session of this role authors a branch the

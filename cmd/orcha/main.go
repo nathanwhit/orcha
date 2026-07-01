@@ -42,6 +42,7 @@ func main() {
 		realForge    = flag.Bool("real-forge", false, "use the real git+gh forge (needs real workspace checkouts) instead of the in-memory fake")
 		maxConc      = flag.Int("max-concurrent", 32, "max concurrent worker sessions across all targets (managers are exempt; per-target capacity still applies)")
 		maxLoad      = flag.Float64("max-load-per-core", 1.5, "load-aware scheduling: skip a target for new sessions when its 1-min load average per core is at/above this (running sessions are unaffected; 0 disables probing+gating)")
+		minFreeDisk  = flag.Int("min-free-disk-gb", 10, "disk guard: skip a target for new sessions, alert, and force a checkout reclaim when its work-root filesystem has less than this many GB free (running sessions are unaffected; 0 disables). Protects the orch host, whose DB shares the disk with worker checkouts")
 		maxRustBuild = flag.Int("max-rust-builds", 1, "max concurrent cargo build-like commands per target for worker sessions via an injected cargo shim (0 disables; timeout/stale locks fail open)")
 		cargoJobs    = flag.Int("cargo-build-jobs", 0, "when >0, set CARGO_BUILD_JOBS for shimmed cargo build-like commands unless the worker already set it")
 		buildWait    = flag.Duration("build-lease-timeout", 20*time.Minute, "max time a cargo command waits for an orcha build slot before running unthrottled")
@@ -93,6 +94,7 @@ func main() {
 		ManagerMCPBaseURL:      *mcpBase,
 		WorkerPermissionMode:   *workerPerm,
 		MaxLoadPerCore:         *maxLoad,
+		MinFreeDiskMB:          *minFreeDisk * 1024,
 		MaxRustBuildsPerTarget: *maxRustBuild,
 		CargoBuildJobs:         *cargoJobs,
 		BuildLeaseTimeout:      *buildWait,

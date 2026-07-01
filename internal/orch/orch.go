@@ -70,6 +70,15 @@ type Config struct {
 	// toward the less-loaded target among acceptable ones. 0 disables load-aware
 	// scheduling entirely (no probing, no gate). Stale/missing samples fail open.
 	MaxLoadPerCore float64
+	// MinFreeDiskMB is a disk-pressure floor: a target whose work-root filesystem
+	// has less than this many megabytes free is skipped for NEW placement (running
+	// sessions are unaffected), and an alert is emitted plus an immediate checkout
+	// reclaim is kicked. It exists because the orch host's own SQLite database
+	// shares its disk with worker checkouts, so a checkout leak that fills the
+	// volume wedges the whole orchestrator (SQLITE_FULL) rather than degrading one
+	// box — this sheds load and self-heals before 100%. 0 disables the disk guard
+	// (no free-disk probing, no gate). Stale/missing samples fail open, like load.
+	MinFreeDiskMB int
 	// MaxRustBuildsPerTarget throttles concurrent Cargo build-like commands for
 	// coding workers on one target by injecting an orcha-owned cargo shim into
 	// PATH. 0 disables the shim. The shim is fail-open: if it cannot acquire a
@@ -122,6 +131,12 @@ type Orchestrator struct {
 	pokeMu   sync.Mutex           // guards lastPoke
 	lastPoke map[string]time.Time // per-objective last supervisor re-poke time (cooldown)
 
+	diskAlertMu   sync.Mutex           // guards lastDiskAlert
+	lastDiskAlert map[string]time.Time // per-target last disk-pressure alert time (cooldown)
+
+	cacheGCMu   sync.Mutex           // guards lastCacheGC
+	lastCacheGC map[string]time.Time // per-target last bare-mirror gc time (throttle)
+
 	gcMu sync.Mutex // held during a workspace-reclaim pass so passes don't overlap
 
 	scratchMu sync.Mutex // serializes shared-scratch find-or-create so concurrently-starting workers on one objective can't create duplicate rows
@@ -170,13 +185,15 @@ func New(st *store.Store, cfg Config) *Orchestrator {
 		cfg.BuildLeaseStaleAfter = 30 * time.Minute
 	}
 	return &Orchestrator{
-		st:        st,
-		cfg:       cfg,
-		providers: map[model.AgentKind]agent.Provider{},
-		guards:    map[string]*guardState{},
-		runs:      map[string]*run{},
-		tunnels:   map[string]*mcpTunnel{},
-		lastPoke:  map[string]time.Time{},
+		st:            st,
+		cfg:           cfg,
+		providers:     map[model.AgentKind]agent.Provider{},
+		guards:        map[string]*guardState{},
+		runs:          map[string]*run{},
+		tunnels:       map[string]*mcpTunnel{},
+		lastPoke:      map[string]time.Time{},
+		lastDiskAlert: map[string]time.Time{},
+		lastCacheGC:   map[string]time.Time{},
 	}
 }
 

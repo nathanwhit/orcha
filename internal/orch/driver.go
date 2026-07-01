@@ -119,6 +119,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 	defer reconcile.Stop()
 	// Sweep stale checkouts left by a previous process at startup, then on a tick.
 	go s.o.ReclaimWorkspaces(ctx)
+	// Compact the bare mirror caches (throttled per target) so the shared mirror
+	// doesn't grow unbounded.
+	go s.o.MaintainCaches(ctx)
 	// Sample target load before the first placements so they are load-aware from
 	// the start (no-op when load-aware scheduling is disabled).
 	go s.o.ProbeTargetLoads(ctx)
@@ -136,6 +139,8 @@ func (s *Scheduler) Run(ctx context.Context) {
 		case <-gc.C:
 			// Reclaim asynchronously: a remote rm must not stall scheduling.
 			go s.o.ReclaimWorkspaces(ctx)
+			go s.o.MaintainCaches(ctx) // throttled per target inside
+
 		case <-load.C:
 			// Probe asynchronously: a slow/hung SSH probe must not stall scheduling.
 			go s.o.ProbeTargetLoads(ctx)

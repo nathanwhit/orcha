@@ -43,6 +43,10 @@ var notifySpecs = map[string]notifySpec{
 	"workspace_prepare_failed": {title: "Workspace setup failed", tags: []string{"x"}},
 	"target_unreachable":       {title: "Target unreachable", tags: []string{"x"}},
 	"target_bootstrap_failed":  {title: "Target setup failed", tags: []string{"x"}},
+	// Disk guard: a target is low on disk and gating new work. High-signal (the
+	// orch host filling wedges the DB) and rate-limited at the source by
+	// diskAlertCooldown, so it can't become a push storm.
+	"disk_pressure": {title: "Target low on disk", tags: []string{"warning"}},
 	// Note: mcp_tunnel_died is intentionally NOT here — it flaps (see above).
 }
 

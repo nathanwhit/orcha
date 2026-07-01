@@ -72,6 +72,13 @@ func (o *Orchestrator) SelectTarget(req TargetRequest) (*model.Target, error) {
 		if o.overloaded(t, now) {
 			continue
 		}
+		// Disk gate: a box low on work-root disk stops accepting new checkouts, so a
+		// leak parks work (waiting_capacity) instead of filling the volume to 100% —
+		// which on the orch host wedges the DB it shares. Fails open when the disk
+		// guard is off or the sample is missing/stale.
+		if o.diskPressured(t, now) {
+			continue
+		}
 		// Prefer the target with the most free capacity (spread load) and a small
 		// cache-locality bonus, less a penalty for how loaded it currently is.
 		if best == nil || o.targetScore(t, req, now) > o.targetScore(best, req, now) {
